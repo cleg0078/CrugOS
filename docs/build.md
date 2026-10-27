@@ -1,6 +1,6 @@
 # Building CrugOS
 
-This document describes the phase 3B-3 build system: how the kernel, the UEFI
+This document describes the phase 3B-4 build system: how the kernel, the UEFI
 loader and the test disk images are built, which invariants the link must
 preserve, and how to diagnose the failure modes that are specific to this
 toolchain.
@@ -25,11 +25,13 @@ make             # kernel.elf, BOOTX64.EFI and the ESP tree
 make run         # boot the ESP tree under QEMU + OVMF
 make test        # boot, verify markers/version/AVX2, then e2fsck the disk
 make test-raid   # boot a two-member RAID1 root and check both members
+make test-nvme   # boot from an NVMe namespace and check the image
 make test-raid-degraded  # boot RAID1 with one member missing
 make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
 make test-host   # host unit tests for string/printf/ELF/bitmap/VM math/handles
 make disk        # build the GPT/ext4 test disk at build/<arch>/disk.img
 make raid-disks  # build the two GPT/ext4 RAID1 member disks
+make nvme-disk   # build the GPT/ext4 image used by test-nvme
 make check-disk  # e2fsck and persisted-file checks on the current disk
 make size        # kernel size budget (<1 MiB stretch, <2 MiB hard)
 make check-efi   # PE32+ structure checks on the loader
@@ -57,6 +59,7 @@ options` prints the complete resolved set (including paths derived from
 | `REQUIRE_AVX2` | `1` | `0` builds a kernel that boots without AVX2 |
 | `EXPECT_AVX2` | `yes` | what `make test` requires the guest to report (`no` for compat) |
 | `EXPECT_RAID` | `no` | what `make test` requires for RAID: `no`, `healthy` or `degraded` |
+| `EXPECT_NVME` | `no` | what `make test` requires for NVMe (`yes` needs `nvme0n1`) |
 | `CC` | `crugc` | compiler for kernel and loader objects |
 | `LD` | `ld` | linker for the PE32+ loader |
 | `PYTHON` | `python3` | host scripts (boot/disk/EFI checks) |
@@ -67,9 +70,11 @@ options` prints the complete resolved set (including paths derived from
 | `QEMU_DISPLAY` | `none` | `-display` value; `none` keeps runs headless |
 | `QEMU_EXTRA` | empty | extra whitespace-separated QEMU arguments |
 | `BUILD_ROOT` | `build` | output root; `test-compat` uses `build/compat` |
-| `DISK_IMG` | `build/<arch>/disk.img` | raw disk image attached as `vda` |
+| `DISK_IMG` | `build/<arch>/disk.img` | raw disk image attached as `vda`; empty boots without virtio |
 | `DISK_SIZE_MB` | `16` | size of the generated test disk |
 | `RAID_DISK_A/B` | `build/<arch>/raid-a.img`, `raid-b.img` | RAID1 members attached as `vda`/`vdb` |
+| `NVME_IMG` | `build/<arch>/nvme.img` | image attached as an NVMe namespace |
+| `NVME_SERIAL` | `CRUGNVME0` | QEMU NVMe serial reported by OVMF |
 | `EXTRA_DISKS` | empty | space-separated images attached after `DISK_IMG` |
 
 ## Version stamping
@@ -181,6 +186,12 @@ journal fails this gate). `make check-disk` runs only that disk check on the
 existing image. The supported ext4 subset, write path, journal format and
 failure modes are documented in [storage.md](storage.md).
 
+`make test-nvme` regenerates `build/<arch>/nvme.img` with `mkdisk.sh`, boots
+with only `NVME_IMG` attached to QEMU's `nvme` device, requires
+`CRUGOS: nvme ready` plus `nvme0n1`, and then runs `check-disk.py` on the image.
+The driver maps the 64-bit BAR above 4 GiB, disables any controller state left
+by OVMF, creates queues and identifies namespace 1; see [nvme.md](nvme.md).
+
 `make raid-disks` runs [scripts/mkraid.sh](../scripts/mkraid.sh) and
 [scripts/raid-meta.py](../scripts/raid-meta.py) to build two 16 MiB GPT disks
 with one type-`fd00` `crugraid` partition each, identical ext4 data and
@@ -222,6 +233,11 @@ randomisation that leaks into the output will fail this target.
   `MEMORY_MB=512`.
 - **`virtio : queue setup failed`**: the disk was attached as a modern-only
   device or without `disable-modern=on`; use the QEMU flags above.
+- **NVMe timeout or `controller not ready`**: check CSTS at `0x1C` and AQA at
+  `0x24`; a controller left enabled by OVMF must be disabled and RDY polled
+  before the queues are programmed. Create SQ status `0x8201` means the
+  Create CQ/SQ dwords are reversed (queue id low 16, size high 16). See
+  [nvme.md](nvme.md).
 - **`raid   : metadata invalid`**: a member's last two sectors are missing or
   disagree on magic, CRC, geometry, UUID, generation or slot. Regenerate with
   `make raid-disks`; inspect with `scripts/check-raid.py`.

@@ -1,6 +1,7 @@
 #include <crug/storage.h>
 #include <crug/block.h>
 #include <crug/virtio.h>
+#include <crug/nvme.h>
 #include <crug/gpt.h>
 #include <crug/ext4.h>
 #include <crug/journal.h>
@@ -32,8 +33,7 @@ static u32 storage_collect_disks(void)
     u32 count = 0;
 
     for (bd = block_first(); bd && count < STORAGE_MAX_DISKS; bd = bd->next) {
-        if (bd->name[0] != 'v' || bd->name[1] != 'd' || bd->name[2] == 0 ||
-            bd->name[3] != 0)
+        if (bd->sector_size != CRUG_SECTOR_SIZE)
             continue;
         g_disks[count++] = bd;
     }
@@ -156,15 +156,19 @@ static int storage_raid_root(u32 disks)
 
 int storage_init(void)
 {
-    int devices;
+    int virtio_devices;
+    int nvme_devices;
     u32 disks;
     u32 i;
     int ret;
 
     block_init();
-    devices = virtio_blk_init();
-    if (devices <= 0) {
-        kprintf("storage: no virtio block device\n");
+    virtio_devices = virtio_blk_init();
+    kprintf("CRUGOS: virtio ready (%d device(s))\n", virtio_devices);
+    nvme_devices = nvme_init();
+    kprintf("CRUGOS: nvme ready (%d device(s))\n", nvme_devices);
+    if (virtio_devices + nvme_devices <= 0) {
+        kprintf("storage: no block device driver\n");
         return -1;
     }
     disks = storage_collect_disks();

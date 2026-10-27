@@ -1,6 +1,6 @@
 # CrugOS
 
-CrugOS is a small 64-bit operating system written in [Crug](https://github.com/),
+CrugOS is a small 64-bit operating system written in Crug,
 a C dialect with Rust-style ownership and Go-style concurrency. It targets the
 feel of AmigaOS: a compact monolithic kernel, message-passing userspace, a
 Workbench shell and applications that are self-contained bundles.
@@ -8,10 +8,11 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 3B-3 RAID1 (`v0.7.0`)
+## Status: phase 3B-4 NVMe (`v0.8.0`)
 
-Phases 1-3B-3 keep the boot path under a kernel that owns memory, CPU state,
-the execution model, a real crash-consistent filesystem and a mirrored root:
+Phases 1-3B-4 keep the boot path under a kernel that owns memory, CPU state,
+the execution model, a real crash-consistent filesystem, a mirrored root and an
+NVMe transport:
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -93,6 +94,20 @@ Phase 3B-3 mirrors the root filesystem with RAID1:
   test-raid` gates a healthy array and `make test-raid-degraded` gates a
   degraded one, with metadata, `e2fsck` and data-region checks.
 
+Phase 3B-4 adds a polled NVMe driver:
+
+- PCI class `01/08/02` discovery, 64-bit BAR sizing and mapping through generic
+  page tables, including the QEMU BAR at `0xc000000000` above the 4 GiB
+  identity map;
+- the controller is disabled and reset (OVMF may leave it running), then admin
+  and I/O queue pairs are created; Create CQ/SQ use queue id in the low 16 bits
+  and size in the high 16 bits of CDW10, CSTS is at `0x1C` and AQA at `0x24`;
+- namespace 1 is identified and registered as `nvme0n1`; reads, writes and
+  flushes use PRP1/PRP2 or a PRP list with a 1000 ms deadline;
+- `storage_init()` probes virtio-blk and NVMe and mounts `crugroot` (or RAID1)
+  regardless of transport; `make test-nvme` boots with only an NVMe image and
+  runs the same JBD2, writable-ext4 and `e2fsck` gates.
+
 It detects AVX2, enables XSAVE state and, by default, refuses to boot without
 AVX2. Self-tests run at boot, then the kernel prints a boot report to a 16550
 serial port and the framebuffer and exits QEMU deterministically for automated
@@ -101,27 +116,27 @@ testing.
 Verified in this tree:
 
 ```
-CrugOS 0.7.0 (phase 3b3) -- Amiga-inspired microkernel bring-up
+CrugOS 0.8.0 (phase 3b4) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.7.0
-pmm    : 118402 pages (462 MiB), free 118401, bitmap 131072 B
+CRUGOS: version 0.8.0
+pmm    : 118412 pages (462 MiB), free 118411, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
-vm     : 4 GiB identity map, W^X kernel sections, guard=0x000000000013c000
+vm     : 4 GiB identity map, W^X kernel sections, guard=0x000000000013e000
 CRUGOS: vm ready
 CRUGOS: cpu ready
-timer  : 2688128803 Hz (pit), mode=lapic-periodic, 100 Hz tick
+timer  : 2688117989 Hz (pit), mode=lapic-periodic, 100 Hz tick
 CRUGOS: timer ready
 CRUGOS: heap ready
-virtio : blk vda, 32768 sectors, io=0x6080
-virtio : blk vdb, 32768 sectors, io=0x6000
-CRUGOS: block ready (2 device(s))
+CRUGOS: virtio ready (0 device(s))
+nvme   : nvme0n1 32768 sectors, bar=0xc000000000
+CRUGOS: nvme ready (1 device(s))
+CRUGOS: block ready (1 device(s))
+gpt    : 1 partition(s), root 'crugroot' LBA 2048..26623
 CRUGOS: gpt ready
-CRUGOS: raid ready
-CRUGOS: raid healthy (2/2 members)
 CRUGOS: ext4 ready
-CRUGOS: ext4 /hello.txt: hello from ext4
 CRUGOS: journal ready
+CRUGOS: ext4 /hello.txt: hello from ext4
 CRUGOS: storage ready
 CRUGOS: sched ready
 CRUGOS: syscall ready
@@ -129,9 +144,9 @@ CRUGOS: journal selftest ok (1 blocks recovered)
 CRUGOS: writable storage ok
 CRUGOS: selftest ok
 wx     : audit ok, identity map 0..4 GiB, guard unmapped
-heap   : total=61440 B used=10400 B slab_pages=13 large_pages=2
-boot   : pmm=34311 us cpu=482 us vm=730 us traps=391 us timer=65363 us heap=52 us storage=9673 us sched=324 us syscall=118 us total=111447 us
-CRUGOS: phase 3b3 boot ok
+heap   : total=57344 B used=7952 B slab_pages=12 large_pages=2
+boot   : pmm=28666 us cpu=661 us vm=1180 us traps=336 us timer=65338 us heap=47 us storage=10166 us sched=490 us syscall=171 us total=107059 us
+CRUGOS: phase 3b4 boot ok
 ```
 
 Timing and memory values vary with the host and the QEMU CPU model.
@@ -143,6 +158,7 @@ make preflight   # crugc, GNU ld, QEMU, OVMF, python3
 make             # build kernel.elf, BOOTX64.EFI and the ESP tree
 make test        # boot under QEMU/OVMF and verify the boot contract
 make test-raid   # boot a healthy two-member RAID1 root and check both disks
+make test-nvme   # boot from an NVMe namespace and check the image
 make test-raid-degraded  # boot RAID1 with one member missing
 make run         # boot and keep the serial log for inspection
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
@@ -150,6 +166,7 @@ make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handle
 make check-disk  # e2fsck + persisted-file checks on the latest test disk
 make disk        # generate the GPT/ext4 test disk
 make raid-disks  # generate the two RAID1 member disks
+make nvme-disk   # generate the GPT/ext4 image used by test-nvme
 make version     # print the release version from VERSION
 make options     # print every build/QEMU/storage option and its value
 make size        # kernel budget: <1 MiB stretch, <2 MiB hard
@@ -162,7 +179,7 @@ Build artifacts land in `build/x86_64/`; `make run` records
 default in the makefile; `make options` prints the full resolved set. Useful
 variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `QEMU_DISPLAY`, `QEMU_EXTRA`, `OVMF_CODE`, `OVMF_VARS`, `REQUIRE_AVX2`,
-`EXPECT_AVX2`, `EXPECT_RAID` and `MODE`; see [docs/build.md](docs/build.md).
+`EXPECT_AVX2`, `EXPECT_RAID`, `EXPECT_NVME`, `NVME_IMG` and `MODE`; see [docs/build.md](docs/build.md).
 
 ## Repository layout
 
@@ -176,11 +193,11 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/mm/` | physical allocator, W^X page tables, kernel heap |
 | `kernel/block/` | block-device registry, partitions, bounds checks and RAID1 |
 | `kernel/fs/` | GPT, writable ext4, JBD2 journal and the storage boot policy |
-| `drivers/` | PCI and block device drivers (legacy virtio-blk) |
+| `drivers/` | PCI, legacy virtio-blk and NVMe block device drivers |
 | `scripts/` | QEMU runner, disk/RAID image builders, boot/PE/disk/RAID checks, size and reproducibility gates |
 | `tests/host/` | host unit tests for freestanding code |
 | `tools/` | host-side development tools (`gen-font.py`) |
-| `docs/` | [build](docs/build.md), [boot](docs/boot.md), [storage](docs/storage.md), [RAID1](docs/raid.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
+| `docs/` | [build](docs/build.md), [boot](docs/boot.md), [storage](docs/storage.md), [NVMe](docs/nvme.md), [RAID1](docs/raid.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
 
 ## Versioning
 
@@ -217,13 +234,14 @@ See [docs/boot.md](docs/boot.md) for the full handoff ABI and exit protocol.
 
 ## Roadmap
 
-Phases 0, 1, 2, 3A, 3B-1, 3B-2 and 3B-3 are done. Phase 3A covered the block
+Phases 0, 1, 2, 3A, 3B-1, 3B-2, 3B-3 and 3B-4 are done. Phase 3A covered the block
 layer, legacy virtio-blk, GPT and read-only EXT4; phase 3B-1 added the writable
 EXT4 path and an on-disk consistency gate; phase 3B-2 added JBD2 journal replay
-and ordered metadata journaling; phase 3B-3 added a RAID1 root with healthy and
-degraded boots. Remaining phase 3B work is journal/metadata checksums,
+ordered metadata journaling; phase 3B-3 added a RAID1 root with healthy and
+degraded boots; phase 3B-4 added a polled NVMe root path. Remaining phase 3B
+work is journal/metadata checksums,
 `crypt.device` (AES-256-XTS/Argon2id), RAID10/rebuild with a redundant ESP,
-and AHCI/NVMe. Later phases cover USB/audio/graphics, Workbench userspace,
+and AHCI/USB storage. Later phases cover USB/audio/graphics, Workbench userspace,
 SMP/IOMMU and virtualisation. See
 [docs/roadmap.md](docs/roadmap.md) for the full sequence and the known
 specification gaps (Crug syntax, cross-architecture compilers and the OVMF

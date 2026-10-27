@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Verify a CrugOS boot: serial markers, guest version, AVX2 policy, RAID mode and exit code.
+"""Verify a CrugOS boot: serial markers, guest version, AVX2 policy, storage mode and exit code.
 
-usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE [VERSION_FILE [EXPECT_AVX2 [EXPECT_RAID]]]
+usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE \
+    [VERSION_FILE [EXPECT_AVX2 [EXPECT_RAID [EXPECT_NVME]]]]
 """
 
 import re
@@ -25,7 +26,8 @@ REQUIRED_MARKERS = (
     "CRUGOS: writable storage ok",
     "CRUGOS: journal selftest ok",
     "CRUGOS: selftest ok",
-    "CRUGOS: phase 3b3 boot ok",
+    "CRUGOS: nvme ready",
+    "CRUGOS: phase 3b4 boot ok",
 )
 VERSION_PATTERN = re.compile(r"CRUGOS: version (\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?)")
 SUCCESS_EXIT = 33  # isa-debug-exit: port 0xf4 value 0x10 -> (0x10 << 1) | 1
@@ -41,8 +43,9 @@ def fail(message: str, log: str) -> int:
 
 
 def main() -> int:
-    if len(sys.argv) not in (3, 4, 5, 6):
-        print("usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE [VERSION_FILE [EXPECT_AVX2 [EXPECT_RAID]]]",
+    if len(sys.argv) not in (3, 4, 5, 6, 7):
+        print("usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE "
+              "[VERSION_FILE [EXPECT_AVX2 [EXPECT_RAID [EXPECT_NVME]]]]",
               file=sys.stderr)
         return 2
 
@@ -51,6 +54,7 @@ def main() -> int:
     version_path = Path(sys.argv[3]) if len(sys.argv) >= 4 else None
     expect_avx2 = sys.argv[4] if len(sys.argv) >= 5 else "yes"
     expect_raid = sys.argv[5] if len(sys.argv) >= 6 else "no"
+    expect_nvme = sys.argv[6] if len(sys.argv) >= 7 else "no"
 
     if not serial_path.exists():
         return fail(f"missing serial log {serial_path}", "")
@@ -93,6 +97,15 @@ def main() -> int:
         if marker not in text:
             return fail(f"missing serial marker: {marker!r}", text)
 
+    if expect_nvme not in ("no", "yes"):
+        return fail(f"invalid EXPECT_NVME {expect_nvme!r}", text)
+    if expect_nvme == "yes":
+        if "nvme0n1" not in text:
+            return fail("expected an NVMe namespace but the guest did not report nvme0n1", text)
+        match = re.search(r"CRUGOS: nvme ready \((\d+) device", text)
+        if not match or int(match.group(1)) < 1:
+            return fail("expected at least one NVMe block device", text)
+
     raw_exit = exit_path.read_text().strip()
     try:
         status = int(raw_exit)
@@ -102,9 +115,11 @@ def main() -> int:
     if status != SUCCESS_EXIT:
         return fail(f"guest did not exit cleanly: QEMU status {status}", text)
 
-    boot_report = [line for line in text.splitlines() if line.startswith("boot:")]
+    boot_report = [line for line in text.splitlines()
+                   if line.lstrip().startswith("boot") and ":" in line]
     print("ok: boot markers found, version", guest_version,
-          "avx2", expect_avx2, "raid", expect_raid, "QEMU exit status", status)
+          "avx2", expect_avx2, "raid", expect_raid,
+          "nvme", expect_nvme, "QEMU exit status", status)
     for line in boot_report:
         print("  " + line)
     return 0

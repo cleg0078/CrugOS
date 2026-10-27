@@ -7,11 +7,13 @@ scratch directory, then checking the resulting filesystem with e2fsck on the hos
 Phase 3B-2 adds JBD2 journal replay and ordered metadata journaling, and proves
 recovery at mount time. Phase 3B-3 mirrors the root filesystem across two
 virtual disks in a RAID1 array and can boot from a single remaining member.
-Encryption and metadata checksums are later phases.
+Phase 3B-4 adds a polled NVMe driver, so the same GPT/ext4/JBD2 stack can boot
+from an NVMe namespace instead of a legacy virtio-blk disk. Encryption and
+metadata checksums are later phases.
 
 ```
-virtio-blk-pci (legacy I/O BAR)
-  -> drivers/block/virtio_blk.c    block_device "vda" + flush
+virtio-blk-pci (legacy I/O BAR)      NVMe PCIe (class 01/08/02)
+  -> drivers/block/virtio_blk.c        -> drivers/block/nvme.c
   -> kernel/block/block.c          registry, partitions, bounds checks, flush
   -> kernel/fs/gpt.c               GPT header + entries, CRC32
   -> kernel/block/raid.c           optional RAID1 array "md0"
@@ -26,6 +28,8 @@ interrupts are still disabled, and returns 1 on success. The boot order and
 markers are:
 
 ```
+CRUGOS: virtio ready (<n> device(s))
+CRUGOS: nvme ready (<n> device(s))
 CRUGOS: block ready (<n> device(s))
 CRUGOS: gpt ready
 CRUGOS: raid ready                    # RAID root only
@@ -39,8 +43,8 @@ CRUGOS: writable storage ok
 CRUGOS: journal selftest ok (<n> blocks recovered)
 ```
 
-A missing virtio device, an unusable GPT, a bad RAID metadata record or an ext4
-mount failure panics (`storage: ...`) because the phase 3 boot gate expects a
+A missing virtio/NVMe device, an unusable GPT, a bad RAID metadata record or an
+ext4 mount failure panics (`storage: ...`) because the phase 3 boot gate expects a
 root filesystem. The read/write self-test also panics if any write-path
 operation fails, so a broken write path cannot silently boot. The init step time
 is reported as `storage=` in the `boot   :` timing line.
@@ -50,7 +54,8 @@ is reported as `storage=` in the `boot   :` timing line.
 `include/crug/block.h` defines a `block_device`: a 16-byte name, a sector
 count, a 512-byte sector size, read/write/flush callbacks, a private pointer and
 a registry link. Devices register with `block_register()`; legacy virtio disks
-are named `vda`..`vdh`, and an assembled RAID array is `md0`.
+are named `vda`..`vdh`, NVMe namespaces are `nvme0n1`.., and an assembled RAID
+array is `md0`.
 `block_read()` and `block_write()` reject
 out-of-range requests, `block_partition()` creates an offset view that reuses
 the parent device, and `block_flush()` forwards a cache flush to the backing
@@ -97,6 +102,29 @@ on:
 -drive file=<raid-b.img>,if=none,id=disk1,format=raw
 -device virtio-blk-pci,drive=disk1,disable-modern=on
 ```
+
+## NVMe
+
+`drivers/block/nvme.c` discovers controllers by PCI class `01/08/02`, maps
+the (possibly 64-bit, possibly above 4 GiB) BAR through generic page tables,
+disables any controller left enabled by firmware, creates one admin queue and
+one I/O queue pair, identifies namespace 1 and registers it as `nvme0n1`.
+Reads, writes and flushes are polled with a 1000 ms deadline; PRP1/PRP2 and a
+PRP list cover multi-page requests. Queue-creation dwords use queue id in the
+low 16 bits and size in the high 16 bits; CSTS is at `0x1C` and AQA at `0x24`.
+See [nvme.md](nvme.md) for the register map, command encoding, failure modes
+and limits.
+
+QEMU attaches an NVMe namespace with:
+
+```
+-drive file=<nvme.img>,if=none,id=nvme0,format=raw
+-device nvme,drive=nvme0,serial=CRUGNVME0,logical_block_size=512
+```
+
+`make test-nvme` builds the same GPT/ext4 image as `make disk`, boots with only
+the NVMe disk, requires `CRUGOS: nvme ready (1 device(s))` and `nvme0n1`, and
+runs `scripts/check-disk.py` on the image.
 
 ## GPT
 
@@ -260,6 +288,9 @@ partition, runs `e2fsck -fn`, verifies `/hello.txt`, and verifies that the
 journal was checkpointed and cleared: a leftover dirty journal makes
 `e2fsck` fail the gate.
 
+`make nvme-disk` builds `build/x86_64/nvme.img` with the same `mkdisk.sh`
+recipe (GPT `crugroot` plus ext4) for `make test-nvme`.
+
 `make raid-disks` builds two 16 MiB GPT disks with `scripts/mkraid.sh`:
 each has a `crugraid` partition of type `fd00` at LBA 2048..26623, the same
 ext4 image is written to both data regions, and `scripts/raid-meta.py` stamps
@@ -296,6 +327,9 @@ scripts/check-raid.py build/x86_64/raid-a.img build/x86_64/raid-b.img
   Run `scripts/check-raid.py` on the images.
 - `CRUGOS: raid degraded` on a two-disk test: one virtio device did not appear
   or its metadata was rejected; the serial log lists the devices found.
+- `nvme   : controller not ready` or an NVMe timeout: CSTS/AQA offsets,
+  firmware leaving the controller enabled, or a BAR above 4 GiB not mapped by
+  the generic page-table path; see [nvme.md](nvme.md).
 - `storage: no usable GPT partition` with `fd00` disks: the partition type or
   name is wrong, or `mkraid.sh` was not run.
 - `storage: writable test failed`: the read/write self-test failed; the serial
@@ -313,9 +347,12 @@ scripts/check-raid.py build/x86_64/raid-a.img build/x86_64/raid-b.img
 
 ## Known limits
 
-- Up to eight legacy virtio-blk disks; no AHCI, NVMe, USB storage or hotplug.
-- Polled, one-sector-at-a-time I/O with no request merging, no interrupts and
-  no DMA address translation (identity map only).
+- Up to eight legacy virtio-blk disks and up to four NVMe controllers with one
+  namespace each; no AHCI, USB storage or hotplug.
+- Polled I/O with no request merging, no interrupts and no DMA address
+  translation (identity map for virtio; NVMe PRPs point at identity-mapped
+  bounce pages). Virtio issues one sector per request; NVMe issues one command
+  per block call.
 - GPT only: no MBR boot disks, no backup-table repair and no partition
   creation.
 - ext4 has JBD2 replay and ordered metadata journaling, but no journal

@@ -83,6 +83,43 @@ int pci_find_nth(u16 vendor, u16 device, int index, u8 *bus, u8 *dev, u8 *fn)
     return pci_find_common(vendor, device, index, bus, dev, fn);
 }
 
+int pci_find_class_nth(u8 class_code, u8 subclass, u8 prog_if, int index,
+                       u8 *bus, u8 *dev, u8 *fn)
+{
+    u32 b, d, f;
+    int seen = 0;
+
+    if (index < 0)
+        return 0;
+    for (b = 0; b < 256; b++) {
+        for (d = 0; d < 32; d++) {
+            u16 v = pci_read16((u8)b, (u8)d, 0, 0x00);
+            u8 header;
+
+            if (v == 0xFFFFu)
+                continue;
+            header = pci_read8((u8)b, (u8)d, 0, 0x0E);
+            for (f = 0; f < ((header & 0x80u) ? 8u : 1u); f++) {
+                u32 cls = pci_read32((u8)b, (u8)d, (u8)f, 0x08);
+
+                if ((u8)(cls >> 24) != class_code)
+                    continue;
+                if ((u8)(cls >> 16) != subclass)
+                    continue;
+                if ((u8)(cls >> 8) != prog_if)
+                    continue;
+                if (seen++ != index)
+                    continue;
+                if (bus) *bus = (u8)b;
+                if (dev) *dev = (u8)d;
+                if (fn) *fn = (u8)f;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 void pci_enable(u8 bus, u8 dev, u8 fn, u16 bits)
 {
     u16 cmd = pci_read16(bus, dev, fn, 0x04);

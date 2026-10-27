@@ -9,6 +9,8 @@ set -euo pipefail
 : "${EXIT_CODE_FILE:?EXIT_CODE_FILE is required}"
 DISK_IMG=${DISK_IMG:-}
 EXTRA_DISKS=${EXTRA_DISKS:-}
+NVME_DISK=${NVME_DISK:-}
+NVME_SERIAL=${NVME_SERIAL:-CRUGNVME0}
 
 QEMU=${QEMU:-qemu-system-x86_64}
 OVMF_CODE=${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}
@@ -70,6 +72,16 @@ if [[ -n "$DISK_IMG" ]]; then
                -device "virtio-blk-pci,drive=disk0,disable-modern=on")
 fi
 
+NVME_ARGS=()
+if [[ -n "$NVME_DISK" ]]; then
+    if [[ ! -r "$NVME_DISK" ]]; then
+        echo "run-qemu: missing NVMe image $NVME_DISK" >&2
+        exit 1
+    fi
+    NVME_ARGS=(-drive "file=$NVME_DISK,if=none,id=nvme0,format=raw" \
+               -device "nvme,drive=nvme0,serial=$NVME_SERIAL,logical_block_size=512")
+fi
+
 index=1
 for extra in $EXTRA_DISKS; do
     if [[ ! -r "$extra" ]]; then
@@ -81,7 +93,7 @@ for extra in $EXTRA_DISKS; do
     index=$((index + 1))
 done
 
-echo "run-qemu: booting $ESP_DIR (${MEMORY_MB} MiB, ${SMP} vCPU, cpu ${QEMU_CPU:-default}, accel ${QEMU_ACCEL:-default}, display ${QEMU_DISPLAY}, disk ${DISK_IMG:-none}, extra ${EXTRA_DISKS:-none}, timeout ${TIMEOUT_SEC}s)"
+echo "run-qemu: booting $ESP_DIR (${MEMORY_MB} MiB, ${SMP} vCPU, cpu ${QEMU_CPU:-default}, accel ${QEMU_ACCEL:-default}, display ${QEMU_DISPLAY}, disk ${DISK_IMG:-none}, extra ${EXTRA_DISKS:-none}, nvme ${NVME_DISK:-none}, timeout ${TIMEOUT_SEC}s)"
 set +e
 TMPDIR="$TMPDIR" timeout --foreground "$TIMEOUT_SEC" "$QEMU" \
     -machine q35 \
@@ -93,6 +105,7 @@ TMPDIR="$TMPDIR" timeout --foreground "$TIMEOUT_SEC" "$QEMU" \
     -drive if=pflash,format=raw,unit=1,file="$VARS_COPY" \
     -drive file=fat:rw:"$ESP_DIR",format=raw,media=disk \
     "${DISK_ARGS[@]}" \
+    "${NVME_ARGS[@]}" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -display "$QEMU_DISPLAY" \
     -serial "file:$SERIAL_LOG" \

@@ -7,7 +7,8 @@ timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
 IPC and syscalls); phase 3A adds a working block/GPT/ext4 read-only path to a
 real disk; phase 3B-1 makes that filesystem writable and gates it on
 `e2fsck`; phase 3B-2 adds JBD2 journal replay and ordered metadata journaling;
-phase 3B-3 mirrors the root across two disks and boots from a degraded array.
+phase 3B-3 mirrors the root across two disks and boots from a degraded array;
+phase 3B-4 adds a polled NVMe root path.
 Every later phase keeps the same BootInfo contract, so the loader does not
 change for memory management, storage, SMP or drivers.
 
@@ -120,11 +121,23 @@ change for memory management, storage, SMP or drivers.
   a one-member boot, and `check-raid.py` validates metadata, `e2fsck` and
   data-region equality.
 
+## Phase 3B-4 - NVMe (done)
+
+- Polled NVMe driver for PCI class `01/08/02`: 64-bit (possibly above 4 GiB)
+  BAR sizing and mapping through generic page tables, controller disable/reset,
+  admin queue, one I/O queue pair, identify namespace 1.
+- Read, write and flush commands with PRP1/PRP2/PRP-list bounce buffers and a
+  1000 ms deadline; namespace registered as `nvme0n1`.
+- `storage_init()` probes virtio-blk and NVMe, parses every GPT and mounts a
+  `crugroot` partition (or RAID1) regardless of the transport.
+- `make test-nvme` boots with only an NVMe image, requires `nvme ready` and
+  `nvme0n1`, and runs the same JBD2/writable-ext4 self-tests plus `e2fsck`.
+
 ## Phase 3B - remaining storage work
 
 - Journal and metadata checksums; multi-descriptor transactions and journal
   wrapping.
-- AHCI and NVMe drivers, hotplug and more than eight block devices.
+- AHCI and USB storage drivers, hotplug and more than four NVMe controllers.
 - RAID10, online rebuild, hot spare, scrub and a write-intent bitmap.
 - `crypt.device` with AES-256-XTS and Argon2id key derivation.
 - Redundant ESP and a recovery path.

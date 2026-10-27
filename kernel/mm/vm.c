@@ -27,17 +27,40 @@ static void *alloc_table(void)
     return pmm_phys_to_virt(pa);
 }
 
-static int split_huge(u64 va)
+static int vm_canonical(u64 va)
 {
-    u64 *pd = g_pd[vm_pdpt_index(va)];
-    u64 entry = pd[vm_pd_index(va)];
+    u64 top = va >> 48;
+
+    if (va & (1ull << 47))
+        return top == 0xffffu;
+    return top == 0;
+}
+
+static u64 *next_table(u64 *table, u64 index, int create)
+{
+    u64 entry = table[index];
+    u64 *next;
+
+    if (entry & VM_PRESENT) {
+        if (entry & VM_HUGE)
+            return 0;
+        return (u64 *)pmm_phys_to_virt(entry & VM_ADDR_MASK);
+    }
+    if (!create)
+        return 0;
+    next = (u64 *)alloc_table();
+    table[index] = pmm_virt_to_phys(next) | VM_PRESENT | VM_WRITE;
+    return next;
+}
+
+static int split_huge_pd(u64 *pd, u64 index)
+{
+    u64 entry = pd[index];
     u64 flags, base;
     u64 *pt;
     int i;
 
-    if (!(entry & VM_PRESENT))
-        return -1;
-    if (!(entry & VM_HUGE))
+    if (!(entry & VM_PRESENT) || !(entry & VM_HUGE))
         return 0;
 
     pt = (u64 *)alloc_table();
@@ -47,23 +70,29 @@ static int split_huge(u64 va)
     for (i = 0; i < 512; i++)
         pt[i] = (base + (u64)i * CRUG_PAGE_SIZE) | flags;
     /* NX belongs on leaf entries; keep page-table references executable-clean. */
-    pd[vm_pd_index(va)] = pmm_virt_to_phys(pt) | (flags & ~(VM_HUGE | VM_NX));
+    pd[index] = pmm_virt_to_phys(pt) | (flags & ~(VM_HUGE | VM_NX));
     return 0;
 }
 
 static u64 *pte_for(u64 va)
 {
-    u64 *pd, *pt, entry;
+    u64 *pdpt, *pd, *pt;
 
-    if (va >= CRUG_4GIB)
+    if (!vm_canonical(va))
         return 0;
-    if (split_huge(va) != 0)
+    pdpt = next_table(g_pml4, vm_pml4_index(va), 1);
+    if (!pdpt)
         return 0;
-    pd = g_pd[vm_pdpt_index(va)];
-    entry = pd[vm_pd_index(va)];
-    if (!(entry & VM_PRESENT) || (entry & VM_HUGE))
+    pd = next_table(pdpt, vm_pdpt_index(va), 1);
+    if (!pd)
         return 0;
-    pt = (u64 *)pmm_phys_to_virt(entry & VM_ADDR_MASK);
+    if (pd[vm_pd_index(va)] & VM_HUGE) {
+        if (split_huge_pd(pd, vm_pd_index(va)) != 0)
+            return 0;
+    }
+    pt = next_table(pd, vm_pd_index(va), 1);
+    if (!pt)
+        return 0;
     return &pt[vm_pt_index(va)];
 }
 
@@ -151,7 +180,7 @@ int vm_map_page(u64 va, u64 pa, u64 flags)
 
     if ((va & (CRUG_PAGE_SIZE - 1)) != 0 || (pa & (CRUG_PAGE_SIZE - 1)) != 0)
         return -1;
-    if (va >= CRUG_4GIB || pa >= CRUG_4GIB)
+    if (!vm_canonical(va) || (pa & ~VM_ADDR_MASK) != 0)
         return -1;
     p = pte_for(va);
     if (!p)
@@ -202,14 +231,16 @@ u64 vm_translate(u64 va)
 {
     u64 *pdpt, *pd, *pt, e;
 
-    if (va >= CRUG_4GIB)
+    if (!vm_canonical(va))
         return 0;
-    if (!(g_pml4[vm_pml4_index(va)] & VM_PRESENT))
+    e = g_pml4[vm_pml4_index(va)];
+    if (!(e & VM_PRESENT) || (e & VM_HUGE))
         return 0;
-    pdpt = (u64 *)pmm_phys_to_virt(g_pml4[vm_pml4_index(va)] & VM_ADDR_MASK);
-    if (!(pdpt[vm_pdpt_index(va)] & VM_PRESENT))
+    pdpt = (u64 *)pmm_phys_to_virt(e & VM_ADDR_MASK);
+    e = pdpt[vm_pdpt_index(va)];
+    if (!(e & VM_PRESENT) || (e & VM_HUGE))
         return 0;
-    pd = (u64 *)pmm_phys_to_virt(pdpt[vm_pdpt_index(va)] & VM_ADDR_MASK);
+    pd = (u64 *)pmm_phys_to_virt(e & VM_ADDR_MASK);
     e = pd[vm_pd_index(va)];
     if (!(e & VM_PRESENT))
         return 0;

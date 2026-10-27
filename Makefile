@@ -8,6 +8,7 @@
 #   make disk       build the GPT/ext4 test disk
 #   make check-disk run e2fsck and file checks on the test disk
 #   make test-raid  boot RAID1 (two members) and verify member disks
+#   make test-nvme   boot from an NVMe namespace and verify the disk
 #   make test-raid-degraded  boot RAID1 with one member missing
 #   make size       enforce the kernel size budget
 #   make check-efi  validate the loader as a PE32+ EFI application
@@ -42,6 +43,7 @@ REQUIRE_AVX2 ?= 1
 QEMU_CPU ?= qemu64,+avx,+avx2
 EXPECT_AVX2 ?= yes
 EXPECT_RAID ?= no
+EXPECT_NVME ?= no
 
 # QEMU / firmware options.
 MEMORY_MB ?= 512
@@ -84,6 +86,8 @@ DISK_IMG ?= $(BUILD)/disk.img
 DISK_SIZE_MB ?= 16
 RAID_DISK_A ?= $(BUILD)/raid-a.img
 RAID_DISK_B ?= $(BUILD)/raid-b.img
+NVME_IMG ?= $(BUILD)/nvme.img
+NVME_SERIAL ?= CRUGNVME0
 EXTRA_DISKS ?=
 
 ifeq ($(MODE),debug)
@@ -119,8 +123,8 @@ LOADER_SOURCES := $(wildcard boot/efi/*.c)
 LOADER_OBJECTS := $(patsubst %,$(OBJ)/%.o,$(basename $(LOADER_SOURCES)))
 LOADER_DEPS := $(LOADER_OBJECTS:.o=.d)
 
-.PHONY: all kernel loader esp disk raid-disks run test test-compat test-raid test-raid-degraded \
-        check-disk size check-efi repro test-host preflight version options clean distclean help
+.PHONY: all kernel loader esp disk raid-disks nvme-disk run test test-compat test-raid test-raid-degraded \
+        test-nvme check-disk size check-efi repro test-host preflight version options clean distclean help
 
 all: esp
 
@@ -178,8 +182,15 @@ raid-disks: scripts/mkraid.sh scripts/raid-meta.py
 	$(Q)scripts/mkraid.sh $(RAID_DISK_A) $(RAID_DISK_B)
 	@echo "  RAID  $(RAID_DISK_A) $(RAID_DISK_B)"
 
+nvme-disk: scripts/mkdisk.sh
+	$(Q)rm -f $(NVME_IMG)
+	$(Q)scripts/mkdisk.sh $(NVME_IMG) $(DISK_SIZE_MB)
+	@echo "  NVME  $(NVME_IMG)"
+
 run: esp
-	@test -f $(DISK_IMG) || $(MAKE) --no-print-directory disk
+	@if [ -n "$(DISK_IMG)" ] && [ ! -f "$(DISK_IMG)" ]; then \
+		$(MAKE) --no-print-directory disk; \
+	fi
 	@mkdir -p $(BUILD)/tmp
 	$(Q)TMPDIR=$(abspath $(BUILD)/tmp) ESP_DIR=$(abspath $(ESP)) \
 		SERIAL_LOG=$(abspath $(SERIAL_LOG)) DEBUG_LOG=$(abspath $(DEBUG_LOG)) \
@@ -188,13 +199,15 @@ run: esp
 		MEMORY_MB="$(MEMORY_MB)" SMP="$(SMP)" TIMEOUT_SEC="$(TIMEOUT_SEC)" \
 		QEMU_CPU="$(QEMU_CPU)" QEMU_ACCEL="$(QEMU_ACCEL)" \
 		QEMU_DISPLAY="$(QEMU_DISPLAY)" QEMU_EXTRA="$(QEMU_EXTRA)" \
-		DISK_IMG=$(abspath $(DISK_IMG)) EXTRA_DISKS="$(EXTRA_DISKS)" \
+		DISK_IMG=$(if $(DISK_IMG),$(abspath $(DISK_IMG)),) \
+		NVME_DISK=$(if $(NVME_DISK),$(abspath $(NVME_DISK)),) \
+		NVME_SERIAL="$(NVME_SERIAL)" EXTRA_DISKS="$(EXTRA_DISKS)" \
 		scripts/run-qemu.sh
 
 test:
 	$(Q)rm -f $(DISK_IMG)
 	$(Q)$(MAKE) --no-print-directory run
-	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" "$(EXPECT_RAID)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" "$(EXPECT_RAID)" "$(EXPECT_NVME)"
 	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 
 test-compat:
@@ -202,16 +215,23 @@ test-compat:
 
 test-raid: esp raid-disks
 	$(Q)$(MAKE) --no-print-directory run DISK_IMG=$(RAID_DISK_A) EXTRA_DISKS=$(RAID_DISK_B)
-	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" healthy
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" healthy "$(EXPECT_NVME)"
 	$(Q)$(PYTHON) scripts/check-raid.py $(RAID_DISK_A) $(RAID_DISK_B)
 
 test-raid-degraded: esp raid-disks
 	$(Q)$(MAKE) --no-print-directory run DISK_IMG=$(RAID_DISK_A)
-	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" degraded
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" degraded "$(EXPECT_NVME)"
 	$(Q)$(PYTHON) scripts/check-raid.py $(RAID_DISK_A)
 
+test-nvme: esp nvme-disk
+	$(Q)$(MAKE) --no-print-directory run DISK_IMG= NVME_DISK=$(NVME_IMG)
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" no yes
+	$(Q)$(PYTHON) scripts/check-disk.py $(NVME_IMG)
+
 check-disk:
-	@test -f $(DISK_IMG) || $(MAKE) --no-print-directory disk
+	@if [ -n "$(DISK_IMG)" ] && [ ! -f "$(DISK_IMG)" ]; then \
+		$(MAKE) --no-print-directory disk; \
+	fi
 	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 
 size: $(KERNEL)
@@ -248,6 +268,7 @@ options:
 	@printf '  %-16s %s\n' QEMU_CPU "$(QEMU_CPU)"
 	@printf '  %-16s %s\n' EXPECT_AVX2 "$(EXPECT_AVX2)"
 	@printf '  %-16s %s\n' EXPECT_RAID "$(EXPECT_RAID)"
+	@printf '  %-16s %s\n' EXPECT_NVME "$(EXPECT_NVME)"
 	@printf '  %-16s %s\n' MEMORY_MB "$(MEMORY_MB)"
 	@printf '  %-16s %s\n' SMP "$(SMP)"
 	@printf '  %-16s %s\n' TIMEOUT_SEC "$(TIMEOUT_SEC)"
@@ -260,6 +281,8 @@ options:
 	@printf '  %-16s %s\n' DISK_SIZE_MB "$(DISK_SIZE_MB)"
 	@printf '  %-16s %s\n' RAID_DISK_A "$(RAID_DISK_A)"
 	@printf '  %-16s %s\n' RAID_DISK_B "$(RAID_DISK_B)"
+	@printf '  %-16s %s\n' NVME_IMG "$(NVME_IMG)"
+	@printf '  %-16s %s\n' NVME_SERIAL "$(NVME_SERIAL)"
 	@printf '  %-16s %s\n' EXTRA_DISKS "$(EXTRA_DISKS)"
 	@printf '  %-16s %s\n' BUILD "$(BUILD)"
 	@printf '  %-16s %s\n' KERNEL "$(KERNEL)"
