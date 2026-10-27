@@ -250,7 +250,15 @@ table into the heap and allows these operations:
 Writes use the extent tree only. A newly created file has an inline extent root;
 the first overflow allocates one leaf block and turns the root into a depth-1
 index (no depth-2 growth yet). The legacy direct/single-indirect mapping is
-read-only. There is no checksum metadata and no delayed allocation.
+read-only. There is no delayed allocation.
+
+Because the filesystem carries `metadata_csum`, every write path that touches a
+checksummed structure recomputes its checksum instead of patching it: inode
+checksums come from `ext4_inode_set_csum()`, bitmaps and group descriptors are
+re-summed after allocation, and both the adding and the removing directory
+paths end in `ext4_dir_set_tail()` so a directory block is never written with a
+stale tail (that tail chains the inode generation as well as the block). See
+[checksums.md](checksums.md) for the field offsets.
 
 Every public write call runs inside one journal transaction: the wrapper calls
 `journal_begin()`, runs the existing `*_impl` operation, then commits. Nested
@@ -271,6 +279,8 @@ descriptor, directory and extent leaf) are queued in the journal.
 - `mkdir` and `rmdir` maintain the group descriptor's `used_dirs_count`, and
   every directory add or remove writes the parent inode so link counts and
   sizes survive a remount.
+- `bg_itable_unused` shrinks when an inode inside the untouched tail is
+  allocated, so the unused-inode area never claims a live inode.
 - Group descriptor free counters and the superblock free counts/state are
   written back; `ext4_umount()` marks the filesystem clean and flushes it
   after the final journal commit succeeds. If that commit fails the
@@ -280,42 +290,73 @@ descriptor, directory and extent leaf) are queued in the journal.
 
 ## JBD2 journal
 
-The journal is the standard JBD2 JBD2_V2 layout stored in inode 8 and mapped
-through the normal extent path. All journal fields are big-endian.
+The journal is the standard JBD2 layout stored in inode 8 and mapped through the
+normal extent path. All journal fields are big-endian. The writer and the replay
+path support the three on-disk tag formats (legacy 8 bytes, checksum v2 and
+checksum v3 16-byte tags) and pick one from the journal superblock, so an image
+formatted by mke2fs without checksums still mounts.
 
 | Item | Value |
 | --- | --- |
-| Superblock | block 0, magic `0xC03B3998`, type 4 |
-| Descriptor block | type 1, tags of block number + flags + 16-byte UUID |
-| Commit block | type 2, same sequence as the descriptor |
+| Superblock | block 0, magic `0xC03B3998`, type 4, 1024 bytes |
+| Descriptor block | type 1, header + tags + 16-byte UUID + optional 4-byte tail |
+| Commit block | type 2, same sequence, checksum at byte 16 |
 | Sequence | superblock bytes 24..27; start block bytes 28..31 |
-| Feature flags | 0, so no journal checksums and no 64-bit block numbers |
+| Checksum type | byte 0x50 must be 4 (`JBD2_CRC32C_CHKSUM`) when enabled |
+| Checksum | crc32c over the 1024-byte superblock at byte 0xFC |
 
-`journal_open()` validates the magic, block size, `maxlen`, `first` and
-start range, then replays a dirty log. Recovery reads the descriptor at
-`s_start`, parses tags until `JBD2_FLAG_LAST_TAG`, validates the following
-commit block *before* writing any data, applies every data block with raw
-device writes, advances to the next sequence, and finally clears `s_start`.
-An incomplete or corrupt transaction is not applied; the journal is cleared so
-the filesystem can be mounted again.
+When `s_feature_incompat` bit 0x10 (`CSUM_V3`) is set, the writer emits v3
+tags: big-endian block number at 0, flags at 4, high block number at 8 and a
+32-bit checksum at 12. Bit 0x8 (`CSUM_V2`) selects 2-byte checksums with the
+legacy 8-byte tag plus the checksum. Bit 0x2 enables 64-bit block numbers.
+The journal superblock itself is checksummed, so a torn log header is detected
+before any block is applied.
+
+`journal_open()` validates the magic, block size, `maxlen`, `first`, the
+start range and the feature flags (revoke and async-commit journals are
+rejected), verifies the superblock checksum when checksums are enabled, and then
+replays a dirty log. Recovery reads the descriptor chain at `s_start`, collects
+the tag list, validates the checksum of every queued data block, validates the
+following commit block *before* writing any data, applies the transaction with
+raw device writes, advances to the next sequence and finally clears `s_start`.
+A descriptor chain that ends without a commit is discarded and treated as the
+end of the log; a checksum mismatch is fatal and leaves `s_start` untouched so a
+later boot can retry instead of silently dropping committed metadata.
 
 The writer (`journal_commit`) is ordered:
 
 1. flush the device so file data blocks are durable;
-2. set `s_start = first` and `s_sequence` in the journal superblock;
-3. write one descriptor block, the queued metadata blocks and a commit block;
-4. flush, then checkpoint the metadata to its final location;
-5. flush, clear `s_start` and increment `s_sequence`.
+2. set `s_start = first` and `s_sequence` in the journal superblock (with its
+   checksum recomputed);
+3. write descriptor blocks and their queued metadata blocks, chunked so that
+   every descriptor fits one journal block, with the 16-byte UUID after the
+   first tag and `LAST_TAG` on the last tag of each chunk;
+4. write one commit block carrying the checksum of the whole block;
+5. flush, then checkpoint the metadata to its final location;
+6. flush, clear `s_start` and increment `s_sequence`.
 
-A transaction is limited to one descriptor: at most `(block_size - 12) / 24`
-metadata blocks (42 for 1 KiB blocks). This keeps replay's one-descriptor
-validation simple; operations that would exceed it fail instead of emitting a
-transaction the replay path cannot drain.
+A transaction may span several descriptors: each holds at most
+`(block_size - 12 - 16 - 4) / tag_bytes` blocks (62 for 1 KiB v3 tags), and the
+whole chain plus the commit block must fit in the journal
+(`chunks + blocks + 1 <= maxlen - 1`). The superblock write is journaled like
+any other metadata block, so a transaction that updates allocation counters and
+inodes commits atomically.
 
 `CRUGOS: journal selftest ok` is printed after the write self-test queues a
 dirty data block, unmounts *without* clearing the journal, remounts read-write
 and verifies that `journal_open()` recovered the block. The host `e2fsck`
 gate then confirms the resulting filesystem is clean.
+
+The crash gates exercise the checksummed path directly:
+
+- `make test-journal-replay` boots the `crash` image, journals 100 data blocks
+  in one transaction (two descriptors at 1 KiB) and exits without checkpointing
+  or clearing the journal. The next boot finds a refused read-only mount, mounts
+  read-write, replays `CRUGOS: journal replayed 100 block(s) at mount`, verifies
+  the file contents, and the host `e2fsck -fn` must exit 0.
+- `make test-journal-csum` stops after that same commit and lets the host
+  `e2fsck -fy` replay the log instead, proving our checksummed descriptors,
+  commit block and journal superblock are accepted by e2fsprogs.
 
 ## Test disks
 
@@ -325,9 +366,12 @@ by default, `DISK_SIZE_MB` overrides):
 - GPT, one partition at LBA 2048..26623 (12 MiB), type `8300`, name
   `crugroot`;
 - ext4 with 1 KiB blocks, `has_journal` with a 1 MiB journal (`-J size=1`),
-  `^metadata_csum`, `^64bit`, `^flex_bg`, `^dir_index`, `^resize_inode`,
+  `metadata_csum`, `^64bit`, `^flex_bg`, `^dir_index`, `^resize_inode`,
   `^sparse_super`, `^large_file`, `^orphan_file`;
-- `/hello.txt` containing `hello from ext4`.
+- JBD2 checksum v3 enabled by `scripts/journal-csum.py` after `mke2fs`, because
+  mke2fs 1.47 does not set the journal checksum flags itself;
+- `/hello.txt` containing `hello from ext4`; `scripts/mkdisk.sh ... crash` adds
+  `/simulate-crash`, which selects the crash self-test path.
 
 `make run` and `make test` depend on `disk` and pass the image as `vda`.
 `make test` always deletes and regenerates the image first, boots the kernel,
@@ -420,9 +464,13 @@ scripts/check-raid.py build/x86_64/raid-a.img build/x86_64/raid-b.img
 - `storage: journal selftest failed`: the dirty-journal replay did not restore
   the block, or the remount could not replay it. A read-only mount of a dirty
   journal is refused by design; use `EXT4_MOUNT_RW` to recover.
-- A write returning `-1` after a large metadata operation: the transaction
-  tried to queue more metadata blocks than a single descriptor can hold. Split
-  the operation into smaller writes.
+- A write returning `-1` after a large metadata operation: the transaction does
+  not fit in the journal at all (more descriptors than `maxlen - 1` allows), or
+  the journal tag format leaves no room for a descriptor.
+- `journal: descriptor checksum mismatch` / `journal: data checksum mismatch`:
+  the journal superblock or a queued block was corrupted. The replay path fails
+  closed and leaves `s_start` set, so the filesystem stays read-only until the
+  image is repaired on the host.
 - A timeout in `virtio_submit()` means the device never completed a request;
   QEMU was probably given a modern-only device or a wrong disk image.
 
@@ -438,10 +486,11 @@ scripts/check-raid.py build/x86_64/raid-a.img build/x86_64/raid-b.img
   block call and AHCI uses one non-queued command slot.
 - GPT only: no MBR boot disks, no backup-table repair and no partition
   creation.
-- ext4 has JBD2 replay and ordered metadata journaling, but no journal
-  checksums, no metadata checksums, no directory index and no delayed
-  allocation. Transactions use one descriptor and are not wrapped by the
-  writer; a transaction larger than the descriptor capacity fails.
+- ext4 writes checksummed metadata (superblock, group descriptors, bitmaps,
+  inode and directory-extension tails, extent tails) and JBD2 checksum v2/v3
+  journals; revoke records, async commits and 64-bit journal block numbers are
+  not written. There is no directory index and no delayed allocation. A
+  transaction larger than the journal capacity fails instead of wrapping.
 - The write path handles at most one extent-tree level and does not replace an
   existing rename target; hard links, symlinks, ownership and extended
   attributes are not implemented.

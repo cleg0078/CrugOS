@@ -7,7 +7,9 @@ BUILD := build
 BIN := $(BUILD)/unit-tests
 
 SOURCES := main.c test_string.c test_printf.c test_elf.c test_bitmap.c test_vm_math.c test_handle.c \
+           test_crc32c.c \
            ../../kernel/lib/string.c ../../kernel/lib/printf.c ../../kernel/lib/bitmap.c \
+           ../../kernel/lib/crc32c.c \
            ../../kernel/core/process.c \
            ../../boot/efi/elf.c
 

@@ -194,10 +194,34 @@ change for memory management, storage, SMP or drivers.
 - `make test-ahci` boots from a SATA disk attached on `ide.1` and then runs
   `check-disk.py`, so the SATA path is gated by `e2fsck` and file contents.
 
+## Phase 3B-8 - checksums (done)
+
+- `kernel/lib/crc32c.c` implements the Castagnoli CRC used by ext4 and JBD2;
+  `tools/gen-crc32c.py` generates it and `tests/host/test_crc32c.c` pins 629
+  vectors including the seed-0 empty value and `0x1CF96D7C` for
+  `"123456789"`.
+- ext4 `metadata_csum` is written: superblock, group descriptors, block and
+  inode bitmaps, inodes, directory tails (chained with the inode generation)
+  and extent tails.
+- JBD2 checksum v3 journals: 16-byte tags, a checksummed journal superblock,
+  a descriptor block tail and a commit-block checksum; legacy and v2 journals
+  still mount.
+- Transactions span multiple descriptors (62 blocks per 1 KiB v3 descriptor)
+  instead of failing when one descriptor fills up, and the journaled
+  superblock is part of the transaction.
+- A dirty journal in the test image is replayed at boot: the RO mount is
+  refused, the kernel remounts read-write, prints
+  `CRUGOS: journal replayed N block(s) at mount` and verifies the contents;
+  replay validates the whole transaction before writing and fails closed on a
+  checksum mismatch.
+- Gates: `make test` (e2fsck-verified metadata checksums),
+  `make test-journal-csum` (e2fsck replays our journal) and
+  `make test-journal-replay` (the kernel replays it). See
+  [checksums.md](checksums.md).
+
 ## Phase 3B - remaining storage work
 
-- Journal and metadata checksums; multi-descriptor transactions and journal
-  wrapping.
+- Journal wrapping, revoke records and orphan-file recovery.
 - USB storage drivers, hotplug and more than four NVMe/AHCI controllers.
 - RAID online rebuild, hot spare, scrub, a write-intent bitmap and persisted
   failure tracking (rebuild is boot-time and synchronous today).

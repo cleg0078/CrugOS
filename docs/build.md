@@ -33,8 +33,10 @@ make test-raid-degraded  # boot RAID1 with one member missing
 make test-raid10-degraded  # boot RAID10 with one member per mirror pair
 make test-raid-repair  # rebuild a blank RAID1 member at boot, then check both
 make test-raid10-repair  # rebuild two blank RAID10 members, then check all four
+make test-journal-csum  # crash after a journal commit, replay it with e2fsck
+make test-journal-replay  # crash, then replay the journal in the kernel
 make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
-make test-host   # host unit tests for string/printf/ELF/bitmap/VM math/handles
+make test-host   # host unit tests for string/printf/ELF/bitmap/VM math/handles/CRC32C
 make disk        # build the GPT/ext4 test disk at build/<arch>/disk.img
 make raid-disks  # build the two GPT/ext4 RAID1 member disks
 make raid10-disks  # build the four GPT/ext4 RAID10 member disks
@@ -70,6 +72,8 @@ options` prints the complete resolved set (including paths derived from
 | `EXPECT_NVME` | `no` | what `make test` requires for NVMe (`yes` needs `nvme0n1`) |
 | `EXPECT_AHCI` | `no` | what `make test` requires for AHCI/SATA (`yes` needs an `sd?` root) |
 | `EXPECT_REBUILD` | `no` | number of RAID members the boot must rebuild; `no` also rejects an unexpected rebuild |
+| `CRASH_IMG` | `$(BUILD)/crash.img` | crash-gate image (journal commit, no checkpoint) |
+| `CRASH_REPLAY_IMG` | `$(BUILD)/crash-replay.img` | copy the kernel replays on the second crash-gate boot |
 | `CC` | `crugc` | compiler for kernel and loader objects |
 | `LD` | `ld` | linker for the PE32+ loader |
 | `PYTHON` | `python3` | host scripts (boot/disk/EFI checks) |
@@ -176,10 +180,15 @@ is tracked in [roadmap.md](roadmap.md).
 
 `make disk` runs [scripts/mkdisk.sh](../scripts/mkdisk.sh) and produces a GPT
 image with one type-`8300` partition named `crugroot` and an ext4 filesystem
-containing `/hello.txt`. The filesystem has a 1 MiB JBD2 journal
-(`-J size=1`) and disables `orphan_file`; the kernel replays a dirty journal
-before using the filesystem. It requires `sgdisk`, `mke2fs`, `debugfs`,
-`dd` and `truncate`. The image is attached as a legacy virtio-blk device:
+containing `/hello.txt`. The filesystem has 1 KiB blocks, a 1 MiB JBD2 journal
+(`-J size=1`), `metadata_csum` enabled and `orphan_file` disabled.
+[scripts/journal-csum.py](../scripts/journal-csum.py) then flips the journal to
+checksum v3, because mke2fs 1.47 leaves the journal checksum flags clear.
+`mkdisk.sh OUTPUT SIZE normal|crash` takes a third argument: `crash` also
+creates `/simulate-crash`, which makes the boot self-test commit a
+multi-descriptor transaction and exit before checkpointing. It requires
+`sgdisk`, `mke2fs`, `debugfs`, `dd`, `truncate` and `python3`. The image is
+attached as a legacy virtio-blk device:
 
 ```
 -drive file=<disk.img>,if=none,id=disk0,format=raw
@@ -194,9 +203,26 @@ dirty journal block, unmounts without clearing the journal, remounts
 read-write and verifies replay. `make test` regenerates the image, boots the
 kernel and then runs [scripts/check-disk.py](../scripts/check-disk.py), which
 extracts the partition and requires `e2fsck -fn` to be clean (a leftover dirty
-journal fails this gate). `make check-disk` runs only that disk check on the
-existing image. The supported ext4 subset, write path, journal format and
-failure modes are documented in [storage.md](storage.md).
+journal fails this gate). Because the image uses `metadata_csum` and journal
+checksums, that `e2fsck` run also verifies every checksum the kernel wrote.
+`make check-disk` runs only that disk check on the existing image.
+
+The journal gates run on their own crash image:
+
+- `make test-journal-csum` boots once (the guest exits after
+  `CRUGOS: dirty journal committed (no checkpoint)` and
+  `CRUGOS: journal committed 100 block(s) in 2 descriptor(s)`), then runs
+  [scripts/check-journal.py](../scripts/check-journal.py): `e2fsck -fy` must
+  replay the log, `e2fsck -fn` must be clean and `/selftest/j.bin` must hold
+  the committed 100 KiB pattern.
+- `make test-journal-replay` boots the crash image, copies it and boots again.
+  The second boot must print `CRUGOS: journal replayed 100 block(s) at mount`
+  and `CRUGOS: journal replay verified`; `e2fsck -fn` must then be clean.
+- `make crash-disk` only builds that image.
+
+The supported ext4 subset, write path, checksum layout, journal format and
+failure modes are documented in [storage.md](storage.md) and
+[checksums.md](checksums.md).
 
 `make test-nvme` regenerates `build/<arch>/nvme.img` with `mkdisk.sh`, boots
 with only `NVME_IMG` attached to QEMU's `nvme` device, requires
@@ -326,6 +352,22 @@ randomisation that leaks into the output will fail this target.
 - **`e2fsck` reports a dirty journal or needs recovery**: the kernel did not
   checkpoint/clear `s_start` before unmount. The journal superblock is
   big-endian; inspect bytes 24..31 at the journal inode's first block.
+- **`e2fsck` reports a checksum error on a directory or inode**: the tail or
+  inode checksum was not recomputed after a modify-in-place update. The
+  directory tail chains the inode generation; see
+  [checksums.md](checksums.md) and `ext4_dir_set_tail()`.
+- **`e2fsck` says "Journal superblock is corrupt"**: `s_checksum_type` at
+  journal-superblock byte 0x50 is a single byte that must be 4, and the
+  checksum over all 1024 bytes must be seeded with `0xFFFFFFFF` (not the UUID
+  seed).
+- **`make test-journal-csum` fails to find the descriptor line**: the crash
+  transaction must queue at least 100 blocks; check `storage_crash_test()` in
+  `kernel/fs/storage.c` and that the image was built with `mkdisk.sh ... crash`.
+- **`make test-journal-replay` finds no replay**: the second boot did not have
+  to recover, which means the first boot checkpointed. Ensure
+  `journal_test_skip_checkpoint()` is active and that
+  `ext4_test_mark_dirty()` ran before the commit (the superblock must carry
+  `needs_recovery`, incompat bit 0x4).
 - **QEMU exits before OVMF starts**: verify the firmware paths and that
   `OVMF_VARS` is writable (the run script copies it into `build/`).
 - **Guest still reports the old version after a bump**: ensure `VERSION` is a

@@ -8,6 +8,8 @@
 #   make test-compat  boot a compatibility build (no AVX2 required)
 #   make disk       build the GPT/ext4 test disk
 #   make check-disk run e2fsck and file checks on the test disk
+#   make test-journal-csum  crash-stop after a journal commit, then replay it with e2fsck
+#   make test-journal-replay  reboot after a crash and replay the journal in the kernel
 #   make test-raid  boot RAID1 (two members) and verify member disks
 #   make test-raid10  boot RAID10 (four members) and verify member disks
 #   make test-nvme   boot from an NVMe namespace and verify the disk
@@ -92,6 +94,8 @@ DEBUG_LOG := $(BUILD)/debug.log
 QEMU_EXIT := $(BUILD)/exit-code.txt
 DISK_IMG ?= $(BUILD)/disk.img
 DISK_SIZE_MB ?= 16
+CRASH_IMG ?= $(BUILD)/crash.img
+CRASH_REPLAY_IMG ?= $(BUILD)/crash-replay.img
 RAID_DISK_A ?= $(BUILD)/raid-a.img
 RAID_DISK_B ?= $(BUILD)/raid-b.img
 RAID10_DISK_A ?= $(BUILD)/raid10-a.img
@@ -139,7 +143,8 @@ LOADER_DEPS := $(LOADER_OBJECTS:.o=.d)
 .PHONY: all kernel loader esp disk raid-disks raid10-disks nvme-disk ahci-disk \
         raid-repair-disks raid10-repair-disks run test test-compat \
         test-raid test-raid-degraded test-raid10 test-raid10-degraded test-nvme test-ahci \
-        test-raid-repair test-raid10-repair \
+        test-raid-repair test-raid10-repair test-journal-csum test-journal-replay \
+        crash-disk \
         check-disk size check-efi repro test-host preflight version options clean distclean help
 
 all: esp
@@ -193,6 +198,11 @@ $(OBJ)/boot/%.o: boot/%.c
 disk:
 	$(Q)scripts/mkdisk.sh $(DISK_IMG) $(DISK_SIZE_MB)
 	@echo "  DISK  $(DISK_IMG)"
+
+crash-disk: scripts/mkdisk.sh scripts/journal-csum.py
+	$(Q)rm -f $(CRASH_IMG)
+	$(Q)scripts/mkdisk.sh $(CRASH_IMG) $(DISK_SIZE_MB) crash
+	@echo "  DISK  $(CRASH_IMG) (crash mode)"
 
 raid-disks: scripts/mkraid.sh scripts/raid-meta.py
 	$(Q)scripts/mkraid.sh $(RAID_DISK_A) $(RAID_DISK_B)
@@ -291,6 +301,16 @@ test-ahci: esp ahci-disk
 	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" no no no yes
 	$(Q)$(PYTHON) scripts/check-disk.py $(AHCI_IMG)
 
+test-journal-csum: esp crash-disk
+	$(Q)$(MAKE) --no-print-directory run DISK_IMG=$(CRASH_IMG)
+	$(Q)$(PYTHON) scripts/check-journal.py $(SERIAL_LOG) $(QEMU_EXIT) $(CRASH_IMG)
+
+test-journal-replay: esp crash-disk
+	$(Q)$(MAKE) --no-print-directory run DISK_IMG=$(CRASH_IMG)
+	$(Q)cp $(CRASH_IMG) $(CRASH_REPLAY_IMG)
+	$(Q)$(MAKE) --no-print-directory run DISK_IMG=$(CRASH_REPLAY_IMG)
+	$(Q)$(PYTHON) scripts/check-journal-replay.py $(SERIAL_LOG) $(QEMU_EXIT) $(CRASH_REPLAY_IMG)
+
 check-disk:
 	@if [ -n "$(DISK_IMG)" ] && [ ! -f "$(DISK_IMG)" ]; then \
 		$(MAKE) --no-print-directory disk; \
@@ -344,6 +364,8 @@ options:
 	@printf '  %-16s %s\n' OVMF_VARS "$(OVMF_VARS)"
 	@printf '  %-16s %s\n' DISK_IMG "$(DISK_IMG)"
 	@printf '  %-16s %s\n' DISK_SIZE_MB "$(DISK_SIZE_MB)"
+	@printf '  %-16s %s\n' CRASH_IMG "$(CRASH_IMG)"
+	@printf '  %-16s %s\n' CRASH_REPLAY_IMG "$(CRASH_REPLAY_IMG)"
 	@printf '  %-16s %s\n' RAID_DISK_A "$(RAID_DISK_A)"
 	@printf '  %-16s %s\n' RAID_DISK_B "$(RAID_DISK_B)"
 	@printf '  %-16s %s\n' RAID10_DISK_A "$(RAID10_DISK_A)"

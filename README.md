@@ -8,11 +8,11 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 3B-7 AHCI/SATA (`v0.11.0`)
+## Status: phase 3B-8 checksums (`v0.12.0`)
 
-Phases 1-3B-7 keep the boot path under a kernel that owns memory, CPU state,
-the execution model, a real crash-consistent filesystem, mirrored/striped
-RAID roots that can rebuild a replacement member, and three storage
+Phases 1-3B-8 keep the boot path under a kernel that owns memory, CPU state,
+the execution model, a checksummed crash-consistent filesystem, mirrored/
+striped RAID roots that can rebuild a replacement member, and three storage
 transports:
 
 ```
@@ -157,6 +157,25 @@ Phase 3B-7 adds a polled AHCI/SATA driver:
   (or a RAID array) on any of them; `make test-ahci` boots with only a SATA
   image and runs the same JBD2, writable-ext4 and `e2fsck` gates.
 
+Phase 3B-8 makes the on-disk format self-checking:
+
+- ext4 metadata checksums (`metadata_csum`) are written for the superblock,
+  group descriptors, block and inode bitmaps, inodes, directory tails and
+  extent tails, with the seed from `s_checksum_seed` or the UUID;
+- a freestanding CRC32C (Castagnoli) lives in `kernel/lib/crc32c.c`, generated
+  by `tools/gen-crc32c.py` and covered by 629 host checks;
+- the JBD2 journal is checksummed end to end: checksum v3 tags, a checksummed
+  journal superblock, a descriptor tail checksum and a commit block checksum,
+  while legacy/v2 journals still mount;
+- transactions span multiple descriptors, so a large mkdir/unlink batch is one
+  atomic commit instead of a failure; replay validates the whole transaction
+  before writing anything and fails closed on a checksum mismatch;
+- a dirty journal in the test image is replayed at boot: the RO mount is
+  refused, the kernel mounts read-write, prints `CRUGOS: journal replayed N
+  block(s) at mount` and verifies the file contents;
+- `make test-journal-csum` proves `e2fsck` replays our checksummed journal and
+  `make test-journal-replay` proves the kernel replays it on the next boot;
+  `make test` still requires a clean `e2fsck -fn` on the resulting image.
 It detects AVX2, enables XSAVE state and, by default, refuses to boot without
 AVX2. Self-tests run at boot, then the kernel prints a boot report to a 16550
 serial port and the framebuffer and exits QEMU deterministically for automated
@@ -165,9 +184,9 @@ testing.
 Verified in this tree:
 
 ```
-CrugOS 0.11.0 (phase 3b7) -- Amiga-inspired microkernel bring-up
+CrugOS 0.12.0 (phase 3b8) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.11.0
+CRUGOS: version 0.12.0
 pmm    : 118442 pages (462 MiB), free 118441, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -199,7 +218,7 @@ CRUGOS: selftest ok
 wx     : audit ok, identity map 0..4 GiB, guard unmapped
 heap   : total=57344 B used=7952 B slab_pages=12 large_pages=2
 boot   : pmm=25572 us cpu=366 us vm=580 us traps=293 us timer=65312 us heap=45 us storage=90248 us sched=304 us syscall=104 us total=182828 us
-CRUGOS: phase 3b7 boot ok
+CRUGOS: phase 3b8 boot ok
 ```
 
 This excerpt is the `make test-ahci` boot: no virtio or NVMe disk is attached,
@@ -223,9 +242,11 @@ make test-raid-degraded  # boot RAID1 with one member missing
 make test-raid10-degraded  # boot RAID10 with one member per mirror pair
 make test-raid-repair  # rebuild a blank RAID1 member at boot, then check
 make test-raid10-repair  # rebuild blank RAID10 slots 1 and 3 at boot
+make test-journal-csum  # crash after a journal commit, replay it with e2fsck
+make test-journal-replay  # crash, then replay the journal in the kernel
 make run         # boot and keep the serial log for inspection
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
-make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles)
+make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C)
 make check-disk  # e2fsck + persisted-file checks on the latest test disk
 make disk        # generate the GPT/ext4 test disk
 make raid-disks  # generate the two RAID1 member disks
@@ -258,12 +279,12 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/lib/` | freestanding string, formatting and bitmap routines |
 | `kernel/mm/` | physical allocator, W^X page tables, kernel heap |
 | `kernel/block/` | block-device registry, partitions, bounds checks, RAID1/RAID10 and boot-time rebuild |
-| `kernel/fs/` | GPT, writable ext4, JBD2 journal and the storage boot policy |
+| `kernel/fs/` | GPT, writable checksummed ext4, checksummed JBD2 journal and the storage boot policy |
 | `drivers/` | PCI, legacy virtio-blk, NVMe and AHCI/SATA block device drivers |
 | `scripts/` | QEMU runner, disk/RAID1/RAID10 image builders, boot/PE/disk/RAID checks, size and reproducibility gates |
 | `tests/host/` | host unit tests for freestanding code |
 | `tools/` | host-side development tools (`gen-font.py`) |
-| `docs/` | [build](docs/build.md), [boot](docs/boot.md), [storage](docs/storage.md), [NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
+| `docs/` | [build](docs/build.md), [boot](docs/boot.md), [storage](docs/storage.md), [checksums](docs/checksums.md), [NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
 
 ## Versioning
 
@@ -300,17 +321,17 @@ See [docs/boot.md](docs/boot.md) for the full handoff ABI and exit protocol.
 
 ## Roadmap
 
-Phases 0, 1, 2, 3A and 3B-1 through 3B-7 are done. Phase 3A covered the block
+Phases 0, 1, 2, 3A and 3B-1 through 3B-8 are done. Phase 3A covered the block
 layer, legacy virtio-blk, GPT and read-only EXT4; phase 3B-1 added the writable
 EXT4 path and an on-disk consistency gate; phase 3B-2 added JBD2 journal replay
 and ordered metadata journaling; phase 3B-3 added a RAID1 root with healthy and
 degraded boots; phase 3B-4 added a polled NVMe root path; phase 3B-5 added
 RAID10 with healthy four-member and degraded two-member boots; phase 3B-6 added
-boot-time rebuild of a blank RAID1/RAID10 member; phase 3B-7 adds a polled
-AHCI/SATA driver and a SATA-root boot gate. Remaining phase 3B work is
-journal/metadata checksums, online RAID rebuild, hot spare, scrub and a
-write-intent bitmap, a redundant ESP, `crypt.device` (AES-256-XTS/Argon2id), and
-USB storage/hotplug. Later phases cover USB/audio/graphics, Workbench userspace,
+boot-time rebuild of a blank RAID1/RAID10 member; phase 3B-7 added a polled
+AHCI/SATA driver and a SATA-root boot gate; phase 3B-8 added ext4 metadata and
+JBD2 journal checksums plus multi-descriptor transactions. Remaining phase 3B
+work is online RAID rebuild, hot spare, scrub and a write-intent bitmap, a
+redundant ESP, `crypt.device` (AES-256-XTS/Argon2id), and USB storage/hotplug. Later phases cover USB/audio/graphics, Workbench userspace,
 SMP/IOMMU and virtualisation. See
 [docs/roadmap.md](docs/roadmap.md) for the full sequence and the known
 specification gaps (Crug syntax, cross-architecture compilers and the OVMF

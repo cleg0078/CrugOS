@@ -132,7 +132,7 @@ Boot markers added by this phase:
 ahci   : sda <sectors> sectors, port <n>
 CRUGOS: ahci ready (<n> device(s))
 CRUGOS: root device <partition>
-CRUGOS: phase 3b7 boot ok
+CRUGOS: phase 3b8 boot ok
 ```
 
 ## Test gate
@@ -145,7 +145,7 @@ make ahci-disk      # regenerate build/<arch>/ahci.img
 `make test-ahci` boots with no virtio and no NVMe disk: the ESP is still served
 by the same controller as `sda`, and the boot contract additionally requires
 `CRUGOS: ahci ready (>=1 device(s))`, an `sd?` root device line and the
-`phase 3b7` marker. `scripts/check-disk.py` then extracts the AHCI image,
+`phase 3b8` marker. `scripts/check-disk.py` then extracts the AHCI image,
 runs `e2fsck -fn` and verifies `/hello.txt` plus the persisted
 `/selftest/b.txt`.
 

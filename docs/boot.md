@@ -94,7 +94,10 @@ post-snapshot allocations cannot push it over capacity.
    mounted. A member whose metadata sectors are blank is a cold spare: the
    kernel assigns it the lowest missing slot, copies the missing data from its
    mirror and writes fresh metadata before mounting. A journaled filesystem is
-   opened through JBD2 and replayed at mount time if necessary.
+   opened through JBD2; a dirty journal that refuses a read-only mount is
+   replayed by a short read-write mount, which prints
+   `CRUGOS: journal replayed <n> block(s) at mount`, and the read-only mount is
+   then retried.
    `CRUGOS: virtio ready`, `CRUGOS: nvme ready`, `CRUGOS: ahci ready`,
    `CRUGOS: block ready`,
    `CRUGOS: gpt ready`, `CRUGOS: raid ready`,
@@ -108,9 +111,10 @@ post-snapshot allocations cannot push it over capacity.
 10. `process_init`: the kernel process and its handle table.
     `CRUGOS: syscall ready`.
 11. `sti`, then `selftest_run`: allocator, mappings, W^X audit, `int3`, timer,
-    heap, block/GPT/ext4/storage (including the read-write round trip and a
-    journal replay test), handles, scheduler, message ports and syscalls.
-12. `report_boot`, `CRUGOS: phase 3b7 boot ok`, `arch_exit_qemu(0x10)`.
+    heap, block/GPT/ext4/storage (including the read-write round trip, checksum
+    verification and a journal replay test), handles, scheduler, message ports
+    and syscalls.
+12. `report_boot`, `CRUGOS: phase 3b8 boot ok`, `arch_exit_qemu(0x10)`.
 
 Storage is still brought up with interrupts disabled: the virtio driver polls
 its used ring, the NVMe driver polls completion queues and the AHCI driver polls
@@ -224,10 +228,21 @@ bytes of the pattern.
 A journal check follows: the test writes `/selftest/j.bin`, queues a dirty
 block through `journal_test_dirty()`, unmounts *without* clearing the journal,
 remounts read-write (which replays it through `journal_open()`), and reads the
-physical block back. The host gate then extracts the partition and requires
-`e2fsck -fn` to pass. The complete stack, supported ext4 subset, write path,
-journal format/recovery and known limits are documented in
-[storage.md](storage.md).
+physical block back. Because the test disk is formatted with `metadata_csum`
+and a checksum v3 journal, the same round trip also proves the checksum path:
+the host gate extracts the partition and requires `e2fsck -fn` to pass, which
+verifies every checksum the kernel wrote.
+
+On the crash gate image (`/simulate-crash` present) the self-test switches to a
+two-boot scenario instead: the first boot journals 100 data blocks in one
+multi-descriptor transaction (two descriptors at 1 KiB), marks the superblock
+unclean, commits and exits without checkpointing, printing
+`CRUGOS: dirty journal committed (no checkpoint)`. The next boot replays it at
+mount, verifies the file contents and prints
+`CRUGOS: journal replay verified (<n> block(s) recovered)`. The complete
+stack, supported ext4 subset, write path, checksum layout, journal
+format/recovery and known limits are documented in [storage.md](storage.md) and
+[checksums.md](checksums.md).
 
 ## Exit protocol
 
@@ -254,6 +269,7 @@ CRUGOS: raid ready
 CRUGOS: raid rebuilt (1 member(s))  # only when a blank spare was repaired
 raid   : level 10, 4 member(s), 2 pair(s), chunk 128 sectors
 CRUGOS: raid healthy            # or: CRUGOS: raid degraded
+CRUGOS: journal replayed (100 block(s) at mount)  # only after a crash
 CRUGOS: ext4 ready
 CRUGOS: journal ready
 CRUGOS: storage ready
@@ -262,7 +278,7 @@ CRUGOS: syscall ready
 CRUGOS: writable storage ok
 CRUGOS: journal selftest ok
 CRUGOS: selftest ok
-CRUGOS: phase 3b7 boot ok
+CRUGOS: phase 3b8 boot ok
 ```
 
 `raid ready` and `raid healthy`/`raid degraded` appear only on the RAID
@@ -299,9 +315,8 @@ init, newlines are also mirrored to the GOP text console, which uses an embedded
   but AP startup, IOAPIC and external interrupts are phase 5 work.
 - Empty slab pages are not returned to the PMM, and page-table pages created
   while splitting huge pages are not reclaimed.
-- Storage is writable with JBD2 replay and ordered metadata journaling, but
-  legacy virtio-blk, NVMe and AHCI/SATA roots, polled requests, a single extent-tree
-  level, one descriptor per transaction, no journal or metadata checksums,
-  no `crypt.device` yet.
+- Storage is writable with JBD2 replay, ordered metadata journaling and
+  ext4/JBD2 checksums, over legacy virtio-blk, NVMe and AHCI/SATA roots with
+  polled requests, a single extent-tree level, and no `crypt.device` yet.
 - `SMEP`/`SMAP` are enabled only when the CPU reports them; `qemu64` does not.
 - No shutdown/reset path; QEMU's debug port is the exit mechanism.

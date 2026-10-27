@@ -22,6 +22,7 @@ struct ext4_fs {
     u32 feature_compat;
     u32 feature_incompat;
     u32 feature_ro_compat;
+    u32 csum_seed;
     u64 gdt_block;
     u32 root_ino;
     u32 flags;
@@ -50,3 +51,8 @@ int ext4_rmdir(struct ext4_fs *fs, const char *path);
 int ext4_rename(struct ext4_fs *fs, const char *oldpath, const char *newpath);
 int ext4_fsync(struct ext4_fs *fs);
 int ext4_selftest(void);
+
+/* Test hook: publish an unclean superblock (state 0 plus NEEDS_RECOVERY)
+   directly, without going through the journal. Used by the crash gate to
+   mimic a kernel that died after committing but before checkpointing. */
+int ext4_test_mark_dirty(struct ext4_fs *fs);

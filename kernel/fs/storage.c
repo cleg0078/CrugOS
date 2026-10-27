@@ -18,8 +18,14 @@ static const u8 raid_type_guid[16] = {
     0xA0, 0x06, 0x74, 0x3F, 0x0F, 0x84, 0x91, 0x1E
 };
 
+/* Large enough that one journal transaction spans several descriptors:
+   the per-descriptor tag capacity is 62 on a 1 KiB journal. */
+#define CRASH_FILE_SIZE 102400u
+
 static struct ext4_fs g_root_fs;
 static struct block_device *g_root_part;
+static u8 g_crash_buf[CRASH_FILE_SIZE];
+static u32 g_journal_replayed;
 static int g_present;
 static char g_hello[256];
 static u64 g_hello_size;
@@ -48,8 +54,24 @@ static int storage_mount_root(struct block_device *part)
     g_root_part = part;
     kprintf("CRUGOS: root device %s\n", g_root_part->name);
     if (ext4_mount(&g_root_fs, g_root_part, 0) != 0) {
-        kprintf("storage: ext4 mount failed\n");
-        return -1;
+        /* The journal may hold a committed transaction from a crash. A
+           read-write mount replays it; the boot then continues read-only. */
+        u32 replayed;
+
+        if (ext4_mount(&g_root_fs, g_root_part, EXT4_MOUNT_RW) != 0) {
+            kprintf("storage: ext4 mount failed\n");
+            return -1;
+        }
+        replayed = journal_recovered_blocks(&g_root_fs);
+        if (ext4_umount(&g_root_fs) != 0 ||
+            ext4_mount(&g_root_fs, g_root_part, 0) != 0) {
+            kprintf("storage: ext4 mount failed\n");
+            return -1;
+        }
+        g_journal_replayed = replayed;
+        if (replayed)
+            kprintf("CRUGOS: journal replayed %u block(s) at mount\n",
+                    replayed);
     }
     kprintf("CRUGOS: ext4 ready\n");
     if (g_root_fs.journal)
@@ -327,9 +349,92 @@ fail:
     return 0;
 }
 
+static u8 storage_crash_byte(u32 i)
+{
+    return (u8)((u8)(i * 13u + 7u) ^ 0xA5u);
+}
+
+/* Phase 2: the previous boot crashed after committing a multi-descriptor
+   transaction. The mount replayed it; /selftest/j.bin must now hold the
+   committed (dirty) contents. */
+static int storage_replay_check(void)
+{
+    u64 size;
+    u32 i;
+
+    if (ext4_read_file(&g_root_fs, "/selftest/j.bin", g_crash_buf,
+                       sizeof(g_crash_buf), &size) != 0)
+        return 0;
+    if (size != CRASH_FILE_SIZE)
+        return 0;
+    for (i = 0; i < CRASH_FILE_SIZE; i++) {
+        if (g_crash_buf[i] != storage_crash_byte(i))
+            return 0;
+    }
+    kprintf("CRUGOS: journal replay verified (%u block(s) recovered)\n",
+            g_journal_replayed);
+    arch_exit_qemu(0x10);
+    return 1;
+}
+
+/* Crash gate phase 1: journal 100 file blocks in one transaction with JBD2
+   checksums, publish an unclean superblock and exit without checkpointing.
+   Selected by the /simulate-crash marker that scripts/mkdisk.sh puts in the
+   journal gate image; ordinary images never take this path. */
+static int storage_crash_test(void)
+{
+    static struct ext4_fs fs;
+    static u8 original[CRASH_FILE_SIZE];
+    static u8 dirty[1024];
+    u32 i;
+
+    if (ext4_mount(&fs, g_root_part, EXT4_MOUNT_RW) != 0) {
+        kprintf("storage: crash mount failed\n");
+        return 0;
+    }
+    storage_cleanup(&fs);
+    if (ext4_mkdir(&fs, "/selftest", 0755) != 0)
+        return 0;
+    if (ext4_create(&fs, "/selftest/j.bin", 0644) != 0)
+        return 0;
+    for (i = 0; i < sizeof(original); i++)
+        original[i] = (u8)((i * 13u + 7u) & 0xFFu);
+    if (ext4_write_file(&fs, "/selftest/j.bin", original,
+                        sizeof(original)) != 0)
+        return 0;
+    if (ext4_fsync(&fs) != 0)
+        return 0;
+    /* Journal every file block in one transaction so the commit spans more
+       than one descriptor (62 tags each on a 1 KiB journal). */
+    if (journal_begin(&fs) != 0)
+        return 0;
+    for (i = 0; i < CRASH_FILE_SIZE / 1024u; i++) {
+        u64 phys;
+        u32 off = i * 1024u;
+        u32 n;
+
+        if (ext4_file_block(&fs, "/selftest/j.bin", i, &phys) != 0)
+            return 0;
+        for (n = 0; n < 1024u; n++)
+            dirty[n] = storage_crash_byte(off + n);
+        if (journal_queue(&fs, phys, dirty) != 0)
+            return 0;
+    }
+    if (journal_test_skip_checkpoint(&fs, 1) != 0)
+        return 0;
+    if (ext4_test_mark_dirty(&fs) != 0)
+        return 0;
+    if (journal_commit(&fs) != 0)
+        return 0;
+    kprintf("CRUGOS: dirty journal committed (no checkpoint)\n");
+    arch_exit_qemu(0x10);
+    return 1;
+}
+
 int storage_selftest(void)
 {
     char list[256];
+    u32 ino;
 
     if (!g_present || !g_root_part)
         return 0;
@@ -343,6 +448,13 @@ int storage_selftest(void)
         return 0;
     if (strstr(list, "hello.txt") == 0)
         return 0;
+    if (ext4_lookup(&g_root_fs, "/simulate-crash", &ino) == 0) {
+        /* First boot on a clean gate image commits a multi-descriptor
+           transaction and dies; the next boot replays it at mount. */
+        if (g_journal_replayed)
+            return storage_replay_check();
+        return storage_crash_test();
+    }
     return storage_rw_test();
 }
 

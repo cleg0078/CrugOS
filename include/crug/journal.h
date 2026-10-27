@@ -33,3 +33,8 @@ int journal_recover(struct ext4_fs *fs);
 int journal_test_dirty(struct ext4_fs *fs, u64 block, const void *buf,
                        usize len);
 
+/* Test helper: make the next ordinary commit stop after the commit block
+   (no checkpoint). The caller must unmount without a further commit; the
+   journal is then replayed by the host e2fsck or by the next mount. */
+int journal_test_skip_checkpoint(struct ext4_fs *fs, int on);
+
