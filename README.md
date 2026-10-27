@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 0 bootstrap
+## Status: phase 0 bootstrap (`v0.1.0`)
 
 Phase 0 is the smallest end-to-end path from firmware to a running kernel:
 
@@ -27,6 +27,7 @@ Verified in this tree:
 
 ```
 CRUGOS: hello
+CRUGOS: version 0.1.0
 kernel : 0x0000000000100000 size=44 KiB
 memory : 37 regions, usable 474095 KiB (462 MiB)
 fb     : 1024x768 stride=1024 format=BGRX8888 base=0x80000000
@@ -41,6 +42,7 @@ make             # build kernel.elf, BOOTX64.EFI and the ESP tree
 make test        # boot under QEMU/OVMF and verify the boot contract
 make run         # boot and keep the serial log for inspection
 make test-host   # host unit tests (string, printf, ELF loader)
+make version     # print the release version from VERSION
 make size        # kernel budget: <1 MiB stretch, <2 MiB hard
 make check-efi   # PE32+ structure checks on the loader
 make repro       # two builds must be byte-identical
@@ -62,7 +64,17 @@ Build artifacts land in `build/x86_64/`; `make run` records
 | `scripts/` | QEMU runner, boot/PE checks, size and reproducibility gates |
 | `tests/host/` | host unit tests for freestanding code |
 | `tools/` | host-side development tools (`gen-font.py`) |
-| `docs/` | [build](docs/build.md), [boot](docs/boot.md), [roadmap](docs/roadmap.md) |
+| `docs/` | [build](docs/build.md), [boot](docs/boot.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
+
+## Versioning
+
+The release number lives in [`VERSION`](VERSION) and follows Semantic
+Versioning. The build stamps it into the kernel and loader
+(`-DCRUG_VERSION_STR`), the kernel prints `CRUGOS: version <version>`, and
+`make test` fails if the guest version differs from `VERSION`. Releases are
+annotated `vX.Y.Z` Git tags; `BOOTINFO_VERSION` is versioned separately. See
+[docs/versioning.md](docs/versioning.md) for the release checklist and ABI
+compatibility rules.
 
 ## Boot contract
 

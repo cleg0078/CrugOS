@@ -21,18 +21,29 @@ Run `make preflight` to check all of the above.
 ```
 make             # kernel.elf, BOOTX64.EFI and the ESP tree
 make run         # boot the ESP tree under QEMU + OVMF
-make test        # boot and verify serial markers + QEMU exit status
+make test        # boot and verify serial markers, guest version + exit status
 make test-host   # host unit tests for string/printf/ELF loader
 make size        # kernel size budget (<1 MiB stretch, <2 MiB hard)
 make check-efi   # PE32+ structure checks on the loader
 make repro       # two independent builds must be byte-identical
 make preflight   # toolchain/firmware availability
+make version     # print the release version from VERSION
 make clean       # remove build/<arch>
 make distclean   # remove build/ and host test artifacts
 ```
 
 Useful variables: `ARCH=x86_64` (only arch implemented), `MODE=release|debug|size`,
 `V=1` for verbose command lines.
+
+## Version stamping
+
+`VERSION` is the source of truth. The makefile reads it once and passes
+`-DCRUG_VERSION_STR="<version>"` to every kernel and loader object, so both
+report the same number. Direct compiler invocations fall back to `0.0.0-dev`
+via `include/crug/version.h`. The ESP tree also gets `crugos/version` as a
+plain text file. `make test` compares the kernel's `CRUGOS: version` line with
+`VERSION`; a mismatch fails the boot gate. Release procedure and tag rules are
+in [versioning.md](versioning.md).
 
 ## Kernel link
 

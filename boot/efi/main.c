@@ -1,6 +1,7 @@
 /* CrugOS UEFI loader: load the kernel ELF, describe the machine, boot it. */
 #include <crug/types.h>
 #include <crug/bootinfo.h>
+#include <crug/version.h>
 #include <crug/string.h>
 #include "uefi.h"
 #include "loader.h"
@@ -182,7 +183,7 @@ EFIAPI efi_status efi_main(efi_handle image, efi_system_table *system_table)
     g_image = image;
     loader_serial_init();
     loader_console_bind(system_table->con_out);
-    loader_println("CRUGOS loader: start");
+    loader_println("CRUGOS loader: start (CrugOS " CRUG_VERSION_STR ")");
 
     status = system_table->boot_services->handle_protocol(image, (efi_guid *)&g_guid_loaded_image,
                                                           (void **)&loaded_image);
