@@ -180,3 +180,8 @@ expose a COM1 header, so watch the framebuffer console for the prompt.
 - The keyboard gate types at 40 ms per key, so its encrypted boot takes about a
   second longer than the serial prompt gate; Argon2id still dominates the
   non-typing cost.
+- Waiting for a passphrase does not burn a CPU: `cpu_wait_for_irq()` executes
+  `sti; hlt` (with the saved IF restored afterwards), so the vCPU sleeps until
+  the next timer tick and each `console_try_getc()` runs at 100 Hz. Typing
+  latency is bounded by that 10 ms tick, and an idle prompt measured 0-1 % of one
+  host core instead of 100 % under QEMU/TCG.

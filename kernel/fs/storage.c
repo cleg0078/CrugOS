@@ -12,6 +12,7 @@
 #include <crug/kernel.h>
 #include <crug/lineedit.h>
 #include <crug/timer.h>
+#include <crug/cpu.h>
 #include "ext4_internal.h"
 
 #define STORAGE_MAX_DISKS 8u
@@ -32,7 +33,6 @@ static const u8 crypt_type_guid[16] = {
 #define CRYPT_PROMPT_TIMEOUT_MS 60000u
 #define CRYPT_PROMPT_TIMEOUT_MIN_SEC 1u
 #define CRYPT_PROMPT_TIMEOUT_MAX_SEC 3600u
-#define CRYPT_PROMPT_POLL_US 1000u
 
 static char g_crypt_pass[CRUG_CRYPT_MAX_PASSWORD + 1];
 static u32 g_crypt_pass_len;
@@ -334,7 +334,7 @@ static int storage_prompt_line(char *buf, u32 cap)
                 kprintf("\n");
                 return -1;
             }
-            timer_busy_wait_us(CRYPT_PROMPT_POLL_US);
+            cpu_wait_for_irq();
             continue;
         }
         before = le.len;

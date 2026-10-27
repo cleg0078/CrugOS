@@ -234,7 +234,9 @@ line:
   (Caps XOR Shift), letters, digits and punctuation, Enter/Backspace/Tab/Escape,
   and Ctrl chords as control bytes;
 - `console_try_getc()` drains the serial line first and only then polls the
-  keyboard, so `crypt.pass=` automation and the typed prompt share one path;
+  keyboard, so `crypt.pass=` automation and the typed prompt share one path, and
+  a waiting prompt sleeps in `sti; hlt` (`cpu_wait_for_irq()`) instead of
+  spinning, so it burns no host core;
 - the boot prints `CRUGOS: input ready (serial + keyboard)` (or
   `(serial only)`) after the heap; the passphrase prompt now says
   `on the console (serial or keyboard)`;

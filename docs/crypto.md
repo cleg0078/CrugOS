@@ -181,6 +181,17 @@ timeout in seconds without a separate build. If no line arrives the boot prints
 prints `CRUGOS: no root filesystem` and exits with status 35 (a deterministic
 boot failure, not a panic). A header, keyslot or MAC failure prints
 `CRUGOS: crypt unlock failed` (variants name the step) and fails the same way.
+
+While a line is outstanding the prompt does not spin: `storage_prompt_line()`
+calls `cpu_wait_for_irq()` (`include/crug/cpu.h`), which lowers to
+`pushfq; popq; cli; sti; hlt; cli` and restores the saved IF state, so the vCPU
+sleeps until the next 100 Hz LAPIC tick and only then polls COM1 and the
+keyboard. A waiting prompt therefore costs almost no host CPU (measured 0-1 %
+of one core under QEMU/TCG instead of 100 %), and a keystroke is picked up on
+the next tick, bounding typing latency to one 10 ms tick. `cpu_wait_for_irq()`
+is safe before the scheduler starts: the timer ISR only advances `g_ticks`,
+EOIs and re-arms, and `sched_tick()` returns while `g_sched.started` is 0.
+
 A successful unlock prints:
 
 ```

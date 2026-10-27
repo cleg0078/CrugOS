@@ -55,6 +55,17 @@ static inline void cpu_irq_disable(void)
     __asm__ volatile("cli" : : : "memory");
 }
 
+/* Halt until the next interrupt, preserving the current IF state. Waiting on
+ * input with a spin loop pins a whole host core under emulation, so idle
+ * paths use HLT and wake on the next timer tick. */
+static inline void cpu_wait_for_irq(void)
+{
+    u64 flags = cpu_irq_save();
+
+    __asm__ volatile("sti; hlt; cli" : : : "memory");
+    cpu_irq_restore(flags);
+}
+
 struct cpu *cpu_self(void);
 void cpuid(u32 leaf, u32 subleaf, u32 *a, u32 *b, u32 *c, u32 *d);
 u64 read_msr(u32 msr);
