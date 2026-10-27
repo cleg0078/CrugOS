@@ -11,7 +11,8 @@ typedef enum handle_type {
     HANDLE_FREE = 0,
     HANDLE_THREAD,
     HANDLE_PORT,
-    HANDLE_PROCESS
+    HANDLE_PROCESS,
+    HANDLE_SOCKET
 } handle_type;
 
 #define HANDLE_RIGHT_READ  (1u << 0)

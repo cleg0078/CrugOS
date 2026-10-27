@@ -29,6 +29,36 @@ u16 net_checksum(const void *data, usize len)
     return net_checksum_final(net_checksum_add(0, data, len));
 }
 
+u16 net_tcp_checksum(u32 src, u32 dst, const u8 *seg, usize len)
+{
+    u8 pseudo[12];
+    u32 sum;
+
+    net_put32(pseudo, src);
+    net_put32(pseudo + 4, dst);
+    pseudo[8] = 0;
+    pseudo[9] = NET_IP_PROTO_TCP;
+    net_put16(pseudo + 10, (u16)len);
+    sum = net_checksum_add(0, pseudo, sizeof(pseudo));
+    sum = net_checksum_add(sum, seg, len);
+    return net_checksum_final(sum);
+}
+
+int net_tcp_checksum_ok(u32 src, u32 dst, const u8 *seg, usize len)
+{
+    u8 pseudo[12];
+    u32 sum;
+
+    net_put32(pseudo, src);
+    net_put32(pseudo + 4, dst);
+    pseudo[8] = 0;
+    pseudo[9] = NET_IP_PROTO_TCP;
+    net_put16(pseudo + 10, (u16)len);
+    sum = net_checksum_add(0, pseudo, sizeof(pseudo));
+    sum = net_checksum_add(sum, seg, len);
+    return net_checksum_final(sum) == 0;
+}
+
 int net_dhcp_parse(const u8 *packet, usize len, u32 xid,
                    struct net_dhcp_lease *out)
 {

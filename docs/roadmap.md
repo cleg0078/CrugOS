@@ -17,7 +17,8 @@ derived key; phase 3B-10 unlocks that volume with a masked passphrase typed on
 the serial console; phase 4A adds a polled PS/2 keyboard whose scancodes feed
 `input.device` and a merged console read path; phase 4B brings up IPv4 over a
 polled virtio-net NIC, with a DHCP lease, ARP resolution and an ICMP echo
-self-test.
+self-test; phase 4C adds a minimal TCP transport with a client, a listener, an
+HTTP exchange in both directions and six socket syscalls.
 Every later phase keeps the same BootInfo contract, so the loader does not
 change for memory management, storage, SMP or drivers.
 
@@ -319,6 +320,26 @@ change for memory management, storage, SMP or drivers.
   checksums and DHCP option parsing (938 checks).
 - All 28 gates pass at `v0.16.0`.
 
+## Phase 4C - TCP and sockets (done)
+
+- TCP transport (`kernel/net/tcp.c`): four sockets, 1400-byte segments, 4 KiB
+  receive rings, connect with bounded SYN retries, listen/accept, send with
+  bounded retransmission, receive and close; in-order only, no options.
+- Listener and command line: `tcp_listen()`/`tcp_accept()`, `net.tcp=<port>`
+  selects the remote peer for the client leg and `net.serve=<seconds>` bounds the
+  served connection.
+- Socket syscalls 9-14 (`CONNECT`, `SEND`, `RECV`, `CLOSE`, `LISTEN`, `ACCEPT`)
+  hand typed `HANDLE_SOCKET` handles to the current process.
+- `tcp_selftest()` inside `net_selftest()`: listens on 8080, fetches
+  `GET / HTTP/1.0` from the gate's responder, repeats it through the syscalls
+  and serves one request itself; prints `tcp listen ready`, `tcp connect ok`,
+  `tcp http ok`, `tcp socket syscall ok` and `tcp http served`.
+- `make test-tcp` drives both directions through `scripts/run-net-tcp.py`
+  (slirp responder plus a QEMU host forward to guest port 8080) and then runs
+  `check-disk.py`; `scripts/boot-check.py` takes `EXPECT_TCP=yes`; `make
+  test-host` covers TCP and UDP checksums (943 checks).
+- All 29 gates pass at `v0.17.0`.
+
 ## Phase 3B - remaining storage work
 
 - Journal wrapping, revoke records and orphan-file recovery.
@@ -336,9 +357,10 @@ change for memory management, storage, SMP or drivers.
 ## Phase 4 - devices and userspace
 
 - xHCI USB, HID, UAC2 audio (phase 4A delivered the PS/2 console input step,
-  phase 4B the virtio-net/IPv4 slice).
-- TCP, a DNS resolver, the socket layer and a routing table on top of the phase
-  4B IPv4 stack; IPv6, fragmentation and reassembly.
+  phase 4B the virtio-net/IPv4 slice and phase 4C the TCP/socket slice).
+- A DNS resolver and a routing table on top of the phase 4B/4C stack, richer
+  socket semantics (bind, options, non-blocking, more than four sockets); IPv6,
+  fragmentation and reassembly.
 - Software framebuffer -> VirtIO-GPU -> vendor GPU drivers.
 - Workbench userspace, `.app` bundles, `.crpkg` packages, capability model.
 - POSIX-like layer: 64-bit UID/GID, ACLs, process groups, signals.

@@ -15,6 +15,7 @@
 #   make test-nvme   boot from an NVMe namespace and verify the disk
 #   make test-ahci   boot from a SATA (AHCI) disk and verify the disk
 #   make test-net    boot with a virtio-net NIC and verify DHCP/ARP/ICMP
+#   make test-tcp    boot TCP client/server + HTTP over virtio-net
 #   make crypt-disk  build the AES-256-XTS crypt test disk
 #   make test-crypt  boot from an encrypted root and verify the disk
 #   make test-crypt-recovery  unlock the encrypted root with the recovery keyslot
@@ -80,7 +81,10 @@ QEMU_ACCEL ?=
 QEMU_DISPLAY ?= none
 QEMU_EXTRA ?=
 SERIAL_TCP ?=
+TCP_SERVE_SEC ?= 15
+TCP_RUN_TIMEOUT_SEC ?= 180
 NET_MODE ?=
+NET_HOSTFWD ?=
 OVMF_CODE ?= /usr/share/OVMF/OVMF_CODE_4M.fd
 OVMF_VARS ?= /usr/share/OVMF/OVMF_VARS_4M.fd
 
@@ -181,7 +185,7 @@ HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
         test-raid-repair test-raid10-repair test-journal-csum test-journal-replay \
         test-crypt test-crypt-recovery test-crypt-wrongkey test-crypt-tamper test-crypt-ni \
         test-crypt-prompt test-crypt-prompt-wrong test-crypt-prompt-timeout \
-        test-crypt-keyboard test-crypt-keyboard-wrong crypt-run test-net \
+        test-crypt-keyboard test-crypt-keyboard-wrong crypt-run test-net test-tcp \
         crash-disk \
         check-disk size check-efi repro test-host preflight version options clean distclean help
 
@@ -301,6 +305,7 @@ run: esp
 		QEMU_CPU="$(QEMU_CPU)" QEMU_ACCEL="$(QEMU_ACCEL)" \
 		QEMU_DISPLAY="$(QEMU_DISPLAY)" QEMU_EXTRA="$(QEMU_EXTRA)" \
 		SERIAL_TCP="$(SERIAL_TCP)" NET_MODE="$(NET_MODE)" \
+		NET_HOSTFWD="$(NET_HOSTFWD)" \
 		DISK_IMG=$(if $(DISK_IMG),$(abspath $(DISK_IMG)),) \
 		NVME_DISK=$(if $(NVME_DISK),$(abspath $(NVME_DISK)),) \
 		NVME_SERIAL="$(NVME_SERIAL)" EXTRA_DISKS="$(EXTRA_DISKS)" \
@@ -320,6 +325,18 @@ test-net: esp
 	$(Q)rm -f $(DISK_IMG)
 	$(Q)$(MAKE) --no-print-directory run NET_MODE=user
 	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" no "$(EXPECT_NVME)" no no no any yes
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
+# TCP gate: the guest is the HTTP client and server at once.  The driver plays
+# the remote HTTP host over slirp and fetches the guest listener through
+# NET_HOSTFWD, so both directions are exercised end to end.
+test-tcp: esp
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(PYTHON) scripts/run-net-tcp.py --repo $(CURDIR) \
+		--disk $(abspath $(DISK_IMG)) --serial-log $(abspath $(SERIAL_LOG)) \
+		--exit-code $(abspath $(QEMU_EXIT)) --serve-seconds $(TCP_SERVE_SEC) \
+		--run-timeout $(TCP_RUN_TIMEOUT_SEC)
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" no no no no no any no yes
 	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 
 test:
@@ -502,6 +519,10 @@ options:
 	@printf '  %-16s %s\n' EXPECT_CRYPT "$(EXPECT_CRYPT)"
 	@printf '  %-16s %s\n' EXPECT_AES "$(EXPECT_AES)"
 	@printf '  %-16s %s\n' EXPECT_NET "$(EXPECT_NET)"
+	@printf '  %-16s %s\n' NET_MODE "$(NET_MODE)"
+	@printf '  %-16s %s\n' NET_HOSTFWD "$(NET_HOSTFWD)"
+	@printf '  %-16s %s\n' TCP_SERVE_SEC "$(TCP_SERVE_SEC)"
+	@printf '  %-16s %s\n' TCP_RUN_TIMEOUT_SEC "$(TCP_RUN_TIMEOUT_SEC)"
 	@printf '  %-16s %s\n' MEMORY_MB "$(MEMORY_MB)"
 	@printf '  %-16s %s\n' SMP "$(SMP)"
 	@printf '  %-16s %s\n' TIMEOUT_SEC "$(TIMEOUT_SEC)"

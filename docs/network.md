@@ -1,16 +1,18 @@
-# Networking: net.device, virtio-net and IPv4
+# Networking: net.device, virtio-net, IPv4 and TCP
 
 The kernel owns a small IPv4 stack behind a device-neutral `net.device` layer.
-Phase 4B delivers the first slice of the specification's Phase 4 networking
+Phase 4B delivered the first slice of the specification's Phase 4 networking
 gate: a legacy virtio-net NIC, Ethernet framing, ARP, IPv4, ICMP echo, UDP and a
-DHCP client, all exercised by a boot self-test against QEMU user-mode networking
-(slirp). TCP, DNS and the socket layer are later increments.
+DHCP client. Phase 4C adds a minimal TCP transport (`kernel/net/tcp.c`) with a
+client, a listener, an HTTP exchange in both directions and six socket
+syscalls, all exercised by a boot self-test against QEMU user-mode networking
+(slirp). A DNS resolver is the next increment.
 
 ```
-        DHCP client          ICMP echo            (TCP, DNS, sockets: later)
-             |                   |
-             +--------+  +-------+
-                      v  v
+   DHCP client    ICMP echo    TCP client/server (six socket syscalls)
+        |              |              |
+        +--------------+--------------+
+                       v
              net_udp_send / net_ipv4_send_raw / net_eth_send
                       |
               ARP cache (8 entries) + IPv4 header + UDP checksum
@@ -114,6 +116,9 @@ live in `kernel/net/net_util.c` and are host-testable;
 - **ICMP.** Only echo replies (type 0, code 0) with a valid checksum and the
   expected identifier/sequence are accepted; source address and TTL are recorded
   for the marker line.
+- **TCP ingress.** Protocol 6 segments are handed to
+  `tcp_receive_segment()` with the source and destination addresses the
+  pseudo-header checksum needs; the transport owns the remainder.
 - **UDP.** Lengths are bounds-checked, the destination port selects one of four
   handlers, and the source checksum is not verified. Transmit computes the
   pseudo-header checksum and substitutes `0xFFFF` for a zero result.
@@ -136,6 +141,88 @@ live in `kernel/net/net_util.c` and are host-testable;
 Only option 1 (mask), 3 (router), 6 (DNS) and 54 (server) are parsed; lease
 time, renewal and NAK are not acted on beyond failing the exchange.
 
+## TCP transport
+
+`kernel/net/tcp.c` is deliberately small: four sockets (`NET_TCP_MAX`), 4 KiB
+of receive ring per socket (`NET_TCP_RX_BYTES`), a 1400-byte segment limit
+(`NET_TCP_MSS`) and no options other than the 20-byte fixed header.
+
+- **Sockets.** `tcp_socket_new()` takes the first free slot, inherits
+  `net_config_get()->ip` as the local address and assigns the ephemeral port
+  `49152 + slot`. States run `CLOSED -> SYN_SENT/LISTEN -> SYN_RECEIVED ->
+  ESTABLISHED -> CLOSE_WAIT/FIN_WAIT -> TIME_WAIT`, matching
+  `enum net_tcp_state` in `include/crug/net.h`. The receive window advertised
+  in every segment is the free space left in the ring.
+- **Handshake.** `tcp_connect()` picks an initial sequence number from
+  `timer_ticks() ^ counter` (`counter` advances by 0x9E3779B9 per socket), sends
+  SYN, waits for SYN+ACK and acknowledges. Retries reuse the same ISN; a RST or
+  a timeout after five attempts (`NET_TCP_RETRIES`) fails the connect.
+- **Ingress.** `tcp_receive_segment()` verifies the pseudo-header checksum
+  (`net_tcp_checksum_ok`), matches the 4-tuple, handles RST, completes both
+  handshakes, accepts in-order payload into the ring and acknowledges it, ACKs
+  out-of-order payload without buffering it, and moves to `CLOSE_WAIT` or
+  `TIME_WAIT` on FIN.
+- **Send.** `tcp_send()` splits the buffer into `NET_TCP_MSS` chunks and
+  advances `snd_nxt` with each send (the peer's ACK must land inside
+  `[snd_una, snd_nxt]`). Each chunk is retransmitted up to five times with a
+  500 ms acknowledgement wait (`TCP_WAIT_ACK_MS`). There is no congestion
+  window, no Nagle, no SACK and no window probing: the sender ignores
+  `snd_wnd` beyond recording it.
+- **Receive.** `tcp_recv()` drains the ring and, when it is empty, polls the NIC
+  and halts the CPU until data arrives, the peer closes or the timeout expires.
+- **Close.** `tcp_close()` sends FIN+ACK once in `ESTABLISHED`/`CLOSE_WAIT`,
+  then marks the slot `CLOSED`; the socket is freed with
+  `tcp_socket_release()`.
+- **Listener.** `tcp_listen()` parks a socket in `LISTEN`; an incoming SYN
+  allocates a child socket directly in `SYN_RECEIVED` and replies SYN+ACK, and
+  `tcp_accept()` polls until such a child reaches `ESTABLISHED`, returning it
+  once.
+- **Command line.** `tcp_cmdline()` runs from `net_init()` and reads two
+  non-secret tokens from the loader command line: `net.tcp=<port>` names the
+  remote peer for the client leg (1..65535), `net.serve=<seconds>` bounds how
+  long the guest listener waits for the gate's connection (1..3600). Without
+  `net.tcp=` the TCP self-test prints `CRUGOS: tcp selftest skipped` and the boot
+  still passes.
+
+`tcp_selftest()` runs inside `net_selftest()` after the ICMP check and walks
+four steps, every one of which must succeed:
+
+1. `tcp_listen()` on port 8080 (`NET_TCP_DEFAULT_HTTP_PORT`).
+2. `tcp_connect()` to the gateway on `net.tcp=<port>`, then send
+   `GET / HTTP/1.0` + `Host: crugos` and check that the reply contains
+   `200 OK` and `crugos-tcp-ok`.
+3. `syscall_socket_selftest()` repeats the exchange through
+   `SYS_SOCKET_CONNECT/SEND/RECV/CLOSE` (numbers 9..12) against the same peer,
+   proving the handle-table path works.
+4. `tcp_accept()` the gate's own connection and answer it with
+   `HTTP/1.0 200 OK` and a short body.
+
+```
+CRUGOS: tcp listen ready (port 8080)
+CRUGOS: tcp connect ok (10.0.2.2:52847)
+CRUGOS: tcp http ok (53 bytes)
+CRUGOS: tcp socket syscall ok
+CRUGOS: tcp http served (72 bytes)
+```
+
+## Socket syscalls
+
+`kernel/core/syscall.c` exposes six calls on top of the transport, all using
+typed handles (`HANDLE_SOCKET`) in the process handle table:
+
+| Number | Call | Arguments | Returns |
+| --- | --- | --- | --- |
+| 9 | `SYS_SOCKET_CONNECT` | `ip`, `port` | socket handle, `SYS_EIO`/`SYS_ENOMEM` |
+| 10 | `SYS_SOCKET_SEND` | `handle`, `buf`, `len` | bytes sent |
+| 11 | `SYS_SOCKET_RECV` | `handle`, `buf`, `len` | bytes received (timeout 5000 ms) |
+| 12 | `SYS_SOCKET_CLOSE` | `handle` | 0, or `SYS_EBADF` |
+| 13 | `SYS_SOCKET_LISTEN` | `port` | listening handle |
+| 14 | `SYS_SOCKET_ACCEPT` | `handle` | accepted handle, or `SYS_EAGAIN` |
+
+`HANDLE_CLOSE` on a socket handle closes the connection before dropping the
+handle. There is no `bind`, no address struct and no non-blocking mode: the
+queue length, addresses and timeouts are fixed in the kernel.
+
 ## Boot integration
 
 `kernel/core/main.c` probes the stack right after `input_init()`:
@@ -151,9 +238,10 @@ CRUGOS: net ready (1 device(s))
 - no device: `CRUGOS: net selftest skipped (no network device)` and the test
   passes, so an ordinary boot without a NIC stays green;
 - `dhcp_acquire(1000 ms)`, `arp_resolve(gateway, 3000 ms)` and
-  `icmp_ping(gateway, seq 1, 3000 ms)`; failures print
-  `CRUGOS: net selftest failed (dhcp|arp|icmp)` and the kernel panics with
-  `selftest: network`.
+  `icmp_ping(gateway, seq 1, 3000 ms)`; then `tcp_selftest()`, which is skipped
+  unless the loader command line carries `net.tcp=<port>`; failures print
+  `CRUGOS: net selftest failed (dhcp|arp|icmp|tcp listen|tcp connect|tcp http|
+  tcp socket|tcp serve)` and the kernel panics with `selftest: network`.
 
 A healthy gate prints:
 
@@ -162,10 +250,17 @@ CRUGOS: net ready (1 device(s))
 CRUGOS: dhcp lease 10.0.2.15/255.255.255.0 gw 10.0.2.2 dns 10.0.2.3
 CRUGOS: arp resolved 10.0.2.2 52:55:0a:00:02:02
 CRUGOS: icmp echo reply from 10.0.2.2 seq=1 ttl=255
+CRUGOS: tcp listen ready (port 8080)
+CRUGOS: tcp connect ok (10.0.2.2:52847)
+CRUGOS: tcp http ok (53 bytes)
+CRUGOS: tcp socket syscall ok
+CRUGOS: tcp http served (72 bytes)
 CRUGOS: net selftest ok
 ```
 
-The boot ends with `CRUGOS: phase 4b boot ok`.
+The TCP lines appear only in a gate that passes `net.tcp=`; an ordinary
+`make test` or `make test-net` boot has no `tcp listen` line and stays green.
+The boot ends with `CRUGOS: phase 4c boot ok`.
 
 ## QEMU wiring
 
@@ -181,23 +276,41 @@ The boot ends with `CRUGOS: phase 4b boot ok`.
 dead time. Boots without `NET_MODE` keep the old command line, so every earlier
 gate is unaffected (the serial log then has no `virtio : net` line).
 
+The TCP gate needs a peer the guest can reach and a way to reach the guest:
+`scripts/run-net-tcp.py` starts an HTTP responder on a free `127.0.0.1` port
+(the guest sees slirp's `10.0.2.2` as the host loopback), passes it to the guest
+as `net.tcp=<port> net.serve=<seconds>` through `CMDLINE_EXTRA`, and sets
+`NET_HOSTFWD=tcp:127.0.0.1:<forward port>-:8080` so the same script can fetch
+the guest's own listener. `run-qemu.sh` maps that variable to
+`-netdev user,...,hostfwd=...`; the `tcp:` protocol prefix is required by QEMU.
+
 ## Gates and tests
 
 | Target | What it proves |
 | --- | --- |
 | `make test` | No NIC: the stack is skipped, all earlier markers still pass |
 | `make test-net` | slirp NIC: DHCP lease, gateway ARP, one ICMP echo, then `e2fsck` on the disk |
-| `make test-host` | Wire helpers, RFC 1071 checksums, DHCP option parsing (938 checks) |
+| `make test-tcp` | A responding host peer plus a host fetch of the guest listener: two client connections complete an HTTP exchange, the socket syscalls work, the guest serves one request, then `e2fsck` |
+| `make test-host` | Wire helpers, RFC 1071 checksums, TCP/UDP checksums, DHCP option parsing (943 checks) |
 
 `make test-net` runs the guest with `NET_MODE=user` and passes
 `EXPECT_NET=yes` to `scripts/boot-check.py`, which then requires
 `CRUGOS: net selftest ok` plus the lease, ARP and ICMP lines and their
-address/sequence shapes.
+address/sequence shapes. `make test-tcp` adds `EXPECT_TCP=yes`, which requires
+the five `CRUGOS: tcp ...` lines with `(port N)`, `(a.b.c.d:port)`,
+`(N bytes)` and `(N bytes)` shapes, and the driver exits 0 only when both
+legs succeeded (`ok: tcp client/server http`).
 
 ## Known limits
 
-- No TCP, DNS resolver, socket API or IPv6. No fragmentation or reassembly,
-  ICMP errors, TCP-style retransmission or routing table.
+- No DNS resolver, no IPv6, no fragmentation or reassembly, no ICMP errors and
+  no routing table. TCP is an in-order bring-up transport: no options beyond the
+  fixed header, no congestion control, no SACK, no TIME_WAIT timer (the slot is
+  reclaimed immediately), no window probing, out-of-order segments are dropped
+  rather than buffered, and the ISN is not randomized to cryptographic quality.
+- Sockets are limited to the six syscalls above, four concurrent sockets and
+  fixed 5000 ms accept/recv timeouts; there is no `bind`, `setsockopt` or
+  non-blocking mode.
 - ARP entries never expire, and the cache holds eight destinations.
 - DHCP renewal/rebind, lease expiry, NAK handling and option 121 style routes
   are not implemented; the client is boot-time only.

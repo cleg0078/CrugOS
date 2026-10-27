@@ -36,7 +36,7 @@ static u8 g_icmp_ttl;
 static u32 g_icmp_src;
 static int g_icmp_got;
 
-void net_init(void)
+void net_init(const boot_info *bi)
 {
     g_devices = 0;
     g_device_count = 0;
@@ -44,6 +44,8 @@ void net_init(void)
     memset(&g_config, 0, sizeof(g_config));
     memset(g_arp, 0, sizeof(g_arp));
     memset(g_udp, 0, sizeof(g_udp));
+    tcp_init();
+    tcp_cmdline(bi);
     dhcp_init();
     virtio_net_init();
 }
@@ -369,6 +371,9 @@ static void ipv4_receive(const u8 *p, usize len)
         icmp_receive(p, ihl, total - ihl);
     else if (proto == NET_IP_PROTO_UDP)
         udp_receive(p + 12, p + 16, p + ihl, total - ihl);
+    else if (proto == NET_IP_PROTO_TCP)
+        tcp_receive_segment(net_get32(p + 12), net_get32(p + 16), p + ihl,
+                            total - ihl);
 }
 
 void net_receive(struct net_device *nd, const void *frame, usize len)
@@ -422,6 +427,15 @@ static int icmp_ping(u32 dst, u16 seq, u32 timeout_ms)
     return -1;
 }
 
+int net_ipv4_send(u32 dst_ip, u8 proto, const void *payload, usize len)
+{
+    u8 mac[NET_MAC_LEN];
+
+    if (arp_resolve(dst_ip, mac, 3000u) != 0)
+        return -1;
+    return net_ipv4_send_raw(mac, g_config.ip, dst_ip, proto, payload, len);
+}
+
 int net_selftest(void)
 {
     struct net_device *nd = net_first();
@@ -463,6 +477,10 @@ int net_selftest(void)
             (unsigned)(g_icmp_src >> 24), (unsigned)((g_icmp_src >> 16) & 0xFFu),
             (unsigned)((g_icmp_src >> 8) & 0xFFu), (unsigned)(g_icmp_src & 0xFFu),
             (unsigned)g_icmp_ttl);
+    if (!tcp_selftest()) {
+        kprintf("CRUGOS: net selftest failed (tcp)\n");
+        return 0;
+    }
     kprintf("CRUGOS: net selftest ok\n");
     return 1;
 }

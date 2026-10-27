@@ -21,7 +21,8 @@ OVMF (UEFI firmware)
        - GDT/TSS, %gs per-CPU data, IDT and exceptions
        - LAPIC + TSC/LAPIC timer
        - kernel heap, input.device + polled PS/2 keyboard, net.device +
-         polled virtio-net (Ethernet/ARP/IPv4/ICMP/UDP + DHCP client)
+         polled virtio-net (Ethernet/ARP/IPv4/ICMP/UDP + DHCP client) and the
+         TCP transport with its six socket syscalls
        - virtio-blk/NVMe/AHCI + GPT + AES-256-XTS crypt unlock + RAID
          assembly (cold-spare rebuild) + writable ext4, JBD2 replay, self-test
        - scheduler, handles and MsgPort IPC
@@ -34,9 +35,10 @@ OVMF (UEFI firmware)
 `include/crug/bootinfo.h` is the single contract between loader and kernel.
 The structure is versioned (`magic = 0x43524731`, `version = 1`) and the kernel
 refuses to boot if either does not match or if required fields are invalid.
-Phases 1 through 4B did not change the layout; phase 3B-9 is the first
-kernel to consume the `command_line` field, and phase 3B-10 falls back to an
-interactive serial passphrase prompt when no token is present. The loader caps
+Phases 1 through 4C did not change the layout; phase 3B-9 is the first
+kernel to consume the `command_line` field, phase 3B-10 falls back to an
+interactive serial passphrase prompt when no token is present, and phase 4C
+reads the non-secret `net.tcp=` / `net.serve=` tokens from the same field. The loader caps
 the command line at 511 bytes and the kernel wipes the page after it copies the
 `crypt.pass=` value.
 
@@ -97,10 +99,12 @@ post-snapshot allocations cannot push it over capacity.
    i8042 controller (translation on, IRQ1/IRQ12 masked) and enable scanning.
    The boot prints `CRUGOS: input ready (serial + keyboard)`, or
    `(serial only)` when no i8042 keyboard answered.
-9. `net_init`: reset `net.device`, then probe legacy virtio-net PCI functions
-   (up to four `eth0`..`eth3`) and register them, and bind the DHCP client to
-   UDP port 68. The boot prints `CRUGOS: net ready (N device(s))`. The network
-   self-test runs later, with the other self-tests.
+9. `net_init`: reset `net.device` and `tcp_init`, then probe legacy virtio-net
+   PCI functions (up to four `eth0`..`eth3`) and register them, bind the DHCP
+   client to UDP port 68 and read the `net.tcp=<port>` / `net.serve=<seconds>`
+   command-line tokens through `tcp_cmdline`. The boot prints
+   `CRUGOS: net ready (N device(s))`. The network self-test runs later, with the
+   other self-tests.
 10. `storage_init`: `block_init`, the legacy virtio-blk devices, then the
    NVMe driver (PCI class 01/08/02, admin/I/O queues, namespace 1) and the AHCI
    driver (PCI class 01/06/01, port bring-up, IDENTIFY, `sd` names), and the GPT
@@ -148,9 +152,11 @@ post-snapshot allocations cannot push it over capacity.
     heap, block/GPT/ext4/storage (including the read-write round trip, checksum
     verification and a journal replay test), handles, scheduler, message ports
     and syscalls, then the network self-test (DHCP lease, ARP, ICMP echo) when a
-    NIC is present.
+    NIC is present, followed by the TCP checks (listen on 8080, HTTP client leg
+    against `net.tcp=`, the same exchange through the socket syscalls, and one
+    served request bounded by `net.serve=`) when that token was supplied.
 14. `report_boot`, `storage_lock` (wipes the passphrase, the volume keys and
-    the bounce buffer), `CRUGOS: phase 4b boot ok`, `arch_exit_qemu(0x10)`.
+    the bounce buffer), `CRUGOS: phase 4c boot ok`, `arch_exit_qemu(0x10)`.
 
 Storage is still brought up with interrupts disabled: the virtio driver polls
 its used ring, the NVMe driver polls completion queues and the AHCI driver polls
@@ -334,9 +340,14 @@ CRUGOS: journal selftest ok
 CRUGOS: dhcp lease 10.0.2.15/255.255.255.0 gw 10.0.2.2 dns 10.0.2.3
 CRUGOS: arp resolved 10.0.2.2 52:55:0a:00:02:02
 CRUGOS: icmp echo reply from 10.0.2.2 seq=1 ttl=255
+CRUGOS: tcp listen ready (port 8080)      # only with net.tcp= on the command line
+CRUGOS: tcp connect ok (10.0.2.2:52847)
+CRUGOS: tcp http ok (53 bytes)
+CRUGOS: tcp socket syscall ok
+CRUGOS: tcp http served (72 bytes)
 CRUGOS: net selftest ok
 CRUGOS: selftest ok
-CRUGOS: phase 4b boot ok
+CRUGOS: phase 4c boot ok
 ```
 
 The `virtio : net eth0 mac ...` line, the lease, the ARP resolution, the echo
@@ -344,7 +355,11 @@ reply and `net selftest ok` appear only when a NIC is present and the network
 self-test runs; without one the kernel prints `CRUGOS: net selftest skipped (no
 network device)` and the boot still succeeds. The test gate wires a slirp
 user-mode NIC whose DHCP server hands out `10.0.2.15/24` and whose gateway
-`10.0.2.2` answers ARP and echo. See [network.md](network.md).
+`10.0.2.2` answers ARP and echo. The five `tcp` lines appear only when the
+loader command line carried `net.tcp=<port>`: `make test-tcp` runs
+`scripts/run-net-tcp.py`, which answers the guest over slirp's host loopback and
+fetches the guest listener through a QEMU host forward. See
+[network.md](network.md).
 
 `raid ready` and `raid healthy`/`raid degraded` appear only on the RAID
 root path, and the `crypt` lines only on the encrypted path; the single-disk
@@ -404,10 +419,12 @@ drains the serial line first and only then polls the i8042 keyboard and reads
   ESP-visible. The header and keyslots are MAC-protected, the passphrase, keys
   and bounce buffer are wiped by `storage_lock()` before the final marker, and
   the boot report redacts the command line.
-- Networking stops at a polled IPv4 host: no TCP, DNS resolver, socket layer,
-  routing table, fragmentation/reassembly or IPv6; ARP entries never expire and
-  there is no DHCP renewal; UDP receive checksums are not verified and the stack
-  has no authentication or firewalling. At most four NICs and four UDP port
-  bindings.
+- Networking stops at a polled IPv4 host plus a minimal TCP transport: no DNS
+  resolver, routing table, fragmentation/reassembly or IPv6; TCP has no options,
+  congestion control, SACK, TIME_WAIT timer, window probing or out-of-order
+  buffering, and the socket layer is six fixed syscalls over four concurrent
+  sockets with fixed 5000 ms timeouts. ARP entries never expire and there is no
+  DHCP renewal; UDP receive checksums are not verified and the stack has no
+  authentication or firewalling. At most four NICs and four UDP port bindings.
 - `SMEP`/`SMAP` are enabled only when the CPU reports them; `qemu64` does not.
 - No shutdown/reset path; QEMU's debug port is the exit mechanism.

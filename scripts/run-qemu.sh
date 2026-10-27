@@ -109,8 +109,14 @@ done
 NET_ARGS=()
 if [[ "$NET_MODE" == "user" ]]; then
     # QEMU slirp: DHCP lease 10.0.2.15, gateway 10.0.2.2 answers ARP/ICMP.
-    # romfile= drops the iPXE option ROM to keep the boot fast.
-    NET_ARGS=(-netdev "user,id=net0" \
+    # NET_HOSTFWD adds a host-side listener that reaches a guest port, which is
+    # how the TCP gate fetches the guest's HTTP server.  romfile= drops the
+    # iPXE option ROM to keep the boot fast.
+    NETDEV_SPEC="user,id=net0"
+    if [[ -n "$NET_HOSTFWD" ]]; then
+        NETDEV_SPEC="$NETDEV_SPEC,hostfwd=$NET_HOSTFWD"
+    fi
+    NET_ARGS=(-netdev "$NETDEV_SPEC" \
               -device "virtio-net-pci,netdev=net0,disable-modern=on,romfile=")
 elif [[ -n "$NET_MODE" && "$NET_MODE" != "none" ]]; then
     echo "run-qemu: unsupported NET_MODE '$NET_MODE'" >&2

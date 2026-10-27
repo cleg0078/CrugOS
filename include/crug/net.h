@@ -2,6 +2,7 @@
 #define CRUG_NET_H
 
 #include <crug/types.h>
+#include <crug/bootinfo.h>
 
 #define NET_NAME_MAX 16u
 #define NET_MAC_LEN 6u
@@ -20,6 +21,62 @@
 
 #define NET_DHCP_CLIENT_PORT 68u
 #define NET_DHCP_SERVER_PORT 67u
+
+/* TCP (phase 4C): a minimal in-order client/server transport. */
+#define NET_TCP_MAX 4u
+#define NET_TCP_RX_BYTES 4096u
+#define NET_TCP_MSS 1400u
+#define NET_TCP_DEFAULT_HTTP_PORT 8080u
+#define NET_TCP_RETRIES 5u
+
+enum net_tcp_state {
+    NET_TCP_CLOSED = 0,
+    NET_TCP_LISTEN,
+    NET_TCP_SYN_SENT,
+    NET_TCP_SYN_RECEIVED,
+    NET_TCP_ESTABLISHED,
+    NET_TCP_FIN_WAIT_1,
+    NET_TCP_FIN_WAIT_2,
+    NET_TCP_CLOSE_WAIT,
+    NET_TCP_LAST_ACK,
+    NET_TCP_TIME_WAIT
+};
+
+/* Sequence numbers compare modulo 2^32 (RFC 793). */
+static inline int net_seq_lt(u32 a, u32 b)
+{
+    return (int)(a - b) < 0;
+}
+
+static inline int net_seq_le(u32 a, u32 b)
+{
+    return (int)(a - b) <= 0;
+}
+
+static inline int net_seq_gt(u32 a, u32 b)
+{
+    return net_seq_lt(b, a);
+}
+
+/* One connection control block, its receive window and its accept state. */
+struct net_tcp_socket {
+    u32 state;
+    u32 local_ip;
+    u32 remote_ip;
+    u16 local_port;
+    u16 remote_port;
+    u16 snd_wnd;
+    u32 snd_una;
+    u32 snd_nxt;
+    u32 rcv_nxt;
+    u32 listen_port;
+    u32 accepted;
+    u32 used;
+    u32 peer_closed;
+    u32 rx_head;
+    u32 rx_count;
+    u8 rx[NET_TCP_RX_BYTES];
+};
 
 /* A network interface. Drivers fill one in and call net_register(). */
 struct net_device {
@@ -50,7 +107,8 @@ struct net_dhcp_lease {
     u32 dns;
 };
 
-void net_init(void);
+void net_init(const boot_info *bi);
+void net_cmdline(const boot_info *bi);
 int net_register(struct net_device *nd);
 u64 net_device_count(void);
 struct net_device *net_first(void);
@@ -61,6 +119,7 @@ int net_eth_send(struct net_device *nd, const u8 *dst_mac, u16 ethertype,
                  const void *payload, usize len);
 int net_ipv4_send_raw(const u8 *dst_mac, u32 src_ip, u32 dst_ip, u8 proto,
                       const void *payload, usize len);
+int net_ipv4_send(u32 dst_ip, u8 proto, const void *payload, usize len);
 int net_udp_send(const u8 *dst_mac, u32 src_ip, u32 dst_ip, u16 src_port,
                  u16 dst_port, const void *payload, usize len);
 int net_udp_register(u16 port,
@@ -100,6 +159,22 @@ u16 net_checksum_final(u32 sum);
 u16 net_checksum(const void *data, usize len);
 int net_dhcp_parse(const u8 *packet, usize len, u32 xid,
                    struct net_dhcp_lease *out);
+u16 net_tcp_checksum(u32 src, u32 dst, const u8 *seg, usize len);
+int net_tcp_checksum_ok(u32 src, u32 dst, const u8 *seg, usize len);
+
+/* TCP transport, kernel/net/tcp.c. */
+void tcp_init(void);
+void tcp_cmdline(const boot_info *bi);
+void tcp_receive_segment(u32 src_ip, u32 dst_ip, const u8 *seg, usize len);
+struct net_tcp_socket *tcp_socket_new(void);
+void tcp_socket_release(struct net_tcp_socket *s);
+int tcp_connect(struct net_tcp_socket *s, u32 ip, u16 port, u32 timeout_ms);
+int tcp_listen(struct net_tcp_socket *s, u16 port);
+struct net_tcp_socket *tcp_accept(struct net_tcp_socket *s, u32 timeout_ms);
+int tcp_send(struct net_tcp_socket *s, const void *data, usize len);
+int tcp_recv(struct net_tcp_socket *s, void *data, usize len, u32 timeout_ms);
+int tcp_close(struct net_tcp_socket *s, u32 timeout_ms);
+int tcp_selftest(void);
 
 void dhcp_init(void);
 int dhcp_acquire(u32 timeout_ms, struct net_config *config);

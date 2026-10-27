@@ -1,6 +1,6 @@
 # Building CrugOS
 
-This document describes the phase 4B build system: how the kernel, the UEFI
+This document describes the phase 4C build system: how the kernel, the UEFI
 loader, the host crypto tool and the test disk images are built, which
 invariants the link must preserve, and how to diagnose the failure modes that
 are specific to this toolchain.
@@ -27,6 +27,7 @@ make all         # kernel.elf, BOOTX64.EFI and the ESP tree
 make run         # boot the ESP tree under QEMU + OVMF
 make test        # boot, verify markers/version/AVX2, then e2fsck the disk
 make test-net    # boot with a slirp virtio-net NIC and verify DHCP/ARP/ICMP
+make test-tcp    # TCP client/server and an HTTP exchange, both directions
 make test-raid   # boot a two-member RAID1 root and check both members
 make test-raid10 # boot a four-member RAID10 root and check every member
 make test-nvme   # boot from an NVMe namespace and check the image
@@ -49,7 +50,7 @@ make test-crypt-keyboard  # type the passphrase on the PS/2 keyboard and boot
 make test-crypt-keyboard-wrong  # three wrong keyboard passphrases must lock the volume
 make crypt-run   # boot the encrypted disk in a QEMU window for real typing
 make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
-make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/IPv4 checksums/DHCP parsing
+make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/IPv4/TCP/UDP checksums/DHCP parsing
 make disk        # build the GPT/ext4 test disk at build/<arch>/disk.img
 make raid-disks  # build the two GPT/ext4 RAID1 member disks
 make raid10-disks  # build the four GPT/ext4 RAID10 member disks
@@ -90,7 +91,11 @@ options` prints the complete resolved set (including paths derived from
 | `EXPECT_CRYPT` | `no` | encrypted-root expectation: `no`, `yes`, `wrong` (unlock must fail) or `locked` (the console prompt timed out) |
 | `EXPECT_AES` | `any` | AES implementation the boot must report: `software`, `aes-ni` or `any` |
 | `EXPECT_NET` | `no` | `yes` requires the `make test-net` DHCP/ARP/ICMP markers (`no` skips them) |
+| `EXPECT_TCP` | `no` | `yes` requires the five `CRUGOS: tcp ...` markers written by `make test-tcp` |
 | `NET_MODE` | empty | `user` attaches a slirp user-mode virtio-net NIC (`-netdev user,id=net0`); empty means no NIC |
+| `NET_HOSTFWD` | empty | forwarded port for the slirp NIC, e.g. `tcp:127.0.0.1:<port>-:8080`; the `tcp:` protocol prefix is mandatory |
+| `TCP_SERVE_SEC` | `15` | how long the guest listener waits for the gate's connection (`net.serve=`) |
+| `TCP_RUN_TIMEOUT_SEC` | `180` | wall-clock budget for `make test-tcp` (the TCP boot is slower than a plain one) |
 | `CRASH_IMG` | `$(BUILD)/crash.img` | crash-gate image (journal commit, no checkpoint) |
 | `CRASH_REPLAY_IMG` | `$(BUILD)/crash-replay.img` | copy the kernel replays on the second crash-gate boot |
 | `CC` | `crugc` | compiler for kernel and loader objects |
@@ -306,6 +311,17 @@ slirp stack that provides DHCP, DNS and a gateway. The guest must print
 and `CRUGOS: net selftest ok`; `check-disk.py` then runs on the same disk as in
 `make test`. See [network.md](network.md).
 
+`make test-tcp` goes further: `scripts/run-net-tcp.py` starts an HTTP responder
+on a free `127.0.0.1` port (the guest reaches it as `10.0.2.2`), passes
+`net.tcp=<port> net.serve=<seconds>` through `CMDLINE_EXTRA`, and forwards a
+host port to the guest's port 8080 with `NET_HOSTFWD=tcp:127.0.0.1:<port>-:8080`
+so the script can fetch the guest listener. The gate requires at least two guest
+client connections, a successful fetch of the guest's `HTTP/1.0 200 OK`, the
+five `CRUGOS: tcp ...` markers (`EXPECT_TCP=yes`) and a clean `e2fsck`. The
+boot exits 33 on success and the driver prints
+`ok: tcp client/server http (N echo connection(s), M byte(s) fetched from the
+guest, exit 33)`.
+
 The supported ext4 subset, write path, checksum layout, journal format and
 failure modes are documented in [storage.md](storage.md) and
 [checksums.md](checksums.md).
@@ -511,6 +527,19 @@ randomisation that leaks into the output will fail this target.
   the failure, that `-netdev user,id=net0` is present, and that no other QEMU
   user-mode network is bound to the same options; the client retries three
   DISCOVER/OFFER/REQUEST/ACK rounds.
+- **`CRUGOS: net selftest failed (tcp connect|tcp http|tcp serve)`**: the
+  guest could not reach the gate's responder. Check that `net.tcp=<port>` is on
+  the ESP command line (`CMDLINE_EXTRA`), that the responder is still listening
+  (it runs for the gate's duration), and that `QEMU_EXTRA` did not replace the
+  slirp `-netdev`. A `tcp http served` failure means the host fetch never
+  arrived: verify `NET_HOSTFWD` uses the `tcp:` prefix and that port 8080 is not
+  bound by another guest process.
+- **`Invalid host forwarding rule ... (Bad protocol name)`**: QEMU requires the
+  protocol in `hostfwd`, e.g. `tcp:127.0.0.1:8081-:8080`, not
+  `127.0.0.1:8081-:8080`.
+- **`net selftest failed (tcp socket)`**: the syscall leg failed even though the
+  kernel-level client worked, so the handle table or `SYS_SOCKET_*` numbers are
+  wrong; check `include/crug/syscall.h` and `kernel/core/syscall.c`.
 - **`net selftest failed (arp)` or `(icmp)`**: the lease was not `10.0.2.15/24`
   with gateway `10.0.2.2`, or the ARP reply never arrived. Slirp answers both
   for the default `-netdev user` configuration; a custom `QEMU_EXTRA` subnet or

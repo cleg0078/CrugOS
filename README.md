@@ -8,14 +8,15 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 4B networking (`v0.16.0`)
+## Status: phase 4C TCP and sockets (`v0.17.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
 striped RAID roots that can rebuild a replacement member, an AES-256-XTS
 encrypted root that can be unlocked with a passphrase typed on the console,
-and three storage transports; phase 4A adds console input from a PS/2 keyboard
-and phase 4B adds a small IPv4 stack over a virtio-net NIC:
+and three storage transports; phase 4A adds console input from a PS/2 keyboard,
+phase 4B adds a small IPv4 stack over a virtio-net NIC, and phase 4C extends it
+with TCP, an HTTP exchange in both directions and six socket syscalls:
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -277,6 +278,22 @@ Phase 4B adds networking up to a DHCP-configured IPv4 host:
   suite covers wire helpers, RFC 1071 checksums and DHCP option parsing.
   See [network.md](docs/network.md).
 
+Phase 4C adds TCP and a socket path on top of that stack:
+
+- a small in-order transport (`kernel/net/tcp.c`: four sockets, 1400-byte
+  segments, 4 KiB receive rings, bounded retransmission) with connect,
+  listen/accept, send, receive and close;
+- `tcp_selftest()` runs after the ICMP check: it listens on port 8080, fetches
+  `GET / HTTP/1.0` from a host responder named by the loader command line
+  (`net.tcp=<port>`), repeats the exchange through the socket syscalls, and
+  serves one request itself (`net.serve=<seconds>` bounds the wait);
+- six socket syscalls (numbers 9-14: `CONNECT`, `SEND`, `RECV`, `CLOSE`,
+  `LISTEN`, `ACCEPT`) hand sockets to the current process as typed handles;
+- `make test-tcp` runs `scripts/run-net-tcp.py`, which answers the guest over
+  slirp's host loopback and fetches the guest listener through a QEMU host
+  forward, so both directions are exercised end to end before `e2fsck` checks
+  the disk. See [network.md](docs/network.md).
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -285,17 +302,17 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.16.0 (phase 4b) -- Amiga-inspired microkernel bring-up
+CrugOS 0.17.0 (phase 4c) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.16.0
-pmm    : 118528 pages (463 MiB), free 118527, bitmap 131072 B
+CRUGOS: version 0.17.0
+pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
-vm     : 4 GiB identity map, W^X kernel sections, guard=0x0000000000189000
+vm     : 4 GiB identity map, W^X kernel sections, guard=0x000000000018f000
 CRUGOS: vm ready
 cpu    : smep=no smap=no tsc_deadline=no
 CRUGOS: cpu ready
-timer  : 2689160546 Hz (pit), mode=lapic-periodic, 100 Hz tick
+timer  : 2687896922 Hz (pit), mode=lapic-periodic, 100 Hz tick
 CRUGOS: timer ready
 CRUGOS: heap ready
 CRUGOS: input ready (serial + keyboard)
@@ -325,31 +342,38 @@ CRUGOS: writable storage ok
 CRUGOS: dhcp lease 10.0.2.15/255.255.255.0 gw 10.0.2.2 dns 10.0.2.3
 CRUGOS: arp resolved 10.0.2.2 52:55:0a:00:02:02
 CRUGOS: icmp echo reply from 10.0.2.2 seq=1 ttl=255
+CRUGOS: tcp listen ready (port 8080)
+CRUGOS: tcp connect ok (10.0.2.2:52847)
+CRUGOS: tcp http ok (53 bytes)
+CRUGOS: tcp socket syscall ok
+CRUGOS: tcp http served (72 bytes)
 CRUGOS: net selftest ok
 CRUGOS: selftest ok
-kernel : 0x0000000000100000 size=592 KiB
+kernel : 0x0000000000100000 size=616 KiB
 boot   : cpu=0 acpi_rsdp=0x1f77e000 fdt=0x0 initrd=0x0
-memory : 36 regions, usable 474112 KiB (463 MiB)
-pmm    : total=118528 free=118470 bitmap=131072 B
+memory : 36 regions, usable 474080 KiB (462 MiB)
+pmm    : total=118520 free=118462 bitmap=131072 B
 fb     : 1024x768 stride=1024 format=BGRX8888 base=0x80000000
-cmdline: 23 bytes (redacted)
-entropy: bcf37181be9a9d3f
+cmdline: 28 bytes (redacted)
+entropy: ca02033c50b53413
 wx     : audit ok, identity map 0..4 GiB, guard unmapped
 heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
-boot   : pmm=28898 us cpu=430 us vm=686 us traps=339 us timer=65392 us heap=48 us storage=92899 us sched=306 us syscall=109 us total=189111 us
-timer  : 2689160546 Hz (pit), ticks=77, mono=925886619 ns
-CRUGOS: phase 4b boot ok
+boot   : pmm=28552 us cpu=438 us vm=626 us traps=360 us timer=65357 us heap=60 us storage=94487 us sched=354 us syscall=122 us total=190359 us
+timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
+CRUGOS: phase 4c boot ok
 ```
 
-This excerpt is the `make test-net` boot: the guest leases `10.0.2.15/24` from
-QEMU's user-mode (slirp) DHCP server, resolves the gateway `10.0.2.2` over ARP and
-receives an ICMP echo reply from it, so the log shows `virtio : net eth0 mac
-52:54:00:12:34:56`, the lease, the ARP hit and `net selftest ok`. The fake MAC
-comes from QEMU; a real NIC uses its own. `storage: no GPT on sda` is expected:
-`sda` is the firmware's ESP disk and the test volume is the virtio disk `vda`.
-Argon2id dominates the encrypted gates instead (`m=4096 KiB, t=3`, about 230 ms of
-storage stage), and the unencrypted gates such as this one boot in about 190 ms.
+This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
+server: it leases `10.0.2.15/24` from QEMU's user-mode (slirp) DHCP server,
+resolves the gateway `10.0.2.2` over ARP, echoes ICMP, then fetches an HTTP page
+from a host responder and answers a host fetch of its own listener, so the log
+shows `tcp listen ready`, `tcp connect ok`, `tcp http ok`, `tcp socket syscall
+ok` and `tcp http served`. The fake MAC comes from QEMU; a real NIC uses its
+own. `storage: no GPT on sda` is expected: `sda` is the firmware's ESP disk and
+the test volume is the virtio disk `vda`. Argon2id dominates the encrypted gates
+instead (`m=4096 KiB, t=3`, about 230 ms of storage stage), and the unencrypted
+gates such as this one boot in about 190 ms.
 
 ## Quick start
 
@@ -381,6 +405,7 @@ make test-crypt-keyboard-wrong  # three wrong keyboard lines must lock
 make crypt-run   # boot the encrypted disk in a QEMU window and type it
 make run         # boot and keep the serial log for inspection
 make test-net    # boot with a virtio-net NIC and verify DHCP/ARP/ICMP
+make test-tcp    # TCP client/server plus an HTTP exchange against a host peer
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
 make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, IPv4 checksums, DHCP parsing)
 make check-disk  # e2fsck + persisted-file checks on the latest test disk
@@ -404,7 +429,8 @@ default in the makefile; `make options` prints the full resolved set. Useful
 variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `QEMU_DISPLAY`, `QEMU_EXTRA`, `OVMF_CODE`, `OVMF_VARS`, `REQUIRE_AVX2`,
 `EXPECT_AVX2`, `EXPECT_RAID`, `EXPECT_NVME`, `EXPECT_REBUILD`, `EXPECT_AHCI`,
-`EXPECT_CRYPT`, `EXPECT_AES`, `EXPECT_NET`, `NET_MODE`, `NVME_IMG`, `AHCI_IMG`,
+`EXPECT_CRYPT`, `EXPECT_AES`, `EXPECT_NET`, `EXPECT_TCP`, `NET_MODE`,
+`NET_HOSTFWD`, `TCP_SERVE_SEC`, `TCP_RUN_TIMEOUT_SEC`, `NVME_IMG`, `AHCI_IMG`,
 `CRYPT_IMG`,
 `CRYPT_TAMPER_IMG`, `CRYPT_PASS`, `CRYPT_RECOVERY_PASS`, `CRYPT_M`,
 `CRYPT_PROMPT_TIMEOUT_SEC`, `CRYPT_PROMPT_WRONG_PASS`, `CRYPT_RUN_DISPLAY`,
@@ -421,7 +447,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/core/` | kernel entry, console, printf, panic, self-tests, scheduler, handles, MsgPort, syscall dispatcher, boot report |
 | `kernel/lib/` | freestanding string, formatting, bitmap and console line-editor routines |
 | `kernel/input/` | `input.device`: set-1 scancode decoder and the console byte queue |
-| `kernel/net/` | `net.device`, Ethernet/ARP/IPv4/ICMP/UDP, and the DHCP client |
+| `kernel/net/` | `net.device`, Ethernet/ARP/IPv4/ICMP/UDP, TCP and the DHCP client |
 | `kernel/mm/` | physical allocator, W^X page tables, kernel heap |
 | `kernel/block/` | block-device registry, partitions, bounds checks, RAID1/RAID10, boot-time rebuild and the AES-256-XTS `crypt.device` |
 | `kernel/fs/` | GPT, writable checksummed ext4, checksummed JBD2 journal and the storage boot policy (including the console passphrase prompt) |
@@ -483,12 +509,14 @@ masked console passphrase prompt with retries and a per-attempt timeout; phase
 4A added a polled PS/2 keyboard, `input.device` and a console read path shared
 with the serial line; phase 4B brought up a polled legacy virtio-net driver and
 a small IPv4 stack (`net.device`: Ethernet, ARP, IPv4, ICMP echo, UDP) with a
-DHCP client and a boot self-test that leases, resolves and pings the gateway.
-Remaining phase 3B work is online RAID rebuild, hot spare, scrub and a
+DHCP client and a boot self-test that leases, resolves and pings the gateway;
+phase 4C added a minimal TCP transport with a client, a listener, an HTTP
+exchange in both directions and six socket syscalls, gated end to end by a host
+peer over slirp and a QEMU host forward. Remaining phase 3B work is online RAID rebuild, hot spare, scrub and a
 write-intent bitmap, RAID below encryption, a redundant ESP, TPM/keyfile
 keyslots and USB storage/hotplug; phase 4 continues with framebuffer (GOP)
-console input, a USB HID keyboard and virtual terminals, and TCP, DNS, the
-socket layer and a routing table on top of the phase 4B IPv4 stack. Later phases
+console input, a USB HID keyboard and virtual terminals, plus a DNS resolver, a
+routing table and richer socket semantics on top of the phase 4B/4C stack. Later phases
 cover USB/audio/graphics, Workbench userspace, SMP/IOMMU and virtualisation. See
 [docs/roadmap.md](docs/roadmap.md) for the full sequence and the known
 specification gaps (Crug syntax, cross-architecture compilers and the OVMF

@@ -165,9 +165,48 @@ static void test_dhcp_parse(void)
     CHECK(net_dhcp_parse(packet, len, xid, NULL) == 0);
 }
 
+static void test_tcp_checksum(void)
+{
+    /* 10.0.2.15:49152 -> 10.0.2.2:4444, SYN, 6-byte payload "crugos". */
+    u8 seg[26];
+    u16 sum;
+
+    net_put16(seg + 0, 49152);
+    net_put16(seg + 2, 4444);
+    net_put32(seg + 4, 0x11223344u);
+    net_put32(seg + 8, 0u);
+    seg[12] = (u8)(5u << 4);
+    seg[13] = 0x02u; /* SYN */
+    net_put16(seg + 14, 4096);
+    net_put16(seg + 16, 0u);
+    net_put16(seg + 18, 0u);
+    seg[20] = 'c';
+    seg[21] = 'r';
+    seg[22] = 'u';
+    seg[23] = 'g';
+    seg[24] = 'o';
+    seg[25] = 's';
+
+    sum = net_tcp_checksum(0x0A00020Fu, 0x0A000202u, seg, sizeof(seg));
+    CHECK(sum == 0x29BCu);
+    CHECK(net_tcp_checksum_ok(0x0A00020Fu, 0x0A000202u, seg, sizeof(seg)) == 0);
+
+    net_put16(seg + 16, sum);
+    CHECK(net_tcp_checksum_ok(0x0A00020Fu, 0x0A000202u, seg, sizeof(seg)) == 1);
+
+    /* A flipped payload byte must fail verification. */
+    seg[20] ^= 0xFFu;
+    CHECK(net_tcp_checksum_ok(0x0A00020Fu, 0x0A000202u, seg, sizeof(seg)) == 0);
+    seg[20] ^= 0xFFu;
+
+    /* The pseudo header binds the segment to its endpoints. */
+    CHECK(net_tcp_checksum_ok(0x0A000203u, 0x0A000202u, seg, sizeof(seg)) == 0);
+}
+
 void test_net_functions(void)
 {
     test_wire_helpers();
     test_checksum();
     test_dhcp_parse();
+    test_tcp_checksum();
 }
