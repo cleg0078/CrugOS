@@ -2,6 +2,7 @@
 #include <crug/kernel.h>
 #include <crug/cpu.h>
 #include <crug/timer.h>
+#include <crug/syscall.h>
 
 typedef struct idt_entry {
     u16 offset_low;
@@ -19,6 +20,7 @@ typedef struct idt_pointer {
 } __attribute__((packed)) idt_pointer;
 
 extern u64 isr_stub_table[33];
+extern void isr128(void);
 
 static idt_entry g_idt[256] __attribute__((aligned(16)));
 static idt_pointer g_idtr;
@@ -69,6 +71,7 @@ void idt_init(void)
 
         idt_set(i, isr_stub_table[i], ist, dpl);
     }
+    idt_set(SYSCALL_VECTOR, (u64)(uintptr)isr128, 0, 3);
 
     g_idtr.limit = sizeof(g_idt) - 1;
     g_idtr.base = (u64)(uintptr)&g_idt[0];
@@ -89,6 +92,10 @@ void trap_dispatch(trap_frame *frame)
 
     if (v == 32) {
         timer_on_irq(frame);
+        return;
+    }
+    if (v == SYSCALL_VECTOR) {
+        syscall_dispatch(frame);
         return;
     }
     if (v == 3) {

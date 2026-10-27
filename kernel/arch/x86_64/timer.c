@@ -3,6 +3,7 @@
 #include <crug/cpu.h>
 #include <crug/io.h>
 #include <crug/kernel.h>
+#include <crug/thread.h>
 
 #define PIT_HZ 1193182ull
 #define MSR_TSC_DEADLINE 0x6e0u
@@ -178,6 +179,7 @@ void timer_on_irq(trap_frame *frame)
     if (g_deadline_mode)
         write_msr(MSR_TSC_DEADLINE, arch_read_tsc() + g_tsc_per_tick);
     lapic_eoi();
+    sched_tick();
 }
 
 int timer_selftest(void)

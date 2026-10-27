@@ -51,6 +51,10 @@ ISR_NOERR 31
 /* Vector 32: local APIC timer. */
 ISR_NOERR 32
 
+/* Vector 0x80: software syscall gate. */
+.global isr128
+ISR_NOERR 128
+
 isr_common:
     pushq %rax
     pushq %rbx

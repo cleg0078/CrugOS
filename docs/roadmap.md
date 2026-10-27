@@ -3,8 +3,9 @@
 The specification defines 38 phases/gates. Phase 0 established the smallest
 end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
 phase 1 makes the kernel own physical memory, page tables, exceptions and
-timers. Every later phase keeps the same BootInfo contract, so the loader does
-not change for memory management, SMP or drivers.
+timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
+IPC and syscalls). Every later phase keeps the same BootInfo contract, so the
+loader does not change for memory management, SMP or drivers.
 
 ## Phase 0 - bootstrap (done)
 
@@ -34,12 +35,22 @@ not change for memory management, SMP or drivers.
 - AVX2 detection and XSAVE enablement (`CR4.OSXSAVE`, `XCR0=0x7`); the default
   build requires AVX2, `REQUIRE_AVX2=0` builds a compatibility kernel.
 
-## Phase 2 - execution model
+## Phase 2 - execution model (done)
 
-- Threads with kernel stacks, context switching, per-CPU run queues.
-- Scheduling classes `IDLE`, `NORMAL`, `INTERACTIVE`, `REALTIME_SYSTEM`.
-- Handles and a single syscall dispatcher table.
-- `MsgPort` IPC with typed messages, O(1) send/receive.
+- Kernel heap with eight slab classes (16..2048 bytes) and contiguous large
+  allocations up to 1 MiB; interrupt-safe allocation and double-free detection.
+- Threads with a 16 KiB stack and guard page, `cpu_switch` context switching,
+  per-class run queues and the six thread states.
+- Scheduling classes `IDLE`, `NORMAL`, `INTERACTIVE`, `REALTIME_SYSTEM`
+  with round-robin quanta, timer preemption, sleep/wakeup queues, join and an
+  idle thread.
+- Per-process typed handle tables (256 entries, process-local ids, no kernel
+  pointers) and a kernel process.
+- `MsgPort` IPC with typed messages (1024-byte payload, depth 64), O(1)
+  send/receive and blocking senders/receivers.
+- A single syscall dispatcher behind an `int 0x80` DPL3 gate, with ping,
+  gettid, yield, sleep, port create/send/recv, handle close and exit.
+- Boot self-tests for the heap, handles, scheduler, IPC and syscalls.
 
 ## Phase 3 - storage and filesystem
 
@@ -67,7 +78,7 @@ not change for memory management, SMP or drivers.
 1. The spec sketches Crug namespaces, `let`, attributes and kernel-safe
    ownership annotations; crugc 0.2.3 implements C plus `own/ref/mut/move/
    adopt/drop/borrow/slice/chan/select` and rejects ownership in kernel mode.
-   Phase 0 therefore uses plain C-style Crug. Compiler work is tracked as a
+   Phases 0-2 therefore use plain C-style Crug. Compiler work is tracked as a
    prerequisite for the capability/ownership-heavy phases (G0.5).
 2. The spec targets x86_64 -> aarch64 -> riscv64, but only a native x86_64
    `crugc` exists. aarch64/riscv64 bring-up requires a cross backend.

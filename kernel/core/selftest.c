@@ -3,7 +3,43 @@
 #include <crug/vm.h>
 #include <crug/trap.h>
 #include <crug/timer.h>
+#include <crug/heap.h>
+#include <crug/thread.h>
+#include <crug/process.h>
+#include <crug/msgport.h>
+#include <crug/syscall.h>
 
+static handle_table g_handle_test;
+
+static int handle_selftest(void)
+{
+    u32 i;
+    u64 h;
+
+    handle_table_init(&g_handle_test);
+    for (i = 0; i < HANDLE_TABLE_SIZE; i++) {
+        h = handle_alloc(&g_handle_test, HANDLE_THREAD,
+                         (void *)(uintptr)(i + 1), HANDLE_RIGHT_ALL);
+        if (h != (u64)i + 1ull)
+            return 0;
+    }
+    if (handle_alloc(&g_handle_test, HANDLE_THREAD,
+                     (void *)(uintptr)1, HANDLE_RIGHT_ALL) != HANDLE_NONE)
+        return 0;
+    if (handle_get(&g_handle_test, 1, HANDLE_THREAD) != (void *)(uintptr)1)
+        return 0;
+    if (handle_get(&g_handle_test, 1, HANDLE_PORT) != 0)
+        return 0;
+    if (handle_close(&g_handle_test, 1) != 0)
+        return 0;
+    if (handle_close(&g_handle_test, 1) != -1)
+        return 0;
+    if (handle_get(&g_handle_test, 1, HANDLE_THREAD) != 0)
+        return 0;
+    for (i = 2; i <= HANDLE_TABLE_SIZE; i++)
+        handle_close(&g_handle_test, (u64)i);
+    return handle_get(&g_handle_test, 2, HANDLE_THREAD) == 0;
+}
 void selftest_run(void)
 {
     if (!pmm_selftest())
@@ -16,4 +52,14 @@ void selftest_run(void)
         panic("selftest: breakpoint exception");
     if (!timer_selftest())
         panic("selftest: timer interrupt");
+    if (!heap_selftest())
+        panic("selftest: kernel heap");
+    if (!handle_selftest())
+        panic("selftest: handles");
+    if (!sched_selftest())
+        panic("selftest: scheduler");
+    if (!msgport_selftest())
+        panic("selftest: message ports");
+    if (!syscall_selftest())
+        panic("selftest: syscalls");
 }

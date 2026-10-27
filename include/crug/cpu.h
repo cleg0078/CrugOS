@@ -24,13 +24,36 @@ typedef struct cpu_features {
 
 extern cpu_features g_cpu_features;
 
+struct scheduler;
+
 struct cpu {
     u64 self;
     u32 id;
     u32 apic_id;
     u64 tsc_hz;
     u64 ticks;
+    struct scheduler *sched;
 };
+
+/* Save RFLAGS and disable interrupts; restore only the IF state. */
+static inline u64 cpu_irq_save(void)
+{
+    u64 flags;
+
+    __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
+    return flags;
+}
+
+static inline void cpu_irq_restore(u64 flags)
+{
+    if (flags & (1ull << 9))
+        __asm__ volatile("sti" : : : "memory");
+}
+
+static inline void cpu_irq_disable(void)
+{
+    __asm__ volatile("cli" : : : "memory");
+}
 
 struct cpu *cpu_self(void);
 void cpuid(u32 leaf, u32 subleaf, u32 *a, u32 *b, u32 *c, u32 *d);

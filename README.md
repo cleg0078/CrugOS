@@ -8,10 +8,10 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 1 memory and CPU (`v0.2.0`)
+## Status: phase 2 execution model (`v0.3.0`)
 
-Phase 1 keeps the phase 0 path from firmware to a running kernel and makes the
-kernel own the machine underneath it:
+Phase 2 keeps the phase 1 machine under the kernel and adds the execution model
+the rest of the system will use:
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -25,28 +25,50 @@ calls `ExitBootServices`. It then jumps to `kernel_main(BootInfo *)`.
 The kernel owns its physical memory through a 4 KiB bitmap allocator, builds
 its own identity page tables with W^X permissions and an unmapped stack guard,
 installs a GDT/TSS and a 256-vector IDT with exception handlers, and runs a
-LAPIC timer with a calibrated TSC. It detects AVX2, enables XSAVE state and, by
-default, refuses to boot without AVX2. Self-tests run at boot, then the kernel
-prints a boot report to a 16550 serial port and the framebuffer and exits QEMU
-deterministically for automated testing.
+LAPIC timer with a calibrated TSC. Phase 2 adds:
+
+- a kernel heap: eight small-object slab classes from 16 to 2048 bytes plus
+  contiguous large allocations up to 1 MiB, all interrupt-safe;
+- kernel threads with 16 KiB stacks and a guard page, `cpu_switch` context
+  switching, and preemptive round-robin scheduling in the `IDLE`, `NORMAL`,
+  `INTERACTIVE` and `REALTIME_SYSTEM` classes;
+- sleep queues, wait queues, thread join and a scheduler idle thread;
+- per-process typed handle tables (256 entries, process-local ids, no kernel
+  pointers) and a kernel process;
+- `MsgPort` IPC with typed messages (1024-byte payload, depth 64) and O(1)
+  send/receive with blocking waiters;
+- a single syscall dispatcher behind an `int 0x80` gate, with a small phase 2
+  call set (ping, gettid, yield, sleep, port create/send/recv, handle close,
+  exit).
+
+It detects AVX2, enables XSAVE state and, by default, refuses to boot without
+AVX2. Self-tests run at boot, then the kernel prints a boot report to a 16550
+serial port and the framebuffer and exits QEMU deterministically for automated
+testing.
 
 Verified in this tree:
 
 ```
+CrugOS 0.3.0 (phase 2) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.2.0
-pmm    : 118479 pages (462 MiB), free 118478, bitmap 131072 B
+CRUGOS: version 0.3.0
+pmm    : 118471 pages (462 MiB), free 118470, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD ... nx=yes apic=yes avx2=yes required=yes
-vm     : 4 GiB identity map, W^X kernel sections, guard=0x0000000000128000
+vm     : 4 GiB identity map, W^X kernel sections, guard=0x000000000012c000
 CRUGOS: vm ready
 CRUGOS: cpu ready
 CRUGOS: timer ready
+CRUGOS: heap ready
+sched  : per-class run queues ready, boot thread id 0, idle id 1
+CRUGOS: sched ready
+CRUGOS: syscall ready
 CRUGOS: selftest ok
 wx     : audit ok, identity map 0..4 GiB, guard unmapped
-boot   : pmm=27314 us cpu=365 us vm=1101 us traps=302 us timer=65282 us total=94367 us
-timer  : 2687826024 Hz (pit), mode=lapic-periodic, 100 Hz tick
-CRUGOS: phase 1 boot ok
+heap   : total=24576 B used=4464 B slab_pages=4 large_pages=2
+sched  : switches=112
+boot   : pmm=27181 us cpu=370 us vm=611 us traps=309 us timer=65283 us heap=54 us sched=580 us syscall=140 us total=94531 us
+CRUGOS: phase 2 boot ok
 ```
 
 Timing and memory values vary with the host and the QEMU CPU model.
@@ -59,7 +81,7 @@ make             # build kernel.elf, BOOTX64.EFI and the ESP tree
 make test        # boot under QEMU/OVMF and verify the boot contract
 make run         # boot and keep the serial log for inspection
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
-make test-host   # host unit tests (string, printf, ELF, bitmap, VM math)
+make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles)
 make version     # print the release version from VERSION
 make size        # kernel budget: <1 MiB stretch, <2 MiB hard
 make check-efi   # PE32+ structure checks on the loader
@@ -76,11 +98,11 @@ include `MEMORY_MB`, `QEMU_CPU`, `REQUIRE_AVX2` and `MODE`; see
 | Path | Contents |
 | --- | --- |
 | `boot/efi/` | UEFI loader: file I/O, ELF loader, GOP, memory map, entropy, handoff |
-| `include/crug/` | shared kernel/loader headers (types, BootInfo, I/O, string) |
-| `kernel/arch/x86_64/` | boot code, linker script, port I/O, serial, framebuffer, CPU/IDT/APIC/timer |
-| `kernel/core/` | kernel entry, console, printf, panic, self-tests, boot report |
+| `include/crug/` | shared kernel/loader headers (types, BootInfo, I/O, string, heap, threads, IPC, syscalls) |
+| `kernel/arch/x86_64/` | boot code, linker script, port I/O, serial, framebuffer, CPU/IDT/APIC/timer, context switch |
+| `kernel/core/` | kernel entry, console, printf, panic, self-tests, scheduler, handles, MsgPort, syscall dispatcher, boot report |
 | `kernel/lib/` | freestanding string, formatting and bitmap routines |
-| `kernel/mm/` | physical allocator and W^X page tables |
+| `kernel/mm/` | physical allocator, W^X page tables, kernel heap |
 | `scripts/` | QEMU runner, boot/PE checks, size and reproducibility gates |
 | `tests/host/` | host unit tests for freestanding code |
 | `tools/` | host-side development tools (`gen-font.py`) |
@@ -121,12 +143,12 @@ See [docs/boot.md](docs/boot.md) for the full handoff ABI and exit protocol.
 
 ## Roadmap
 
-Phases 0 and 1 are done. Phase 2 adds threads and context switching, scheduling
-classes, handles and a single syscall dispatcher, a kernel heap and `MsgPort`
-IPC; later phases cover EXT4 + RAID + crypto, USB/audio/graphics, Workbench
-userspace, SMP/IOMMU and virtualisation. See [docs/roadmap.md](docs/roadmap.md)
-for the full sequence and the known specification gaps (Crug syntax,
-cross-architecture compilers and the OVMF minimum RAM floor).
+Phases 0, 1 and 2 are done. Phase 3 adds the storage stack (block layer, GPT,
+RAID1/10, `crypt.device` and EXT4); later phases cover USB/audio/graphics,
+Workbench userspace, SMP/IOMMU and virtualisation. See
+[docs/roadmap.md](docs/roadmap.md) for the full sequence and the known
+specification gaps (Crug syntax, cross-architecture compilers and the OVMF
+minimum RAM floor).
 
 ## License
 

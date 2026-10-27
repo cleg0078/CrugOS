@@ -19,6 +19,8 @@ OVMF (UEFI firmware)
        - physical allocator, page tables + W^X
        - GDT/TSS, %gs per-CPU data, IDT and exceptions
        - LAPIC + TSC/LAPIC timer
+       - kernel heap, scheduler, handles and MsgPort IPC
+       - syscall dispatcher behind int 0x80
        - self-tests, boot report, deterministic exit
 ```
 
@@ -27,7 +29,7 @@ OVMF (UEFI firmware)
 `include/crug/bootinfo.h` is the single contract between loader and kernel.
 The structure is versioned (`magic = 0x43524731`, `version = 1`) and the kernel
 refuses to boot if either does not match or if required fields are invalid.
-Phase 1 did not change the layout.
+Phases 1 and 2 did not change the layout.
 
 | Field | Meaning |
 | --- | --- |
@@ -79,9 +81,16 @@ post-snapshot allocations cannot push it over capacity.
    `CR4.PGE`, `SMEP`/`SMAP` when available.
 5. `cpu_late_init`: IDT (256 gates, double-fault IST stack), LAPIC enable,
    8259 PIC mask. `CRUGOS: cpu ready`.
-6. `timer_init`: TSC frequency, TSC-deadline or LAPIC periodic, `sti`.
-7. `selftest_run`: allocator, mappings, W^X audit, `int3`, timer ticks.
-8. `report_boot`, `CRUGOS: phase 1 boot ok`, `arch_exit_qemu(0x10)`.
+6. `timer_init`: TSC frequency, TSC-deadline or LAPIC periodic. Interrupts
+   stay disabled until the execution model exists.
+7. `heap_init`: slab caches and large-allocation headers. `CRUGOS: heap ready`.
+8. `sched_init`: per-class run queues, boot thread id 0 and the idle thread.
+   `CRUGOS: sched ready`.
+9. `process_init`: the kernel process and its handle table.
+   `CRUGOS: syscall ready`.
+10. `sti`, then `selftest_run`: allocator, mappings, W^X audit, `int3`, timer,
+    heap, handles, scheduler, message ports and syscalls.
+11. `report_boot`, `CRUGOS: phase 2 boot ok`, `arch_exit_qemu(0x10)`.
 
 ## Page tables
 
@@ -115,6 +124,49 @@ source is printed. TSC-deadline is used when CPUID advertises it, otherwise the
 LAPIC timer runs in periodic mode at 100 Hz. `timer_monotonic_ns()` converts
 TSC ticks with quotient/remainder arithmetic so it cannot overflow at 64 bits.
 
+## Execution model
+
+**Kernel heap.** `kmalloc`/`kzalloc`/`kfree` use eight slab classes from 16 to
+2048 bytes. Each slab page starts with a 64-byte header (magic, class, object
+and used counts, a 256-bit used map and a free list); objects follow it.
+Allocations larger than 2048 bytes, up to the 1 MiB cap, take contiguous PMM
+pages with a 64-byte large-allocation header. Slab pages are not
+returned to the PMM when they become empty (a phase 2 simplification); large
+allocations are returned immediately. All heap paths run with interrupts
+disabled.
+
+**Threads and scheduler.** A `thread` owns a 16 KiB kernel stack (four pages)
+plus one unmapped guard page, an entry function and argument, a state, a
+scheduling class and a name. `cpu_switch` saves the callee-saved registers and
+switches stacks; a new thread starts in `thread_entry`, which calls the entry
+function and then `thread_exit`. States are `RUNNING`, `RUNNABLE`,
+`BLOCKED`, `SLEEPING`, `STOPPED` and `ZOMBIE`; joiners wait on a wait queue
+and destroy the thread after it exits.
+
+Each CPU has per-class run queues and picks the highest non-empty class:
+`IDLE`, `NORMAL`, `INTERACTIVE`, `REALTIME_SYSTEM`. Within a class it is
+round-robin; quanta are 1, 4, 2 and 8 ticks respectively. The timer tick
+decrements the quantum and preempts on expiry or when a higher class becomes
+runnable. Sleepers wake on tick deadlines. The boot context is registered as
+thread 0 and an idle thread executes `hlt` when nothing else is runnable.
+
+**Handles.** Each process owns a 256-entry typed handle table (thread, port,
+process). Handles are process-local `index + 1` values; the kernel never
+returns raw object pointers to callers. Rights are read, write or both, and
+closing a handle clears the slot.
+
+**MsgPort.** A port is an O(1) FIFO of typed messages with a depth of 64 and a
+1024-byte payload cap. Senders block when the queue is full, receivers when it
+is empty, and both sides use the scheduler wait queues. Message nodes come from
+the kernel heap.
+
+**Syscalls.** Vector `0x80` is installed as a DPL3 interrupt gate and routes to
+one dispatcher. Phase 2 passes the call number in `rax` and arguments in
+`rdi`, `rsi`, `rdx` and `r10`; the result is returned in `rax`, with
+negative `-errno` values for errors. The call set is ping, gettid, yield,
+sleep ticks, port create/send/recv, handle close and exit. There is no user
+mode yet: the self-test invokes the same gate from ring 0.
+
 ## Exit protocol
 
 A successful boot ends by writing `0x10` to QEMU's `isa-debug-exit` port
@@ -130,14 +182,17 @@ CRUGOS: pmm ready
 CRUGOS: vm ready
 CRUGOS: cpu ready
 CRUGOS: timer ready
+CRUGOS: heap ready
+CRUGOS: sched ready
+CRUGOS: syscall ready
 CRUGOS: selftest ok
-CRUGOS: phase 1 boot ok
+CRUGOS: phase 2 boot ok
 ```
 
 `kernel/core/report.c` prints the machine description between them: kernel
 extent, firmware pointers, memory totals, allocator totals, framebuffer mode,
-command line, entropy, CPU features, W^X audit, per-stage microsecond timings
-and the timer source/frequency.
+command line, entropy, CPU features, W^X audit, heap totals, scheduler switches,
+per-stage microsecond timings and the timer source/frequency.
 
 ## Console
 
@@ -145,12 +200,15 @@ Before `console_init` only the 16550 UART at `0x3F8` (115200 8N1) is used. After
 init, newlines are also mirrored to the GOP text console, which uses an embedded
 8x16 font generated from a host PSF by `tools/gen-font.py`.
 
-## Known phase 1 limitations
+## Known phase 2 limitations
 
 - The identity map is limited to the low 4 GiB; user address spaces, a
-  higher-half kernel and demand paging arrive with the phase 2 VM objects.
-- There is no kernel heap yet (`kmalloc`/small-object caches land in phase 2).
-- Single CPU: the LAPIC is enabled and `%gs` per-CPU data exists, but AP
-  startup, IOAPIC and external interrupts are phase 5 work.
+  higher-half kernel and demand paging arrive with user-mode address spaces.
+- Execution is kernel-mode only. There is no user mode, no address-space switch
+  and no `SYSCALL` MSR gateway yet; `int 0x80` reaches the same dispatcher.
+- Only the boot CPU runs. The LAPIC is enabled and `%gs` per-CPU data exists,
+  but AP startup, IOAPIC and external interrupts are phase 5 work.
+- Empty slab pages are not returned to the PMM, and page-table pages created
+  while splitting huge pages are not reclaimed.
 - `SMEP`/`SMAP` are enabled only when the CPU reports them; `qemu64` does not.
 - No shutdown/reset path; QEMU's debug port is the exit mechanism.

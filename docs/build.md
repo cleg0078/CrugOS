@@ -1,6 +1,6 @@
 # Building CrugOS
 
-This document describes the phase 1 build system: how the kernel and the UEFI
+This document describes the phase 2 build system: how the kernel and the UEFI
 loader are compiled and linked, which invariants the link must preserve, and how
 to diagnose the failure modes that are specific to this toolchain.
 
@@ -23,7 +23,7 @@ make             # kernel.elf, BOOTX64.EFI and the ESP tree
 make run         # boot the ESP tree under QEMU + OVMF
 make test        # boot and verify serial markers, guest version, AVX2 + exit status
 make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
-make test-host   # host unit tests for string/printf/ELF/bitmap/VM math
+make test-host   # host unit tests for string/printf/ELF/bitmap/VM math/handles
 make size        # kernel size budget (<1 MiB stretch, <2 MiB hard)
 make check-efi   # PE32+ structure checks on the loader
 make repro       # two independent builds must be byte-identical
@@ -41,7 +41,7 @@ Useful variables:
 | `MODE` | `release` | `release`, `debug` or `size` |
 | `V` | `0` | `V=1` prints full command lines |
 | `MEMORY_MB` | `512` | guest RAM; see the firmware floor below |
-| `SMP` | `1` | vCPUs (the phase 1 kernel uses the boot CPU only) |
+| `SMP` | `1` | vCPUs (the phase 2 kernel uses the boot CPU only) |
 | `TIMEOUT_SEC` | `30` | QEMU wall-clock limit for `make run`/`make test` |
 | `QEMU_CPU` | `qemu64,+avx,+avx2` | `-cpu` model; empty means QEMU's default |
 | `REQUIRE_AVX2` | `1` | `0` builds a kernel that boots without AVX2 |

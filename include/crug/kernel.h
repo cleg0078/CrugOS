@@ -45,6 +45,9 @@ typedef struct boot_timings {
     u64 vm;
     u64 traps;
     u64 timer;
+    u64 heap;
+    u64 sched;
+    u64 syscall;
 } boot_timings;
 
 void report_boot(const boot_info *bi, const boot_timings *timings);
