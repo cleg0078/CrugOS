@@ -24,6 +24,7 @@ QEMU_ACCEL=${QEMU_ACCEL:-}
 QEMU_DISPLAY=${QEMU_DISPLAY:-none}
 QEMU_EXTRA=${QEMU_EXTRA:-}
 SERIAL_TCP=${SERIAL_TCP:-}
+NET_MODE=${NET_MODE:-}
 
 for tool in "$QEMU"; do
     if ! command -v "$tool" >/dev/null 2>&1; then
@@ -105,6 +106,17 @@ for extra in $EXTRA_DISKS; do
     index=$((index + 1))
 done
 
+NET_ARGS=()
+if [[ "$NET_MODE" == "user" ]]; then
+    # QEMU slirp: DHCP lease 10.0.2.15, gateway 10.0.2.2 answers ARP/ICMP.
+    # romfile= drops the iPXE option ROM to keep the boot fast.
+    NET_ARGS=(-netdev "user,id=net0" \
+              -device "virtio-net-pci,netdev=net0,disable-modern=on,romfile=")
+elif [[ -n "$NET_MODE" && "$NET_MODE" != "none" ]]; then
+    echo "run-qemu: unsupported NET_MODE '$NET_MODE'" >&2
+    exit 1
+fi
+
 SERIAL_ARGS=(-serial "file:$SERIAL_LOG")
 if [[ -n "$SERIAL_TCP" ]]; then
     # Interactive serial: the gate driver connects to this socket, tees the
@@ -112,7 +124,7 @@ if [[ -n "$SERIAL_TCP" ]]; then
     SERIAL_ARGS=(-serial "tcp:$SERIAL_TCP,server=on,wait=on")
 fi
 
-echo "run-qemu: booting $ESP_DIR (${MEMORY_MB} MiB, ${SMP} vCPU, cpu ${QEMU_CPU:-default}, accel ${QEMU_ACCEL:-default}, display ${QEMU_DISPLAY}, disk ${DISK_IMG:-none}, extra ${EXTRA_DISKS:-none}, nvme ${NVME_DISK:-none}, ahci ${AHCI_DISK:-none}, serial ${SERIAL_TCP:-file}, timeout ${TIMEOUT_SEC}s)"
+echo "run-qemu: booting $ESP_DIR (${MEMORY_MB} MiB, ${SMP} vCPU, cpu ${QEMU_CPU:-default}, accel ${QEMU_ACCEL:-default}, display ${QEMU_DISPLAY}, disk ${DISK_IMG:-none}, extra ${EXTRA_DISKS:-none}, nvme ${NVME_DISK:-none}, ahci ${AHCI_DISK:-none}, net ${NET_MODE:-none}, serial ${SERIAL_TCP:-file}, timeout ${TIMEOUT_SEC}s)"
 set +e
 TMPDIR="$TMPDIR" timeout --foreground "$TIMEOUT_SEC" "$QEMU" \
     -machine q35 \
@@ -126,6 +138,7 @@ TMPDIR="$TMPDIR" timeout --foreground "$TIMEOUT_SEC" "$QEMU" \
     "${DISK_ARGS[@]}" \
     "${NVME_ARGS[@]}" \
     "${AHCI_ARGS[@]}" \
+    "${NET_ARGS[@]}" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -display "$QEMU_DISPLAY" \
     "${SERIAL_ARGS[@]}" \

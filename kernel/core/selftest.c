@@ -12,6 +12,7 @@
 #include <crug/gpt.h>
 #include <crug/ext4.h>
 #include <crug/storage.h>
+#include <crug/net.h>
 
 static handle_table g_handle_test;
 
@@ -74,4 +75,6 @@ void selftest_run(void)
         panic("selftest: ext4 structures");
     if (!storage_selftest())
         panic("selftest: storage stack");
+    if (!net_selftest())
+        panic("selftest: network");
 }

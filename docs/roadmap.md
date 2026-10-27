@@ -15,7 +15,9 @@ GPT/ext4/RAID stack from an AHCI/SATA disk; phase 3B-8 adds ext4/JBD2
 checksums; phase 3B-9 encrypts the root with AES-256-XTS and an Argon2id
 derived key; phase 3B-10 unlocks that volume with a masked passphrase typed on
 the serial console; phase 4A adds a polled PS/2 keyboard whose scancodes feed
-`input.device` and a merged console read path.
+`input.device` and a merged console read path; phase 4B brings up IPv4 over a
+polled virtio-net NIC, with a DHCP lease, ARP resolution and an ICMP echo
+self-test.
 Every later phase keeps the same BootInfo contract, so the loader does not
 change for memory management, storage, SMP or drivers.
 
@@ -292,6 +294,31 @@ change for memory management, storage, SMP or drivers.
   checks including the scancode decoder. See [input.md](input.md).
 - All 27 gates pass at `v0.15.0`.
 
+## Phase 4B - networking (done)
+
+- `net.device` (`include/crug/net.h`, `kernel/net/net.c`): device registry,
+  static frame buffers, big-endian wire helpers, an 8-entry ARP cache, four UDP
+  port bindings and a boot self-test.
+- Legacy virtio-net PCI driver (`drivers/net/virtio_net.c`): only
+  `VIRTIO_NET_F_MAC` negotiated, 32 pre-posted 2 KiB receive buffers on queue 0,
+  one 2 KiB transmit bounce buffer on queue 1 with a 500 ms completion wait, up to
+  four polled interfaces.
+- Ethernet with 60-byte padding and a MAC/broadcast filter, ARP request/reply and
+  resolution with retries, IPv4 with header checksum validation, ICMP echo, UDP
+  with a transmit pseudo-header checksum.
+- DHCP client (`kernel/net/dhcp.c`): DISCOVER/OFFER/REQUEST/ACK with three
+  attempts, broadcast flag, options 53/55/50/54, mask/router/DNS parsed into
+  `net_config`.
+- Boot integration: `net_init()` after `input_init()` prints
+  `CRUGOS: net ready (N device(s))`; `net_selftest()` prints the lease, the
+  resolved gateway MAC, the echo reply and `CRUGOS: net selftest ok`, skipping
+  cleanly without a NIC.
+- `make test-net` boots with QEMU user-mode networking (`NET_MODE=user`, guest
+  `10.0.2.15/24`, gateway `10.0.2.2`) and `scripts/boot-check.py` requires the
+  DHCP, ARP and ICMP markers; `make test-host` checks the wire helpers, RFC 1071
+  checksums and DHCP option parsing (938 checks).
+- All 28 gates pass at `v0.16.0`.
+
 ## Phase 3B - remaining storage work
 
 - Journal wrapping, revoke records and orphan-file recovery.
@@ -308,7 +335,10 @@ change for memory management, storage, SMP or drivers.
 
 ## Phase 4 - devices and userspace
 
-- xHCI USB, HID, UAC2 audio (phase 4A delivered the PS/2 console input step).
+- xHCI USB, HID, UAC2 audio (phase 4A delivered the PS/2 console input step,
+  phase 4B the virtio-net/IPv4 slice).
+- TCP, a DNS resolver, the socket layer and a routing table on top of the phase
+  4B IPv4 stack; IPv6, fragmentation and reassembly.
 - Software framebuffer -> VirtIO-GPU -> vendor GPU drivers.
 - Workbench userspace, `.app` bundles, `.crpkg` packages, capability model.
 - POSIX-like layer: 64-bit UID/GID, ACLs, process groups, signals.
@@ -316,7 +346,7 @@ change for memory management, storage, SMP or drivers.
 ## Phase 5 - scale-out
 
 - SMP bring-up (APIC/SIPI), IOMMU, PCIe enumeration.
-- Networking stack, Secure Boot, virtualisation (VMX/SVM).
+- Secure Boot, virtualisation (VMX/SVM).
 - Containers (OCI) and a Docker-style microVM workflow.
 - HPC fabric libraries and performance work.
 

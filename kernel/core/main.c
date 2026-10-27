@@ -13,6 +13,7 @@
 #include <crug/process.h>
 #include <crug/storage.h>
 #include <crug/input.h>
+#include <crug/net.h>
 
 void kernel_main(const boot_info *bi);
 
@@ -31,7 +32,7 @@ void kernel_main(const boot_info *bi)
     trace("K:console");
 
     console_write("\n");
-    console_write("CrugOS " CRUG_VERSION_STR " (phase 4a) -- Amiga-inspired microkernel bring-up\n");
+    console_write("CrugOS " CRUG_VERSION_STR " (phase 4b) -- Amiga-inspired microkernel bring-up\n");
     console_write("CRUGOS: hello\n");
     kprintf("CRUGOS: version %s\n", CRUG_VERSION_STR);
 
@@ -62,6 +63,9 @@ void kernel_main(const boot_info *bi)
     kprintf("CRUGOS: input ready (%s)\n",
             keyboard_init() == 0 ? "serial + keyboard" : "serial only");
 
+    net_init();
+    kprintf("CRUGOS: net ready (%u device(s))\n", (unsigned)net_device_count());
+
     if (storage_init(bi) < 0) {
         /* No root filesystem: a missing/unlockable volume is a boot failure,
            not a kernel invariant violation, so exit without a panic dump. */
@@ -86,7 +90,7 @@ void kernel_main(const boot_info *bi)
     report_boot(bi, &t);
 
     storage_lock();
-    kprintf("CRUGOS: phase 4a boot ok\n");
+    kprintf("CRUGOS: phase 4b boot ok\n");
     trace("K:exit-ok");
     arch_exit_qemu(0x10);
 }

@@ -1,6 +1,6 @@
 # Building CrugOS
 
-This document describes the phase 4A build system: how the kernel, the UEFI
+This document describes the phase 4B build system: how the kernel, the UEFI
 loader, the host crypto tool and the test disk images are built, which
 invariants the link must preserve, and how to diagnose the failure modes that
 are specific to this toolchain.
@@ -26,6 +26,7 @@ make             # show this target list (same as `make help`)
 make all         # kernel.elf, BOOTX64.EFI and the ESP tree
 make run         # boot the ESP tree under QEMU + OVMF
 make test        # boot, verify markers/version/AVX2, then e2fsck the disk
+make test-net    # boot with a slirp virtio-net NIC and verify DHCP/ARP/ICMP
 make test-raid   # boot a two-member RAID1 root and check both members
 make test-raid10 # boot a four-member RAID10 root and check every member
 make test-nvme   # boot from an NVMe namespace and check the image
@@ -48,7 +49,7 @@ make test-crypt-keyboard  # type the passphrase on the PS/2 keyboard and boot
 make test-crypt-keyboard-wrong  # three wrong keyboard passphrases must lock the volume
 make crypt-run   # boot the encrypted disk in a QEMU window for real typing
 make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
-make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes
+make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/IPv4 checksums/DHCP parsing
 make disk        # build the GPT/ext4 test disk at build/<arch>/disk.img
 make raid-disks  # build the two GPT/ext4 RAID1 member disks
 make raid10-disks  # build the four GPT/ext4 RAID10 member disks
@@ -88,6 +89,8 @@ options` prints the complete resolved set (including paths derived from
 | `EXPECT_REBUILD` | `no` | number of RAID members the boot must rebuild; `no` also rejects an unexpected rebuild |
 | `EXPECT_CRYPT` | `no` | encrypted-root expectation: `no`, `yes`, `wrong` (unlock must fail) or `locked` (the console prompt timed out) |
 | `EXPECT_AES` | `any` | AES implementation the boot must report: `software`, `aes-ni` or `any` |
+| `EXPECT_NET` | `no` | `yes` requires the `make test-net` DHCP/ARP/ICMP markers (`no` skips them) |
+| `NET_MODE` | empty | `user` attaches a slirp user-mode virtio-net NIC (`-netdev user,id=net0`); empty means no NIC |
 | `CRASH_IMG` | `$(BUILD)/crash.img` | crash-gate image (journal commit, no checkpoint) |
 | `CRASH_REPLAY_IMG` | `$(BUILD)/crash-replay.img` | copy the kernel replays on the second crash-gate boot |
 | `CC` | `crugc` | compiler for kernel and loader objects |
@@ -293,6 +296,16 @@ decrypted image; `make test-crypt-keyboard-wrong` types
 secret never appears in the serial log. The path needs the guest to print
 `CRUGOS: input ready (serial + keyboard)`; see [input.md](input.md).
 
+`make test-net` needs no extra image: it boots the normal GPT/ext4 disk with
+`NET_MODE=user`, so QEMU attaches a legacy virtio-net NIC (`-netdev user,id=net0`
++ `-device virtio-net-pci,netdev=net0,disable-modern=on,romfile=`) behind a
+slirp stack that provides DHCP, DNS and a gateway. The guest must print
+`virtio : net eth0 mac ...`, `CRUGOS: net ready (1 device(s))`, a
+`CRUGOS: dhcp lease 10.0.2.15/255.255.255.0 gw 10.0.2.2 dns 10.0.2.3` line, an
+`CRUGOS: arp resolved 10.0.2.2 ...` line, `CRUGOS: icmp echo reply from 10.0.2.2`
+and `CRUGOS: net selftest ok`; `check-disk.py` then runs on the same disk as in
+`make test`. See [network.md](network.md).
+
 The supported ext4 subset, write path, checksum layout, journal format and
 failure modes are documented in [storage.md](storage.md) and
 [checksums.md](checksums.md).
@@ -489,6 +502,20 @@ randomisation that leaks into the output will fail this target.
 - **`mkcrypt: ... short read` / key mismatch**: `mkcrypt format` expects a
   plaintext filesystem image no larger than the data area
   (`volume_sectors - 32` sectors); regenerate with `make crypt-disk`.
+- **No `virtio : net` line in a network gate**: `NET_MODE` was not `user`, so
+  QEMU attached no NIC. `make test-net` passes it; for a manual run use
+  `make run NET_MODE=user`. Without a NIC the kernel prints
+  `CRUGOS: net selftest skipped (no network device)` and still boots.
+- **`CRUGOS: net selftest failed (dhcp)`**: the slirp DHCP exchange did not
+  complete. Check that the NIC line and `net ready (1 device(s))` appear before
+  the failure, that `-netdev user,id=net0` is present, and that no other QEMU
+  user-mode network is bound to the same options; the client retries three
+  DISCOVER/OFFER/REQUEST/ACK rounds.
+- **`net selftest failed (arp)` or `(icmp)`**: the lease was not `10.0.2.15/24`
+  with gateway `10.0.2.2`, or the ARP reply never arrived. Slirp answers both
+  for the default `-netdev user` configuration; a custom `QEMU_EXTRA` subnet or
+  `-netdev` must provide its own gateway, and the self-test pings whatever DHCP
+  reports as the router.
 - **QEMU exits before OVMF starts**: verify the firmware paths and that
   `OVMF_VARS` is writable (the run script copies it into `build/`).
 - **Guest still reports the old version after a bump**: ensure `VERSION` is a

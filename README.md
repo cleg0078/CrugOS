@@ -8,13 +8,14 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 4A console input (`v0.15.0`)
+## Status: phase 4B networking (`v0.16.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
 striped RAID roots that can rebuild a replacement member, an AES-256-XTS
 encrypted root that can be unlocked with a passphrase typed on the console,
-and three storage transports; phase 4A adds console input from a PS/2 keyboard:
+and three storage transports; phase 4A adds console input from a PS/2 keyboard
+and phase 4B adds a small IPv4 stack over a virtio-net NIC:
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -249,6 +250,33 @@ line:
   window, so the passphrase can be typed on the host keyboard and watched on the
   framebuffer. See [input.md](docs/input.md).
 
+Phase 4B adds networking up to a DHCP-configured IPv4 host:
+
+- a device-neutral `net.device` layer (`include/crug/net.h`,
+  `kernel/net/net.c`) with a device registry, static frame buffers, big-endian
+  wire helpers, an 8-entry ARP cache and four UDP port bindings;
+- a polled legacy virtio-net PCI driver (`drivers/net/virtio_net.c`, device
+  `0x1AF4:0x1000`) that negotiates only `VIRTIO_NET_F_MAC`, pre-posts 32 receive
+  buffers of 2 KiB on queue 0, transmits through one 2 KiB bounce buffer on
+  queue 1 with a 500 ms completion wait, and probes up to four
+  `eth0`..`eth3` interfaces;
+- Ethernet framing (60-byte padding, MAC/broadcast filter), ARP request/reply and
+  resolution with retries, IPv4 with header checksum validation and no
+  fragmentation, ICMP echo, and UDP with a pseudo-header checksum on transmit;
+- a DHCP client (`kernel/net/dhcp.c`) that runs DISCOVER/OFFER/REQUEST/ACK for
+  up to three attempts, requests mask/router/DNS, and fills the kernel
+  `net_config`;
+- `net_init()` runs after `input_init()` and prints
+  `CRUGOS: net ready (N device(s))`; `net_selftest()` leases an address, resolves
+  the gateway over ARP and pings it, printing `dhcp lease`, `arp resolved`,
+  `icmp echo reply` and `net selftest ok`, or skipping cleanly when no NIC is
+  present;
+- `make test-net` boots with QEMU user-mode networking
+  (`NET_MODE=user`, slirp: guest `10.0.2.15/24`, gateway `10.0.2.2`) and
+  `scripts/boot-check.py` requires the lease, ARP and ICMP markers; the host
+  suite covers wire helpers, RFC 1071 checksums and DHCP option parsing.
+  See [network.md](docs/network.md).
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -257,20 +285,22 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.15.0 (phase 4a) -- Amiga-inspired microkernel bring-up
+CrugOS 0.16.0 (phase 4b) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.15.0
-pmm    : 118339 pages (462 MiB), free 118338, bitmap 131072 B
+CRUGOS: version 0.16.0
+pmm    : 118528 pages (463 MiB), free 118527, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
-vm     : 4 GiB identity map, W^X kernel sections, guard=0x0000000000185000
+vm     : 4 GiB identity map, W^X kernel sections, guard=0x0000000000189000
 CRUGOS: vm ready
 cpu    : smep=no smap=no tsc_deadline=no
 CRUGOS: cpu ready
-timer  : 2687914218 Hz (pit), mode=lapic-periodic, 100 Hz tick
+timer  : 2689160546 Hz (pit), mode=lapic-periodic, 100 Hz tick
 CRUGOS: timer ready
 CRUGOS: heap ready
 CRUGOS: input ready (serial + keyboard)
+virtio : net eth0 mac 52:54:00:12:34:56
+CRUGOS: net ready (1 device(s))
 virtio : blk vda, 32768 sectors, io=0x6000
 CRUGOS: virtio ready (1 device(s))
 CRUGOS: nvme ready (0 device(s))
@@ -278,14 +308,9 @@ ahci   : sda 1032192 sectors, port 0
 CRUGOS: ahci ready (1 device(s))
 CRUGOS: block ready (2 device(s))
 storage: no GPT on sda
-gpt    : crypt root 'crugcrypt' LBA 2048..26623
+gpt    : 1 partition(s), root 'crugroot' LBA 2048..26623
 CRUGOS: gpt ready
-CRUGOS: crypt passphrase required
-CRUGOS: type the passphrase on the console (serial or keyboard) (3 attempt(s))
-passphrase: ***********
-CRUGOS: crypt ready (24544 sectors, keyslot 0, Argon2id m=4096 KiB t=3 p=1)
-CRUGOS: crypt aes: software
-CRUGOS: root device crypt0
+CRUGOS: root device vda1
 CRUGOS: ext4 ready
 CRUGOS: journal ready
 CRUGOS: ext4 /hello.txt: hello from ext4
@@ -297,34 +322,34 @@ trap   : breakpoint handled at rip=0x0000000000100e2b
 CRUGOS: journal committed 1 block(s) in 1 descriptor(s)
 CRUGOS: journal selftest ok (1 blocks recovered)
 CRUGOS: writable storage ok
+CRUGOS: dhcp lease 10.0.2.15/255.255.255.0 gw 10.0.2.2 dns 10.0.2.3
+CRUGOS: arp resolved 10.0.2.2 52:55:0a:00:02:02
+CRUGOS: icmp echo reply from 10.0.2.2 seq=1 ttl=255
+CRUGOS: net selftest ok
 CRUGOS: selftest ok
-kernel : 0x0000000000100000 size=576 KiB
+kernel : 0x0000000000100000 size=592 KiB
 boot   : cpu=0 acpi_rsdp=0x1f77e000 fdt=0x0 initrd=0x0
-memory : 35 regions, usable 473356 KiB (462 MiB)
-pmm    : total=118339 free=118299 bitmap=131072 B
+memory : 36 regions, usable 474112 KiB (463 MiB)
+pmm    : total=118528 free=118470 bitmap=131072 B
 fb     : 1024x768 stride=1024 format=BGRX8888 base=0x80000000
-cmdline: (none)
-entropy: 621d3fb5438a9ec2
+cmdline: 23 bytes (redacted)
+entropy: bcf37181be9a9d3f
 wx     : audit ok, identity map 0..4 GiB, guard unmapped
-heap   : total=77824 B used=26000 B slab_pages=12 large_pages=7
+heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
-boot   : pmm=27756 us cpu=414 us vm=655 us traps=326 us timer=65278 us heap=45 us storage=1123149 us sched=304 us syscall=109 us total=1218040 us
-timer  : 2687914218 Hz (pit), ticks=62, mono=1803065995 ns
-CRUGOS: phase 4a boot ok
+boot   : pmm=28898 us cpu=430 us vm=686 us traps=339 us timer=65392 us heap=48 us storage=92899 us sched=306 us syscall=109 us total=189111 us
+timer  : 2689160546 Hz (pit), ticks=77, mono=925886619 ns
+CRUGOS: phase 4b boot ok
 ```
 
-This excerpt is the `make test-crypt-keyboard` boot: the passphrase was typed
-on the emulated PS/2 keyboard through a QMP `send-key` stream, so the log shows
-the masked prompt, `cmdline: (none)` and `CRUGOS: input ready (serial +
-keyboard)`. The driver types at 40 ms per key, which is why the storage stage
-spends about 1.1 s waiting for input; Argon2id with `m=4096 KiB, t=3` still
-dominates its own cost. `make test-crypt-prompt` types over QEMU's serial line
-instead and boots in about 325 ms, `make test-crypt-ni` prints
-`crypt aes: aes-ni`, and the unencrypted gates take about 190 ms. The
-`storage: no GPT on sda` line is expected: `sda` is the firmware's ESP disk,
-and the test volume is the virtio disk `vda`.
-
-Timing and memory values vary with the host and the QEMU CPU model.
+This excerpt is the `make test-net` boot: the guest leases `10.0.2.15/24` from
+QEMU's user-mode (slirp) DHCP server, resolves the gateway `10.0.2.2` over ARP and
+receives an ICMP echo reply from it, so the log shows `virtio : net eth0 mac
+52:54:00:12:34:56`, the lease, the ARP hit and `net selftest ok`. The fake MAC
+comes from QEMU; a real NIC uses its own. `storage: no GPT on sda` is expected:
+`sda` is the firmware's ESP disk and the test volume is the virtio disk `vda`.
+Argon2id dominates the encrypted gates instead (`m=4096 KiB, t=3`, about 230 ms of
+storage stage), and the unencrypted gates such as this one boot in about 190 ms.
 
 ## Quick start
 
@@ -355,8 +380,9 @@ make test-crypt-keyboard  # type the passphrase on the PS/2 keyboard
 make test-crypt-keyboard-wrong  # three wrong keyboard lines must lock
 make crypt-run   # boot the encrypted disk in a QEMU window and type it
 make run         # boot and keep the serial log for inspection
+make test-net    # boot with a virtio-net NIC and verify DHCP/ARP/ICMP
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
-make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes)
+make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, IPv4 checksums, DHCP parsing)
 make check-disk  # e2fsck + persisted-file checks on the latest test disk
 make disk        # generate the GPT/ext4 test disk
 make raid-disks  # generate the two RAID1 member disks
@@ -378,7 +404,8 @@ default in the makefile; `make options` prints the full resolved set. Useful
 variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `QEMU_DISPLAY`, `QEMU_EXTRA`, `OVMF_CODE`, `OVMF_VARS`, `REQUIRE_AVX2`,
 `EXPECT_AVX2`, `EXPECT_RAID`, `EXPECT_NVME`, `EXPECT_REBUILD`, `EXPECT_AHCI`,
-`EXPECT_CRYPT`, `EXPECT_AES`, `NVME_IMG`, `AHCI_IMG`, `CRYPT_IMG`,
+`EXPECT_CRYPT`, `EXPECT_AES`, `EXPECT_NET`, `NET_MODE`, `NVME_IMG`, `AHCI_IMG`,
+`CRYPT_IMG`,
 `CRYPT_TAMPER_IMG`, `CRYPT_PASS`, `CRYPT_RECOVERY_PASS`, `CRYPT_M`,
 `CRYPT_PROMPT_TIMEOUT_SEC`, `CRYPT_PROMPT_WRONG_PASS`, `CRYPT_RUN_DISPLAY`,
 `CRYPT_RUN_TIMEOUT_SEC`, `CMDLINE_EXTRA`,
@@ -394,15 +421,17 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/core/` | kernel entry, console, printf, panic, self-tests, scheduler, handles, MsgPort, syscall dispatcher, boot report |
 | `kernel/lib/` | freestanding string, formatting, bitmap and console line-editor routines |
 | `kernel/input/` | `input.device`: set-1 scancode decoder and the console byte queue |
+| `kernel/net/` | `net.device`, Ethernet/ARP/IPv4/ICMP/UDP, and the DHCP client |
 | `kernel/mm/` | physical allocator, W^X page tables, kernel heap |
 | `kernel/block/` | block-device registry, partitions, bounds checks, RAID1/RAID10, boot-time rebuild and the AES-256-XTS `crypt.device` |
 | `kernel/fs/` | GPT, writable checksummed ext4, checksummed JBD2 journal and the storage boot policy (including the console passphrase prompt) |
 | `kernel/crypto/` | AES, XTS, AES-NI, BLAKE2b and Argon2id (shared with the host tools) |
-| `drivers/` | PCI, legacy virtio-blk, NVMe and AHCI/SATA block device drivers |
+| `drivers/` | PCI, legacy virtio-blk, NVMe and AHCI/SATA block device drivers, plus legacy virtio-net |
 | `scripts/` | QEMU runner, disk/RAID1/RAID10/crypt image builders, boot/PE/disk/RAID/journal/crypt checks, the serial and keyboard prompt drivers, tamper helper, size and reproducibility gates |
 | `tests/host/` | host unit tests for freestanding code |
 | `tools/` | host-side development tools (`gen-font.py`, `mkcrypt.c`, `gen-crc32c.py`) |
-| `docs/` | [build](docs/build.md), [boot](docs/boot.md), [storage](docs/storage.md), [checksums](docs/checksums.md), [crypto](docs/crypto.md), [input](docs/input.md), [NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
+| `docs/` | [build](docs/build.md), [boot](docs/boot.md), [storage](docs/storage.md), [checksums](docs/checksums.md), [crypto](docs/crypto.md), [input](docs/input.md), [network](docs/network.md),
+[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
 
 ## Versioning
 
@@ -452,12 +481,15 @@ AES-256-XTS encrypted root with Argon2id keyslots, a recovery passphrase,
 loader-supplied passphrase handling and key zeroization; phase 3B-10 added the
 masked console passphrase prompt with retries and a per-attempt timeout; phase
 4A added a polled PS/2 keyboard, `input.device` and a console read path shared
-with the serial line.
+with the serial line; phase 4B brought up a polled legacy virtio-net driver and
+a small IPv4 stack (`net.device`: Ethernet, ARP, IPv4, ICMP echo, UDP) with a
+DHCP client and a boot self-test that leases, resolves and pings the gateway.
 Remaining phase 3B work is online RAID rebuild, hot spare, scrub and a
 write-intent bitmap, RAID below encryption, a redundant ESP, TPM/keyfile
 keyslots and USB storage/hotplug; phase 4 continues with framebuffer (GOP)
-console input, a USB HID keyboard and virtual terminals. Later phases cover USB/audio/graphics, Workbench userspace,
-SMP/IOMMU and virtualisation. See
+console input, a USB HID keyboard and virtual terminals, and TCP, DNS, the
+socket layer and a routing table on top of the phase 4B IPv4 stack. Later phases
+cover USB/audio/graphics, Workbench userspace, SMP/IOMMU and virtualisation. See
 [docs/roadmap.md](docs/roadmap.md) for the full sequence and the known
 specification gaps (Crug syntax, cross-architecture compilers and the OVMF
 minimum RAM floor).

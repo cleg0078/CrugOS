@@ -3,7 +3,7 @@
 
 usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE \
     [VERSION_FILE [EXPECT_AVX2 [EXPECT_RAID [EXPECT_NVME [EXPECT_REBUILD \
-    [EXPECT_AHCI [EXPECT_CRYPT [EXPECT_AES]]]]]]]]
+    [EXPECT_AHCI [EXPECT_CRYPT [EXPECT_AES [EXPECT_NET]]]]]]]]]
 """
 
 import re
@@ -18,6 +18,7 @@ REQUIRED_MARKERS = (
     "CRUGOS: timer ready",
     "CRUGOS: heap ready",
     "CRUGOS: input ready",
+    "CRUGOS: net ready",
     "CRUGOS: sched ready",
     "CRUGOS: syscall ready",
     "CRUGOS: block ready",
@@ -30,7 +31,7 @@ REQUIRED_MARKERS = (
     "CRUGOS: selftest ok",
     "CRUGOS: nvme ready",
     "CRUGOS: ahci ready",
-    "CRUGOS: phase 4a boot ok",
+    "CRUGOS: phase 4b boot ok",
 )
 # A rejected unlock stops before scheduling, storage mounting and self-tests.
 WRONG_CRYPT_MARKERS = (
@@ -41,6 +42,7 @@ WRONG_CRYPT_MARKERS = (
     "CRUGOS: timer ready",
     "CRUGOS: heap ready",
     "CRUGOS: input ready",
+    "CRUGOS: net ready",
     "CRUGOS: block ready",
     "CRUGOS: gpt ready",
     "CRUGOS: crypt unlock failed",
@@ -55,6 +57,7 @@ LOCKED_CRYPT_MARKERS = (
     "CRUGOS: timer ready",
     "CRUGOS: heap ready",
     "CRUGOS: input ready",
+    "CRUGOS: net ready",
     "CRUGOS: block ready",
     "CRUGOS: gpt ready",
     "CRUGOS: crypt locked (no passphrase)",
@@ -75,7 +78,7 @@ def fail(message: str, log: str) -> int:
 
 
 def main() -> int:
-    if len(sys.argv) not in tuple(range(3, 12)):
+    if len(sys.argv) not in tuple(range(3, 13)):
         print("usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE "
               "[VERSION_FILE [EXPECT_AVX2 [EXPECT_RAID [EXPECT_NVME "
               "[EXPECT_REBUILD [EXPECT_AHCI [EXPECT_CRYPT [EXPECT_AES]]]]]]]]",
@@ -92,6 +95,7 @@ def main() -> int:
     expect_ahci = sys.argv[8] if len(sys.argv) >= 9 else "no"
     expect_crypt = sys.argv[9] if len(sys.argv) >= 10 else "no"
     expect_aes = sys.argv[10] if len(sys.argv) >= 11 else "any"
+    expect_net = sys.argv[11] if len(sys.argv) >= 12 else "no"
 
     if not serial_path.exists():
         return fail(f"missing serial log {serial_path}", "")
@@ -108,6 +112,8 @@ def main() -> int:
         return fail(f"invalid EXPECT_CRYPT {expect_crypt!r}", text)
     if expect_aes not in ("any", "software", "aes-ni"):
         return fail(f"invalid EXPECT_AES {expect_aes!r}", text)
+    if expect_net not in ("no", "yes"):
+        return fail(f"invalid EXPECT_NET {expect_net!r}", text)
 
     required = list(REQUIRED_MARKERS)
     if expect_crypt == "wrong":
@@ -172,6 +178,16 @@ def main() -> int:
         if expect_aes != "any" and match.group(1) != expect_aes:
             return fail(f"crypt AES implementation {match.group(1)!r} != EXPECT_AES {expect_aes!r}",
                         text)
+
+    if expect_net == "yes":
+        if "CRUGOS: net selftest ok" not in text:
+            return fail("expected the network selftest to succeed", text)
+        if not re.search(r"CRUGOS: dhcp lease \d+\.\d+\.\d+\.\d+/\d+\.\d+\.\d+\.\d+ gw ", text):
+            return fail("expected a DHCP lease line from the guest", text)
+        if not re.search(r"CRUGOS: arp resolved \d+\.\d+\.\d+\.\d+", text):
+            return fail("expected the gateway ARP resolution to succeed", text)
+        if not re.search(r"CRUGOS: icmp echo reply from \d+\.\d+\.\d+\.\d+ seq=1 ttl=\d+", text):
+            return fail("expected an ICMP echo reply from the gateway", text)
 
     if expect_rebuild == "no" and "CRUGOS: raid rebuilt" in text:
         return fail("unexpected RAID member rebuild during boot", text)

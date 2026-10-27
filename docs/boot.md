@@ -20,9 +20,10 @@ OVMF (UEFI firmware)
        - physical allocator, page tables + W^X
        - GDT/TSS, %gs per-CPU data, IDT and exceptions
        - LAPIC + TSC/LAPIC timer
-       - kernel heap, virtio-blk/NVMe/AHCI + GPT + AES-256-XTS crypt unlock
-         + RAID assembly (cold-spare rebuild) + writable ext4, JBD2 replay,
-         self-test
+       - kernel heap, input.device + polled PS/2 keyboard, net.device +
+         polled virtio-net (Ethernet/ARP/IPv4/ICMP/UDP + DHCP client)
+       - virtio-blk/NVMe/AHCI + GPT + AES-256-XTS crypt unlock + RAID
+         assembly (cold-spare rebuild) + writable ext4, JBD2 replay, self-test
        - scheduler, handles and MsgPort IPC
        - syscall dispatcher behind int 0x80
        - self-tests, boot report, deterministic exit
@@ -33,7 +34,7 @@ OVMF (UEFI firmware)
 `include/crug/bootinfo.h` is the single contract between loader and kernel.
 The structure is versioned (`magic = 0x43524731`, `version = 1`) and the kernel
 refuses to boot if either does not match or if required fields are invalid.
-Phases 1 through 3B-10 did not change the layout; phase 3B-9 is the first
+Phases 1 through 4B did not change the layout; phase 3B-9 is the first
 kernel to consume the `command_line` field, and phase 3B-10 falls back to an
 interactive serial passphrase prompt when no token is present. The loader caps
 the command line at 511 bytes and the kernel wipes the page after it copies the
@@ -96,7 +97,11 @@ post-snapshot allocations cannot push it over capacity.
    i8042 controller (translation on, IRQ1/IRQ12 masked) and enable scanning.
    The boot prints `CRUGOS: input ready (serial + keyboard)`, or
    `(serial only)` when no i8042 keyboard answered.
-9. `storage_init`: `block_init`, the legacy virtio-blk devices, then the
+9. `net_init`: reset `net.device`, then probe legacy virtio-net PCI functions
+   (up to four `eth0`..`eth3`) and register them, and bind the DHCP client to
+   UDP port 68. The boot prints `CRUGOS: net ready (N device(s))`. The network
+   self-test runs later, with the other self-tests.
+10. `storage_init`: `block_init`, the legacy virtio-blk devices, then the
    NVMe driver (PCI class 01/08/02, admin/I/O queues, namespace 1) and the AHCI
    driver (PCI class 01/06/01, port bring-up, IDENTIFY, `sd` names), and the GPT
    of every block device. `storage_parse_cmdline` first extracts `crypt.pass=`
@@ -135,16 +140,17 @@ post-snapshot allocations cannot push it over capacity.
    `CRUGOS: raid healthy`/`raid degraded` when RAID is used, then
    `CRUGOS: root device <partition>` for the selected root partition, then
    `CRUGOS: ext4 ready`, `CRUGOS: journal ready`, `CRUGOS: storage ready`.
-10. `sched_init`: per-class run queues, boot thread id 0 and the idle thread.
+11. `sched_init`: per-class run queues, boot thread id 0 and the idle thread.
    `CRUGOS: sched ready`.
-11. `process_init`: the kernel process and its handle table.
+12. `process_init`: the kernel process and its handle table.
     `CRUGOS: syscall ready`.
-12. `sti`, then `selftest_run`: allocator, mappings, W^X audit, `int3`, timer,
+13. `sti`, then `selftest_run`: allocator, mappings, W^X audit, `int3`, timer,
     heap, block/GPT/ext4/storage (including the read-write round trip, checksum
     verification and a journal replay test), handles, scheduler, message ports
-    and syscalls.
-13. `report_boot`, `storage_lock` (wipes the passphrase, the volume keys and
-    the bounce buffer), `CRUGOS: phase 4a boot ok`, `arch_exit_qemu(0x10)`.
+    and syscalls, then the network self-test (DHCP lease, ARP, ICMP echo) when a
+    NIC is present.
+14. `report_boot`, `storage_lock` (wipes the passphrase, the volume keys and
+    the bounce buffer), `CRUGOS: phase 4b boot ok`, `arch_exit_qemu(0x10)`.
 
 Storage is still brought up with interrupts disabled: the virtio driver polls
 its used ring, the NVMe driver polls completion queues and the AHCI driver polls
@@ -297,6 +303,7 @@ CRUGOS: cpu ready
 CRUGOS: timer ready
 CRUGOS: heap ready
 CRUGOS: input ready (serial + keyboard)   # or: (serial only)
+CRUGOS: net ready (1 device(s))           # 0 when no NIC is present
 CRUGOS: virtio ready
 CRUGOS: nvme ready
 CRUGOS: ahci ready
@@ -324,9 +331,20 @@ CRUGOS: sched ready
 CRUGOS: syscall ready
 CRUGOS: writable storage ok
 CRUGOS: journal selftest ok
+CRUGOS: dhcp lease 10.0.2.15/255.255.255.0 gw 10.0.2.2 dns 10.0.2.3
+CRUGOS: arp resolved 10.0.2.2 52:55:0a:00:02:02
+CRUGOS: icmp echo reply from 10.0.2.2 seq=1 ttl=255
+CRUGOS: net selftest ok
 CRUGOS: selftest ok
-CRUGOS: phase 4a boot ok
+CRUGOS: phase 4b boot ok
 ```
+
+The `virtio : net eth0 mac ...` line, the lease, the ARP resolution, the echo
+reply and `net selftest ok` appear only when a NIC is present and the network
+self-test runs; without one the kernel prints `CRUGOS: net selftest skipped (no
+network device)` and the boot still succeeds. The test gate wires a slirp
+user-mode NIC whose DHCP server hands out `10.0.2.15/24` and whose gateway
+`10.0.2.2` answers ARP and echo. See [network.md](network.md).
 
 `raid ready` and `raid healthy`/`raid degraded` appear only on the RAID
 root path, and the `crypt` lines only on the encrypted path; the single-disk
@@ -354,7 +372,7 @@ Input has one entry point, `console_try_getc()` in `kernel/core/console.c`: it
 drains the serial line first and only then polls the i8042 keyboard and reads
 `input.device`'s byte queue. See [input.md](input.md) for the scancode decoder.
 
-## Known phase 3 limitations
+## Known limitations
 
 - The identity map of normal memory is limited to the low 4 GiB, although
   `vm_map_page()` can map any canonical address (the NVMe BAR at
@@ -386,5 +404,10 @@ drains the serial line first and only then polls the i8042 keyboard and reads
   ESP-visible. The header and keyslots are MAC-protected, the passphrase, keys
   and bounce buffer are wiped by `storage_lock()` before the final marker, and
   the boot report redacts the command line.
+- Networking stops at a polled IPv4 host: no TCP, DNS resolver, socket layer,
+  routing table, fragmentation/reassembly or IPv6; ARP entries never expire and
+  there is no DHCP renewal; UDP receive checksums are not verified and the stack
+  has no authentication or firewalling. At most four NICs and four UDP port
+  bindings.
 - `SMEP`/`SMAP` are enabled only when the CPU reports them; `qemu64` does not.
 - No shutdown/reset path; QEMU's debug port is the exit mechanism.

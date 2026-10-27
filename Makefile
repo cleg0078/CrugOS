@@ -14,6 +14,7 @@
 #   make test-raid10  boot RAID10 (four members) and verify member disks
 #   make test-nvme   boot from an NVMe namespace and verify the disk
 #   make test-ahci   boot from a SATA (AHCI) disk and verify the disk
+#   make test-net    boot with a virtio-net NIC and verify DHCP/ARP/ICMP
 #   make crypt-disk  build the AES-256-XTS crypt test disk
 #   make test-crypt  boot from an encrypted root and verify the disk
 #   make test-crypt-recovery  unlock the encrypted root with the recovery keyslot
@@ -69,6 +70,7 @@ EXPECT_REBUILD ?= no
 EXPECT_AHCI ?= no
 EXPECT_CRYPT ?= no
 EXPECT_AES ?= any
+EXPECT_NET ?= no
 
 # QEMU / firmware options.
 MEMORY_MB ?= 512
@@ -78,6 +80,7 @@ QEMU_ACCEL ?=
 QEMU_DISPLAY ?= none
 QEMU_EXTRA ?=
 SERIAL_TCP ?=
+NET_MODE ?=
 OVMF_CODE ?= /usr/share/OVMF/OVMF_CODE_4M.fd
 OVMF_VARS ?= /usr/share/OVMF/OVMF_VARS_4M.fd
 
@@ -160,7 +163,7 @@ KERNEL_SOURCES := $(wildcard kernel/arch/$(ARCH)/*.c) $(wildcard kernel/arch/$(A
                   $(wildcard kernel/core/*.c) $(wildcard kernel/lib/*.c) \
                   $(wildcard kernel/mm/*.c) $(wildcard kernel/block/*.c) \
                   $(wildcard kernel/fs/*.c) $(wildcard kernel/input/*.c) \
-                  $(wildcard drivers/*/*.c) \
+                  $(wildcard kernel/net/*.c) $(wildcard drivers/*/*.c) \
                   $(wildcard kernel/crypto/*.c) $(wildcard kernel/crypto/*.S)
 KERNEL_OBJECTS := $(patsubst %,$(OBJ)/%.o,$(basename $(KERNEL_SOURCES)))
 KERNEL_DEPS := $(KERNEL_OBJECTS:.o=.d)
@@ -178,7 +181,7 @@ HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
         test-raid-repair test-raid10-repair test-journal-csum test-journal-replay \
         test-crypt test-crypt-recovery test-crypt-wrongkey test-crypt-tamper test-crypt-ni \
         test-crypt-prompt test-crypt-prompt-wrong test-crypt-prompt-timeout \
-        test-crypt-keyboard test-crypt-keyboard-wrong crypt-run \
+        test-crypt-keyboard test-crypt-keyboard-wrong crypt-run test-net \
         crash-disk \
         check-disk size check-efi repro test-host preflight version options clean distclean help
 
@@ -297,7 +300,7 @@ run: esp
 		MEMORY_MB="$(MEMORY_MB)" SMP="$(SMP)" TIMEOUT_SEC="$(TIMEOUT_SEC)" \
 		QEMU_CPU="$(QEMU_CPU)" QEMU_ACCEL="$(QEMU_ACCEL)" \
 		QEMU_DISPLAY="$(QEMU_DISPLAY)" QEMU_EXTRA="$(QEMU_EXTRA)" \
-		SERIAL_TCP="$(SERIAL_TCP)" \
+		SERIAL_TCP="$(SERIAL_TCP)" NET_MODE="$(NET_MODE)" \
 		DISK_IMG=$(if $(DISK_IMG),$(abspath $(DISK_IMG)),) \
 		NVME_DISK=$(if $(NVME_DISK),$(abspath $(NVME_DISK)),) \
 		NVME_SERIAL="$(NVME_SERIAL)" EXTRA_DISKS="$(EXTRA_DISKS)" \
@@ -312,6 +315,12 @@ crypt-run: crypt-disk
 		QEMU_DISPLAY=$(CRYPT_RUN_DISPLAY) TIMEOUT_SEC=$(CRYPT_RUN_TIMEOUT_SEC)
 	@echo "  NOTE  type the passphrase in the QEMU window (Ctrl+Alt+G releases input)"
 	@echo "  NOTE  serial log $(SERIAL_LOG), exit status $(QEMU_EXIT)"
+
+test-net: esp
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(MAKE) --no-print-directory run NET_MODE=user
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" no "$(EXPECT_NVME)" no no no any yes
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 
 test:
 	$(Q)rm -f $(DISK_IMG)
@@ -492,6 +501,7 @@ options:
 	@printf '  %-16s %s\n' EXPECT_AHCI "$(EXPECT_AHCI)"
 	@printf '  %-16s %s\n' EXPECT_CRYPT "$(EXPECT_CRYPT)"
 	@printf '  %-16s %s\n' EXPECT_AES "$(EXPECT_AES)"
+	@printf '  %-16s %s\n' EXPECT_NET "$(EXPECT_NET)"
 	@printf '  %-16s %s\n' MEMORY_MB "$(MEMORY_MB)"
 	@printf '  %-16s %s\n' SMP "$(SMP)"
 	@printf '  %-16s %s\n' TIMEOUT_SEC "$(TIMEOUT_SEC)"
@@ -526,6 +536,7 @@ options:
 	@printf '  %-16s %s\n' HOST_CC "$(HOST_CC)"
 	@printf '  %-16s %s\n' CMDLINE_EXTRA "$(CMDLINE_EXTRA)"
 	@printf '  %-16s %s\n' SERIAL_TCP "$(SERIAL_TCP)"
+	@printf '  %-16s %s\n' NET_MODE "$(NET_MODE) (user = slirp NIC)"
 	@printf '  %-16s %s\n' EXTRA_DISKS "$(EXTRA_DISKS)"
 	@printf '  %-16s %s\n' BUILD "$(BUILD)"
 	@printf '  %-16s %s\n' KERNEL "$(KERNEL)"
