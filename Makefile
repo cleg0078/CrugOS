@@ -9,8 +9,10 @@
 #   make disk       build the GPT/ext4 test disk
 #   make check-disk run e2fsck and file checks on the test disk
 #   make test-raid  boot RAID1 (two members) and verify member disks
+#   make test-raid10  boot RAID10 (four members) and verify member disks
 #   make test-nvme   boot from an NVMe namespace and verify the disk
 #   make test-raid-degraded  boot RAID1 with one member missing
+#   make test-raid10-degraded  boot RAID10 with one member per pair
 #   make size       enforce the kernel size budget
 #   make check-efi  validate the loader as a PE32+ EFI application
 #   make repro      verify the build is bit-for-bit reproducible
@@ -87,6 +89,10 @@ DISK_IMG ?= $(BUILD)/disk.img
 DISK_SIZE_MB ?= 16
 RAID_DISK_A ?= $(BUILD)/raid-a.img
 RAID_DISK_B ?= $(BUILD)/raid-b.img
+RAID10_DISK_A ?= $(BUILD)/raid10-a.img
+RAID10_DISK_B ?= $(BUILD)/raid10-b.img
+RAID10_DISK_C ?= $(BUILD)/raid10-c.img
+RAID10_DISK_D ?= $(BUILD)/raid10-d.img
 NVME_IMG ?= $(BUILD)/nvme.img
 NVME_SERIAL ?= CRUGNVME0
 EXTRA_DISKS ?=
@@ -124,8 +130,9 @@ LOADER_SOURCES := $(wildcard boot/efi/*.c)
 LOADER_OBJECTS := $(patsubst %,$(OBJ)/%.o,$(basename $(LOADER_SOURCES)))
 LOADER_DEPS := $(LOADER_OBJECTS:.o=.d)
 
-.PHONY: all kernel loader esp disk raid-disks nvme-disk run test test-compat test-raid test-raid-degraded \
-        test-nvme check-disk size check-efi repro test-host preflight version options clean distclean help
+.PHONY: all kernel loader esp disk raid-disks raid10-disks nvme-disk run test test-compat \
+        test-raid test-raid-degraded test-raid10 test-raid10-degraded test-nvme \
+        check-disk size check-efi repro test-host preflight version options clean distclean help
 
 all: esp
 
@@ -183,6 +190,10 @@ raid-disks: scripts/mkraid.sh scripts/raid-meta.py
 	$(Q)scripts/mkraid.sh $(RAID_DISK_A) $(RAID_DISK_B)
 	@echo "  RAID  $(RAID_DISK_A) $(RAID_DISK_B)"
 
+raid10-disks: scripts/mkraid10.sh scripts/raid-meta.py
+	$(Q)scripts/mkraid10.sh $(RAID10_DISK_A) $(RAID10_DISK_B) $(RAID10_DISK_C) $(RAID10_DISK_D)
+	@echo "  RAID10 $(RAID10_DISK_A) $(RAID10_DISK_B) $(RAID10_DISK_C) $(RAID10_DISK_D)"
+
 nvme-disk: scripts/mkdisk.sh
 	$(Q)rm -f $(NVME_IMG)
 	$(Q)scripts/mkdisk.sh $(NVME_IMG) $(DISK_SIZE_MB)
@@ -223,6 +234,18 @@ test-raid-degraded: esp raid-disks
 	$(Q)$(MAKE) --no-print-directory run DISK_IMG=$(RAID_DISK_A)
 	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" degraded "$(EXPECT_NVME)"
 	$(Q)$(PYTHON) scripts/check-raid.py $(RAID_DISK_A)
+
+test-raid10: esp raid10-disks
+	$(Q)$(MAKE) --no-print-directory run DISK_IMG=$(RAID10_DISK_A) \
+		EXTRA_DISKS="$(RAID10_DISK_B) $(RAID10_DISK_C) $(RAID10_DISK_D)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" healthy "$(EXPECT_NVME)"
+	$(Q)$(PYTHON) scripts/check-raid10.py $(RAID10_DISK_A) $(RAID10_DISK_B) $(RAID10_DISK_C) $(RAID10_DISK_D)
+
+test-raid10-degraded: esp raid10-disks
+	$(Q)$(MAKE) --no-print-directory run DISK_IMG=$(RAID10_DISK_A) \
+		EXTRA_DISKS="$(RAID10_DISK_C)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" degraded "$(EXPECT_NVME)"
+	$(Q)$(PYTHON) scripts/check-raid10.py $(RAID10_DISK_A) $(RAID10_DISK_C)
 
 test-nvme: esp nvme-disk
 	$(Q)$(MAKE) --no-print-directory run DISK_IMG= NVME_DISK=$(NVME_IMG)
@@ -282,6 +305,10 @@ options:
 	@printf '  %-16s %s\n' DISK_SIZE_MB "$(DISK_SIZE_MB)"
 	@printf '  %-16s %s\n' RAID_DISK_A "$(RAID_DISK_A)"
 	@printf '  %-16s %s\n' RAID_DISK_B "$(RAID_DISK_B)"
+	@printf '  %-16s %s\n' RAID10_DISK_A "$(RAID10_DISK_A)"
+	@printf '  %-16s %s\n' RAID10_DISK_B "$(RAID10_DISK_B)"
+	@printf '  %-16s %s\n' RAID10_DISK_C "$(RAID10_DISK_C)"
+	@printf '  %-16s %s\n' RAID10_DISK_D "$(RAID10_DISK_D)"
 	@printf '  %-16s %s\n' NVME_IMG "$(NVME_IMG)"
 	@printf '  %-16s %s\n' NVME_SERIAL "$(NVME_SERIAL)"
 	@printf '  %-16s %s\n' EXTRA_DISKS "$(EXTRA_DISKS)"

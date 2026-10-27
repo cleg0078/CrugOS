@@ -145,6 +145,9 @@ static int storage_raid_root(u32 disks)
     if (!array)
         return -1;
     kprintf("CRUGOS: raid ready\n");
+    kprintf("raid   : level %u, %u member(s), %u pair(s), chunk %u sectors\n",
+            raid_level(array), raid_member_count(array), raid_pairs(array),
+            raid_chunk_sectors(array));
     if (degraded || raid_is_degraded(array)) {
         kprintf("CRUGOS: raid degraded (%u/%u members)\n", present,
                 raid_member_count(array));

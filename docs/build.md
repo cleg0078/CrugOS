@@ -1,6 +1,6 @@
 # Building CrugOS
 
-This document describes the phase 3B-4 build system: how the kernel, the UEFI
+This document describes the phase 3B-5 build system: how the kernel, the UEFI
 loader and the test disk images are built, which invariants the link must
 preserve, and how to diagnose the failure modes that are specific to this
 toolchain.
@@ -14,7 +14,7 @@ toolchain.
 | `qemu-system-x86_64` | boot test | 10.x, TCG works without `/dev/kvm` |
 | OVMF | UEFI firmware | `/usr/share/OVMF/OVMF_CODE_4M.fd` + `OVMF_VARS_4M.fd` |
 | `python3` | boot/PE checks | standard library only |
-| `sgdisk`, `mke2fs`, `debugfs`, `e2fsck`, `dd`, `truncate` | test disks | only for `make disk`, `make raid-disks` and their checks; e2fsprogs |
+| `sgdisk`, `mke2fs`, `debugfs`, `e2fsck`, `dd`, `truncate` | test disks | only for `make disk`, `make raid-disks`, `make raid10-disks` and their checks; e2fsprogs |
 
 Run `make preflight` to check all of the above.
 
@@ -26,12 +26,15 @@ make all         # kernel.elf, BOOTX64.EFI and the ESP tree
 make run         # boot the ESP tree under QEMU + OVMF
 make test        # boot, verify markers/version/AVX2, then e2fsck the disk
 make test-raid   # boot a two-member RAID1 root and check both members
+make test-raid10 # boot a four-member RAID10 root and check every member
 make test-nvme   # boot from an NVMe namespace and check the image
 make test-raid-degraded  # boot RAID1 with one member missing
+make test-raid10-degraded  # boot RAID10 with one member per mirror pair
 make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
 make test-host   # host unit tests for string/printf/ELF/bitmap/VM math/handles
 make disk        # build the GPT/ext4 test disk at build/<arch>/disk.img
 make raid-disks  # build the two GPT/ext4 RAID1 member disks
+make raid10-disks  # build the four GPT/ext4 RAID10 member disks
 make nvme-disk   # build the GPT/ext4 image used by test-nvme
 make check-disk  # e2fsck and persisted-file checks on the current disk
 make size        # kernel size budget (<1 MiB stretch, <2 MiB hard)
@@ -74,6 +77,7 @@ options` prints the complete resolved set (including paths derived from
 | `DISK_IMG` | `build/<arch>/disk.img` | raw disk image attached as `vda`; empty boots without virtio |
 | `DISK_SIZE_MB` | `16` | size of the generated test disk |
 | `RAID_DISK_A/B` | `build/<arch>/raid-a.img`, `raid-b.img` | RAID1 members attached as `vda`/`vdb` |
+| `RAID10_DISK_A..D` | `build/<arch>/raid10-a.img`..`raid10-d.img` | RAID10 members attached as `vda`..`vdd` |
 | `NVME_IMG` | `build/<arch>/nvme.img` | image attached as an NVMe namespace |
 | `NVME_SERIAL` | `CRUGNVME0` | QEMU NVMe serial reported by OVMF |
 | `EXTRA_DISKS` | empty | space-separated images attached after `DISK_IMG` |
@@ -158,7 +162,7 @@ OVMF 4M needs a substantial amount of RAM before it will boot from QEMU's
 | 512 | reliable; used by all gates |
 
 This is a firmware limit, not a kernel limit: the kernel load image is about
-230 KiB. The specification's 16 MiB headless target needs a leaner boot path and
+290 KiB. The specification's 16 MiB headless target needs a leaner boot path and
 is tracked in [roadmap.md](roadmap.md).
 
 ## Test disk
@@ -205,6 +209,16 @@ persisted files, and after a healthy run compares the two data regions byte for
 byte. The metadata format, assembly rules and limits are in
 [raid.md](raid.md).
 
+`make raid10-disks` runs [scripts/mkraid10.sh](../scripts/mkraid10.sh) with
+the same `raid-meta.py` helper to build four 16 MiB members with slots 0..3,
+level 10 and a 128-sector chunk. `make test-raid10` attaches all four images
+and requires `raid healthy (4/4 members)`; `make test-raid10-degraded` attaches
+only `RAID10_DISK_A` and `RAID10_DISK_C` (slots 0 and 2, one member per mirror
+pair) and requires `raid degraded (2/4 members)`.
+[scripts/check-raid10.py](../scripts/check-raid10.py) validates the metadata,
+unique slots and pair coverage, rebuilds the logical array from one member per
+pair, runs `e2fsck -fn` and checks the persisted files on every member.
+
 ## Reproducibility
 
 `make repro` builds `kernel.elf` and `BOOTX64.EFI` twice under different
@@ -240,14 +254,20 @@ randomisation that leaks into the output will fail this target.
   Create CQ/SQ dwords are reversed (queue id low 16, size high 16). See
   [nvme.md](nvme.md).
 - **`raid   : metadata invalid`**: a member's last two sectors are missing or
-  disagree on magic, CRC, geometry, UUID, generation or slot. Regenerate with
-  `make raid-disks`; inspect with `scripts/check-raid.py`.
-- **Healthy test boots degraded**: only one virtio device appeared. Check the
-  serial `block ready (N device(s))` line and QEMU's extra `-drive` pairs;
-  the test script passes `EXTRA_DISKS`.
-- **`make test-raid` fails e2fsck but the array booted**: the two members
-  diverged. `check-raid.py` reports a data-region mismatch; this indicates a
-  mirror write path bug, not a filesystem bug.
+  disagree on magic, CRC, level, chunk, geometry, UUID, generation or slot.
+  Regenerate with `make raid-disks` or `make raid10-disks`; inspect with
+  `scripts/check-raid.py` or `scripts/check-raid10.py`.
+- **`raid   : mirror pair N has no member`**: a RAID10 array lost both members
+  of one pair. There is no rebuild; regenerate the images with
+  `make raid10-disks`.
+- **Healthy test boots degraded**: a virtio device did not appear or its
+  metadata was rejected. Check the serial `block ready (N device(s))` line and
+  QEMU's extra `-drive` pairs; the test scripts pass `EXTRA_DISKS`. A RAID10
+  degraded gate is expected to show `2/4`.
+- **`make test-raid` or `make test-raid10` fails e2fsck but the array
+  booted**: members diverged or chunks were assembled from the wrong pair.
+  `check-raid.py`/`check-raid10.py` report the mismatch; this indicates a
+  mirror/stripe write-path bug, not a filesystem bug.
 - **`storage: writable test failed`**: the in-kernel write path failed. The
   serial log names the step; `make check-disk` shows whether the on-disk state
   or the file contents are wrong. A bitmap-offset bug shows up as

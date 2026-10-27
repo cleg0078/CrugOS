@@ -88,10 +88,11 @@ post-snapshot allocations cannot push it over capacity.
 8. `storage_init`: `block_init`, the legacy virtio-blk devices, then the
    NVMe driver (PCI class 01/08/02, admin/I/O queues, namespace 1), and the GPT
    of every block device. A partition named `crugroot` is mounted directly;
-   otherwise `fd00` partitions are assembled into RAID1 `md0` and mounted.
-   A journaled filesystem is opened through JBD2 and replayed at mount time if
-   necessary. `CRUGOS: virtio ready`, `CRUGOS: nvme ready`,
-   `CRUGOS: block ready`, `CRUGOS: gpt ready`, `CRUGOS: raid ready` and
+   otherwise `fd00` partitions are assembled into RAID1 or RAID10 `md0` and
+   mounted. A journaled filesystem is opened through JBD2 and replayed at
+   mount time if necessary. `CRUGOS: virtio ready`, `CRUGOS: nvme ready`,
+   `CRUGOS: block ready`, `CRUGOS: gpt ready`, `CRUGOS: raid ready`, the
+   `raid   : level ...` geometry line and
    `CRUGOS: raid healthy`/`raid degraded` when RAID is used, then
    `CRUGOS: ext4 ready`, `CRUGOS: journal ready`, `CRUGOS: storage ready`.
 9. `sched_init`: per-class run queues, boot thread id 0 and the idle thread.
@@ -101,7 +102,7 @@ post-snapshot allocations cannot push it over capacity.
 11. `sti`, then `selftest_run`: allocator, mappings, W^X audit, `int3`, timer,
     heap, block/GPT/ext4/storage (including the read-write round trip and a
     journal replay test), handles, scheduler, message ports and syscalls.
-12. `report_boot`, `CRUGOS: phase 3b4 boot ok`, `arch_exit_qemu(0x10)`.
+12. `report_boot`, `CRUGOS: phase 3b5 boot ok`, `arch_exit_qemu(0x10)`.
 
 Storage is still brought up with interrupts disabled: the virtio driver polls
 its used ring and the NVMe driver polls completion queues between `heap_init`
@@ -189,9 +190,14 @@ namespaces (`nvme0n1`..). `storage_init()` parses every disk's GPT and prefers
 a partition named
 `crugroot`, mounted directly as ext4. If there is none, it collects the
 partitions whose type is Linux RAID (`fd00`), validates their 512-byte metadata
-records and assembles RAID1 `md0`, then mounts that. A missing member is
-allowed and prints `CRUGOS: raid degraded`; a healthy pair prints
-`CRUGOS: raid healthy (2/2 members)`. The root mount then reads
+records and assembles `md0`, then mounts that. The metadata level selects the
+layout: level 1 mirrors every sector across all members, while level 10
+stripes 64 KiB chunks across mirror pairs and maps each range with
+`(lba / chunk) % (member_count / 2)`. A missing member is allowed unless a
+RAID10 mirror pair loses both members; degraded arrays print
+`CRUGOS: raid degraded (N/M members)`, and a healthy array prints
+`CRUGOS: raid healthy (N/M members)` after a geometry line such as
+`raid   : level 10, 4 member(s), 2 pair(s), chunk 128 sectors`. The root mount then reads
 `/hello.txt` into a static buffer and the self-test re-checks the mount, the
 directory listing and the file contents. See [raid.md](raid.md) and
 [nvme.md](nvme.md).
@@ -233,6 +239,7 @@ CRUGOS: nvme ready
 CRUGOS: block ready
 CRUGOS: gpt ready
 CRUGOS: raid ready
+raid   : level 10, 4 member(s), 2 pair(s), chunk 128 sectors
 CRUGOS: raid healthy            # or: CRUGOS: raid degraded
 CRUGOS: ext4 ready
 CRUGOS: journal ready
@@ -242,7 +249,7 @@ CRUGOS: syscall ready
 CRUGOS: writable storage ok
 CRUGOS: journal selftest ok
 CRUGOS: selftest ok
-CRUGOS: phase 3b4 boot ok
+CRUGOS: phase 3b5 boot ok
 ```
 
 `raid ready` and `raid healthy`/`raid degraded` appear only on the RAID
@@ -268,9 +275,9 @@ init, newlines are also mirrored to the GOP text console, which uses an embedded
   demand paging arrive with user-mode address spaces.
 - Execution is kernel-mode only. There is no user mode, no address-space switch
   and no `SYSCALL` MSR gateway yet; `int 0x80` reaches the same dispatcher.
-- RAID support is RAID1 only: one `md0` array, no RAID10, no online rebuild,
-  no hot spare and no write-intent bitmap. The kernel validates member metadata
-  but never creates or updates it.
+- RAID support is RAID1 and RAID10: one `md0` array, no online rebuild, no
+  hot spare, no scrub and no write-intent bitmap. The kernel validates member
+  metadata but never creates or updates it.
 - Only the boot CPU runs. The LAPIC is enabled and `%gs` per-CPU data exists,
   but AP startup, IOAPIC and external interrupts are phase 5 work.
 - Empty slab pages are not returned to the PMM, and page-table pages created
@@ -278,6 +285,6 @@ init, newlines are also mirrored to the GOP text console, which uses an embedded
 - Storage is writable with JBD2 replay and ordered metadata journaling, but
   legacy virtio-blk and NVMe roots, polled requests, a single extent-tree
   level, one descriptor per transaction, no journal or metadata checksums,
-  no RAID1/10 and no `crypt.device` yet.
+  no `crypt.device` yet.
 - `SMEP`/`SMAP` are enabled only when the CPU reports them; `qemu64` does not.
 - No shutdown/reset path; QEMU's debug port is the exit mechanism.

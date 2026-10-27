@@ -8,7 +8,8 @@ IPC and syscalls); phase 3A adds a working block/GPT/ext4 read-only path to a
 real disk; phase 3B-1 makes that filesystem writable and gates it on
 `e2fsck`; phase 3B-2 adds JBD2 journal replay and ordered metadata journaling;
 phase 3B-3 mirrors the root across two disks and boots from a degraded array;
-phase 3B-4 adds a polled NVMe root path.
+phase 3B-4 adds a polled NVMe root path; phase 3B-5 stripes the root across
+RAID10 mirror pairs and boots with one member missing per pair.
 Every later phase keeps the same BootInfo contract, so the loader does not
 change for memory management, storage, SMP or drivers.
 
@@ -133,12 +134,29 @@ change for memory management, storage, SMP or drivers.
 - `make test-nvme` boots with only an NVMe image, requires `nvme ready` and
   `nvme0n1`, and runs the same JBD2/writable-ext4 self-tests plus `e2fsck`.
 
+## Phase 3B-5 - RAID10 (done)
+
+- RAID metadata now carries level 1 or 10 and a chunk size; RAID10 requires an
+  even 4..8 members and maps sector ranges to mirror pair
+  `(lba / chunk) % (member_count / 2)` with slots paired as `2p`/`2p+1`.
+- `raid_assemble()` validates level/chunk/geometry, unique slots and pair
+  coverage, then registers `md0`; reads use a present member of the pair,
+  writes go to both, and assembly fails if a pair has no member.
+- `storage_init()` prints the array geometry (`raid   : level 10, 4 member(s),
+  2 pair(s), chunk 128 sectors`) before `raid healthy`/`raid degraded`, and the
+  ext4/JBD2 path is unchanged.
+- Host tools `mkraid10.sh` and `check-raid10.py` build and verify four-member
+  arrays; `check-raid10.py` rebuilds the logical image from one member per pair
+  before `e2fsck`.
+- `make test-raid10` gates a healthy four-member boot and `make
+  test-raid10-degraded` gates a two-member boot (slots 0 and 2).
+
 ## Phase 3B - remaining storage work
 
 - Journal and metadata checksums; multi-descriptor transactions and journal
   wrapping.
 - AHCI and USB storage drivers, hotplug and more than four NVMe controllers.
-- RAID10, online rebuild, hot spare, scrub and a write-intent bitmap.
+- RAID online rebuild, hot spare, scrub and a write-intent bitmap.
 - `crypt.device` with AES-256-XTS and Argon2id key derivation.
 - Redundant ESP and a recovery path.
 

@@ -8,11 +8,11 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 3B-4 NVMe (`v0.8.0`)
+## Status: phase 3B-5 RAID10 (`v0.9.0`)
 
-Phases 1-3B-4 keep the boot path under a kernel that owns memory, CPU state,
-the execution model, a real crash-consistent filesystem, a mirrored root and an
-NVMe transport:
+Phases 1-3B-5 keep the boot path under a kernel that owns memory, CPU state,
+the execution model, a real crash-consistent filesystem, mirrored/striped
+RAID roots and two storage transports:
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -104,9 +104,25 @@ Phase 3B-4 adds a polled NVMe driver:
   and size in the high 16 bits of CDW10, CSTS is at `0x1C` and AQA at `0x24`;
 - namespace 1 is identified and registered as `nvme0n1`; reads, writes and
   flushes use PRP1/PRP2 or a PRP list with a 1000 ms deadline;
-- `storage_init()` probes virtio-blk and NVMe and mounts `crugroot` (or RAID1)
-  regardless of transport; `make test-nvme` boots with only an NVMe image and
-  runs the same JBD2, writable-ext4 and `e2fsck` gates.
+- `storage_init()` probes virtio-blk and NVMe and mounts `crugroot` (or a RAID
+  array) regardless of transport; `make test-nvme` boots with only an NVMe
+  image and runs the same JBD2, writable-ext4 and `e2fsck` gates.
+
+Phase 3B-5 adds RAID10:
+
+- the checksummed metadata now carries level 1 or 10 and a chunk size; RAID10
+  requires an even 4..8 members and maps sector ranges to mirror pair
+  `(lba / chunk) % (member_count / 2)`, with slots paired as `2p`/`2p+1`;
+- reads use a present member of the pair, writes go to both, failed members
+  are dropped for the rest of the boot, and assembly rejects an array whose
+  mirror pair has no member;
+- `storage_init()` prints the geometry, e.g. `raid   : level 10, 4 member(s),
+  2 pair(s), chunk 128 sectors`, before `raid healthy`/`raid degraded`;
+- host tools `mkraid10.sh` and `check-raid10.py` build and verify four-member
+  arrays; `check-raid10.py` rebuilds the logical image from one member per pair
+  before `e2fsck`;
+- `make test-raid10` gates a healthy four-member boot and `make
+  test-raid10-degraded` gates a two-member boot (slots 0 and 2).
 
 It detects AVX2, enables XSAVE state and, by default, refuses to boot without
 AVX2. Self-tests run at boot, then the kernel prints a boot report to a 16550
@@ -116,24 +132,29 @@ testing.
 Verified in this tree:
 
 ```
-CrugOS 0.8.0 (phase 3b4) -- Amiga-inspired microkernel bring-up
+CrugOS 0.9.0 (phase 3b5) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.8.0
-pmm    : 118412 pages (462 MiB), free 118411, bitmap 131072 B
+CRUGOS: version 0.9.0
+pmm    : 118355 pages (462 MiB), free 118354, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
 vm     : 4 GiB identity map, W^X kernel sections, guard=0x000000000013e000
 CRUGOS: vm ready
 CRUGOS: cpu ready
-timer  : 2688117989 Hz (pit), mode=lapic-periodic, 100 Hz tick
+timer  : 2687182779 Hz (pit), mode=lapic-periodic, 100 Hz tick
 CRUGOS: timer ready
 CRUGOS: heap ready
-CRUGOS: virtio ready (0 device(s))
-nvme   : nvme0n1 32768 sectors, bar=0xc000000000
-CRUGOS: nvme ready (1 device(s))
-CRUGOS: block ready (1 device(s))
-gpt    : 1 partition(s), root 'crugroot' LBA 2048..26623
+virtio : blk vda, 32768 sectors, io=0x6180
+virtio : blk vdb, 32768 sectors, io=0x6100
+virtio : blk vdc, 32768 sectors, io=0x6080
+virtio : blk vdd, 32768 sectors, io=0x6000
+CRUGOS: virtio ready (4 device(s))
+CRUGOS: nvme ready (0 device(s))
+CRUGOS: block ready (4 device(s))
 CRUGOS: gpt ready
+CRUGOS: raid ready
+raid   : level 10, 4 member(s), 2 pair(s), chunk 128 sectors
+CRUGOS: raid healthy (4/4 members)
 CRUGOS: ext4 ready
 CRUGOS: journal ready
 CRUGOS: ext4 /hello.txt: hello from ext4
@@ -144,9 +165,9 @@ CRUGOS: journal selftest ok (1 blocks recovered)
 CRUGOS: writable storage ok
 CRUGOS: selftest ok
 wx     : audit ok, identity map 0..4 GiB, guard unmapped
-heap   : total=57344 B used=7952 B slab_pages=12 large_pages=2
-boot   : pmm=28666 us cpu=661 us vm=1180 us traps=336 us timer=65338 us heap=47 us storage=10166 us sched=490 us syscall=171 us total=107059 us
-CRUGOS: phase 3b4 boot ok
+heap   : total=61440 B used=12736 B slab_pages=13 large_pages=2
+boot   : pmm=29250 us cpu=422 us vm=651 us traps=380 us timer=65841 us heap=153 us storage=19033 us sched=376 us syscall=112 us total=116222 us
+CRUGOS: phase 3b5 boot ok
 ```
 
 Timing and memory values vary with the host and the QEMU CPU model.
@@ -159,14 +180,17 @@ make             # show this help (the target list)
 make all         # build kernel.elf, BOOTX64.EFI and the ESP tree
 make test        # boot under QEMU/OVMF and verify the boot contract
 make test-raid   # boot a healthy two-member RAID1 root and check both disks
+make test-raid10 # boot a healthy four-member RAID10 root and check all disks
 make test-nvme   # boot from an NVMe namespace and check the image
 make test-raid-degraded  # boot RAID1 with one member missing
+make test-raid10-degraded  # boot RAID10 with one member per mirror pair
 make run         # boot and keep the serial log for inspection
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
 make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles)
 make check-disk  # e2fsck + persisted-file checks on the latest test disk
 make disk        # generate the GPT/ext4 test disk
 make raid-disks  # generate the two RAID1 member disks
+make raid10-disks  # generate the four RAID10 member disks
 make nvme-disk   # generate the GPT/ext4 image used by test-nvme
 make version     # print the release version from VERSION
 make options     # print every build/QEMU/storage option and its value
@@ -192,13 +216,13 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/core/` | kernel entry, console, printf, panic, self-tests, scheduler, handles, MsgPort, syscall dispatcher, boot report |
 | `kernel/lib/` | freestanding string, formatting and bitmap routines |
 | `kernel/mm/` | physical allocator, W^X page tables, kernel heap |
-| `kernel/block/` | block-device registry, partitions, bounds checks and RAID1 |
+| `kernel/block/` | block-device registry, partitions, bounds checks and RAID1/RAID10 |
 | `kernel/fs/` | GPT, writable ext4, JBD2 journal and the storage boot policy |
 | `drivers/` | PCI, legacy virtio-blk and NVMe block device drivers |
-| `scripts/` | QEMU runner, disk/RAID image builders, boot/PE/disk/RAID checks, size and reproducibility gates |
+| `scripts/` | QEMU runner, disk/RAID1/RAID10 image builders, boot/PE/disk/RAID checks, size and reproducibility gates |
 | `tests/host/` | host unit tests for freestanding code |
 | `tools/` | host-side development tools (`gen-font.py`) |
-| `docs/` | [build](docs/build.md), [boot](docs/boot.md), [storage](docs/storage.md), [NVMe](docs/nvme.md), [RAID1](docs/raid.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
+| `docs/` | [build](docs/build.md), [boot](docs/boot.md), [storage](docs/storage.md), [NVMe](docs/nvme.md), [RAID1/RAID10](docs/raid.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
 
 ## Versioning
 
@@ -235,14 +259,15 @@ See [docs/boot.md](docs/boot.md) for the full handoff ABI and exit protocol.
 
 ## Roadmap
 
-Phases 0, 1, 2, 3A, 3B-1, 3B-2, 3B-3 and 3B-4 are done. Phase 3A covered the block
+Phases 0, 1, 2, 3A and 3B-1 through 3B-5 are done. Phase 3A covered the block
 layer, legacy virtio-blk, GPT and read-only EXT4; phase 3B-1 added the writable
 EXT4 path and an on-disk consistency gate; phase 3B-2 added JBD2 journal replay
-ordered metadata journaling; phase 3B-3 added a RAID1 root with healthy and
-degraded boots; phase 3B-4 added a polled NVMe root path. Remaining phase 3B
-work is journal/metadata checksums,
-`crypt.device` (AES-256-XTS/Argon2id), RAID10/rebuild with a redundant ESP,
-and AHCI/USB storage. Later phases cover USB/audio/graphics, Workbench userspace,
+and ordered metadata journaling; phase 3B-3 added a RAID1 root with healthy and
+degraded boots; phase 3B-4 added a polled NVMe root path; phase 3B-5 added
+RAID10 with healthy four-member and degraded two-member boots. Remaining phase
+3B work is journal/metadata checksums,
+RAID rebuild/hot spare/scrub and a redundant ESP, `crypt.device`
+(AES-256-XTS/Argon2id), and AHCI/USB storage. Later phases cover USB/audio/graphics, Workbench userspace,
 SMP/IOMMU and virtualisation. See
 [docs/roadmap.md](docs/roadmap.md) for the full sequence and the known
 specification gaps (Crug syntax, cross-architecture compilers and the OVMF

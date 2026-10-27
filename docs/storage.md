@@ -8,15 +8,17 @@ Phase 3B-2 adds JBD2 journal replay and ordered metadata journaling, and proves
 recovery at mount time. Phase 3B-3 mirrors the root filesystem across two
 virtual disks in a RAID1 array and can boot from a single remaining member.
 Phase 3B-4 adds a polled NVMe driver, so the same GPT/ext4/JBD2 stack can boot
-from an NVMe namespace instead of a legacy virtio-blk disk. Encryption and
-metadata checksums are later phases.
+from an NVMe namespace instead of a legacy virtio-blk disk. Phase 3B-5 adds
+RAID10 striping over mirror pairs, with healthy four-member and degraded
+(two-member, one per pair) boot gates. Encryption and metadata checksums are
+later phases.
 
 ```
 virtio-blk-pci (legacy I/O BAR)      NVMe PCIe (class 01/08/02)
   -> drivers/block/virtio_blk.c        -> drivers/block/nvme.c
   -> kernel/block/block.c          registry, partitions, bounds checks, flush
   -> kernel/fs/gpt.c               GPT header + entries, CRC32
-  -> kernel/block/raid.c           optional RAID1 array "md0"
+  -> kernel/block/raid.c           optional RAID1/RAID10 array "md0"
   -> kernel/fs/ext4.c              mount, lookup, read/write, create, rename
   -> kernel/fs/storage.c           boot policy and read/write self-test
 ```
@@ -133,21 +135,30 @@ validates the `EFI PART` header, its CRC32 (poly `0xEDB88320`) and the entry
 array CRC. Entries are 128..4096 bytes, at most 128 are scanned and at most
 `GPT_MAX_PARTITIONS` (16) are kept. UTF-16 partition names are converted to
 ASCII by dropping the high byte. `storage_init()` has two root policies: it
-prefers a partition named exactly `crugroot`, and otherwise assembles a RAID1
+prefers a partition named exactly `crugroot`, and otherwise assembles a RAID
 array from partitions whose type GUID is the Linux RAID type
 `A19D880F-05FC-4D3B-A006-743F0F84911E`. Partition bounds are checked again
 when an offset view is created.
 
-## RAID1
+## RAID1 and RAID10
 
 When no `crugroot` partition exists, every `fd00` partition becomes a member
-of one RAID1 array. Each member carries a checksummed 512-byte metadata record
-in its last two sectors; `raid_assemble()` validates geometry, UUID,
-generation and slots, then registers `md0` with `member_sectors - 2` usable
-sectors. Reads take the first healthy member, writes and flushes go to all
-healthy members, and a failed member is dropped for the rest of the boot.
-Missing members boot degraded instead of failing. The full metadata layout,
-assembly rules, host tools and limits are documented in [raid.md](raid.md).
+of one array. Each member carries a checksummed 512-byte metadata record in
+its last two sectors; `raid_assemble()` validates level, chunk, geometry,
+UUID, generation and slots, then registers `md0` with `member_sectors - 2`
+usable sectors. Missing members boot degraded instead of failing. The full
+metadata layout, assembly rules, host tools and limits are documented in
+[raid.md](raid.md).
+
+Level 1 mirrors every sector across all members: reads take the first healthy
+member, writes and flushes go to every healthy member, and a failed member is
+dropped for the rest of the boot. Level 10 requires an even 4..8 members and a
+non-zero chunk; slots pair as `2p`/`2p+1`, and sector `lba` maps to pair
+`(lba / chunk_sectors) % (member_count / 2)`. A RAID10 read tries the present
+members of that pair, writes go to both, and assembly fails if any mirror pair
+has no present member. The serial line after `raid ready` reports the actual
+geometry, for example
+`raid   : level 10, 4 member(s), 2 pair(s), chunk 128 sectors`.
 
 ## ext4 mount and read path
 
@@ -300,6 +311,15 @@ with only the first disk and expects a degraded array. `scripts/check-raid.py`
 validates both metadata copies, runs `e2fsck -fn` on the data region and
 checks the persisted files.
 
+`make raid10-disks` builds four such disks with `scripts/mkraid10.sh`:
+slots 0..3, level 10, chunk 128 sectors, and one shared ext4 image. `make
+test-raid10` boots all four members and expects `raid healthy (4/4 members)`;
+`make test-raid10-degraded` boots slots 0 and 2 and expects
+`raid degraded (2/4 members)`. Because each member holds only its pair's
+chunks, `scripts/check-raid10.py` validates metadata and pair coverage, then
+rebuilds the logical array from one member per pair before running `e2fsck
+-fn` and checking the persisted files.
+
 To inspect the disks on the host:
 
 ```
@@ -323,10 +343,17 @@ scripts/check-raid.py build/x86_64/raid-a.img build/x86_64/raid-b.img
 - `storage: /hello.txt not found`: the image was built without the test file;
   run `make disk` to regenerate it.
 - `raid   : metadata invalid`: a member's last two sectors do not hold a
-  matching `CRA1` record, or the CRC, geometry, UUID or generation disagree.
-  Run `scripts/check-raid.py` on the images.
+  matching `CRA1` record, or the CRC, level, chunk, geometry, UUID or
+  generation disagree. Run `scripts/check-raid.py` or
+  `scripts/check-raid10.py` on the images.
+- `raid   : mirror pair N has no member`: a RAID10 array lost both members of
+  a pair. Recreate the disks with `make raid10-disks`; there is no rebuild.
+- `raid   : ... does not match the array geometry`: members carry different
+  level/chunk/member counts, sizes, UUIDs or generations. Check that all
+  images came from the same `mkraid.sh`/`mkraid10.sh` run.
 - `CRUGOS: raid degraded` on a two-disk test: one virtio device did not appear
-  or its metadata was rejected; the serial log lists the devices found.
+  or its metadata was rejected; the serial log lists the devices found. A
+  four-member RAID10 test showing `2/4` is expected for the degraded gate.
 - `nvme   : controller not ready` or an NVMe timeout: CSTS/AQA offsets,
   firmware leaving the controller enabled, or a BAR above 4 GiB not mapped by
   the generic page-table path; see [nvme.md](nvme.md).
@@ -362,7 +389,6 @@ scripts/check-raid.py build/x86_64/raid-a.img build/x86_64/raid-b.img
 - The write path handles at most one extent-tree level and does not replace an
   existing rename target; hard links, symlinks, ownership and extended
   attributes are not implemented.
-- RAID1 only, one array (`md0`): no RAID10, no chunking, no rebuild, no
-  hot spare, no scrub, no dirty bitmap and no metadata updates by the kernel.
-  No `crypt.device`, no AES-256-XTS or Argon2id, and no redundant ESP yet.
-  These remain phase 3B work.
+- RAID1 and RAID10 only, one array (`md0`): no rebuild, no hot spare, no
+  scrub, no dirty bitmap and no metadata updates by the kernel. No `crypt.device`, no AES-256-XTS or
+  Argon2id, and no redundant ESP yet. These remain phase 3B work.
