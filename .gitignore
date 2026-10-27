@@ -1,0 +1,10 @@
+build/
+*.o
+*.d
+*.map
+*.efi
+*.elf
+*.log
+OVMF_VARS*.fd
+exit-code.txt
+__pycache__/
