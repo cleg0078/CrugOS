@@ -1,6 +1,7 @@
 # CrugOS top-level build system.
 #
-#   make            build kernel, UEFI loader and ESP tree
+#   make            show this help (same as 'make help')
+#   make all        build kernel, UEFI loader and ESP tree
 #   make run        boot the ESP image under QEMU + OVMF
 #   make test       boot and verify the serial markers / exit code
 #   make test-host  build and run host unit tests
@@ -19,10 +20,10 @@
 #
 # Every knob has a default below; override it on the command line, e.g.
 #   make test MEMORY_MB=1024 QEMU_CPU=qemu64
-# Run 'make options' for the complete list and current values.
+# Bare 'make' shows this help; 'make all' builds everything.
 
 SHELL := /bin/bash
-.DEFAULT_GOAL := all
+.DEFAULT_GOAL := help
 .DELETE_ON_ERROR:
 .SUFFIXES:
 

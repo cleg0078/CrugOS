@@ -21,7 +21,8 @@ Run `make preflight` to check all of the above.
 ## Targets
 
 ```
-make             # kernel.elf, BOOTX64.EFI and the ESP tree
+make             # show this target list (same as `make help`)
+make all         # kernel.elf, BOOTX64.EFI and the ESP tree
 make run         # boot the ESP tree under QEMU + OVMF
 make test        # boot, verify markers/version/AVX2, then e2fsck the disk
 make test-raid   # boot a two-member RAID1 root and check both members
@@ -38,7 +39,7 @@ make check-efi   # PE32+ structure checks on the loader
 make repro       # two independent builds must be byte-identical
 make preflight   # toolchain/firmware availability
 make version     # print the release version from VERSION
-make options     # print every option below with its current value
+make options     # print every option with its current value
 make clean       # remove build/<arch>
 make distclean   # remove build/ and host test artifacts
 ```

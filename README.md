@@ -155,7 +155,8 @@ Timing and memory values vary with the host and the QEMU CPU model.
 
 ```
 make preflight   # crugc, GNU ld, QEMU, OVMF, python3
-make             # build kernel.elf, BOOTX64.EFI and the ESP tree
+make             # show this help (the target list)
+make all         # build kernel.elf, BOOTX64.EFI and the ESP tree
 make test        # boot under QEMU/OVMF and verify the boot contract
 make test-raid   # boot a healthy two-member RAID1 root and check both disks
 make test-nvme   # boot from an NVMe namespace and check the image
