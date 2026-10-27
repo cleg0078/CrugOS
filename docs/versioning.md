@@ -1,8 +1,8 @@
 # Versioning
 
 CrugOS uses [Semantic Versioning 2.0.0](https://semver.org/) with annotated
-`vMAJOR.MINOR.PATCH` Git tags. The current release is `v0.9.0` (phase 3B-5:
-RAID10 mirror pairs in addition to RAID1, virtio-blk and NVMe).
+`vMAJOR.MINOR.PATCH` Git tags. The current release is `v0.10.0` (phase 3B-6:
+cold-spare RAID rebuild at boot, on top of RAID1/RAID10, virtio-blk and NVMe).
 
 ## Source of truth
 
@@ -48,6 +48,7 @@ vi VERSION                       # pick the new SemVer
 make distclean && make test      # clean build, boot gate, guest version check
 make test-raid test-raid-degraded # RAID1 healthy and degraded gates
 make test-raid10 test-raid10-degraded  # RAID10 healthy and degraded gates
+make test-raid-repair test-raid10-repair  # cold-spare rebuild gates
 make test-nvme                   # NVMe-only root boot and disk check
 make size check-efi test-host repro
 make check-disk                  # e2fsck + persisted files on the test disk
@@ -69,3 +70,4 @@ git push origin main vX.Y.Z
 | `v0.7.0` | 2026-10-27 | phase 3B-3: multiple virtio-blk devices, checksummed RAID1 metadata, `md0` assembly, healthy/degraded root boot and host RAID gates; BootInfo stays v1 and the kernel ABI is unchanged |
 | `v0.8.0` | 2026-10-27 | phase 3B-4: polled NVMe driver (64-bit BAR mapping, admin/I/O queues, namespace 1, PRP I/O, flush), NVMe-only root boot and `make test-nvme`; BootInfo stays v1 and the kernel ABI is unchanged |
 | `v0.9.0` | 2026-10-27 | phase 3B-5: RAID10 metadata (level/chunk), mirror-pair mapping, four-member healthy and two-member degraded `md0` boots, host image builder/checker gates; BootInfo stays v1 and the kernel ABI is unchanged |
+| `v0.10.0` | 2026-10-27 | phase 3B-6: cold-spare RAID rebuild at boot (blank member detection, lowest missing slot, 64-sector copy from the mirror, kernel-written metadata), `raid-blank.sh` and healthy/degraded repair gates; BootInfo stays v1 and the kernel ABI is unchanged |

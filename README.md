@@ -8,11 +8,11 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 3B-5 RAID10 (`v0.9.0`)
+## Status: phase 3B-6 RAID rebuild (`v0.10.0`)
 
-Phases 1-3B-5 keep the boot path under a kernel that owns memory, CPU state,
+Phases 1-3B-6 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a real crash-consistent filesystem, mirrored/striped
-RAID roots and two storage transports:
+RAID roots that can rebuild a replacement member, and two storage transports:
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -124,6 +124,22 @@ Phase 3B-5 adds RAID10:
 - `make test-raid10` gates a healthy four-member boot and `make
   test-raid10-degraded` gates a two-member boot (slots 0 and 2).
 
+Phase 3B-6 rebuilds a cold spare:
+
+- member metadata is now probed as valid, blank or corrupt: a member whose last
+  two sectors carry no `CRA1` magic is a blank replacement, while a non-zero
+  invalid record is still fatal;
+- valid members supply the geometry; blanks fill the lowest missing slots, and a
+  RAID10 array still requires one valid member per mirror pair;
+- the rebuild is synchronous at boot: 64-sector blocks are copied from a healthy
+  member of the same pair (the whole region for RAID1, only its pair's chunks
+  for RAID10), flushed, then a fresh checksummed metadata record with a new
+  member UUID is written and flushed;
+- `scripts/raid-blank.sh` recreates the cold-spare failure by zeroing a member's
+  partition while keeping its GPT; `make test-raid-repair` rebuilds one RAID1
+  member and `make test-raid10-repair` rebuilds slots 1 and 3, then `e2fsck`
+  validates the array from the repaired members.
+
 It detects AVX2, enables XSAVE state and, by default, refuses to boot without
 AVX2. Self-tests run at boot, then the kernel prints a boot report to a 16550
 serial port and the framebuffer and exits QEMU deterministically for automated
@@ -132,29 +148,29 @@ testing.
 Verified in this tree:
 
 ```
-CrugOS 0.9.0 (phase 3b5) -- Amiga-inspired microkernel bring-up
+CrugOS 0.10.0 (phase 3b6) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.9.0
-pmm    : 118355 pages (462 MiB), free 118354, bitmap 131072 B
+CRUGOS: version 0.10.0
+pmm    : 118388 pages (462 MiB), free 118387, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
-vm     : 4 GiB identity map, W^X kernel sections, guard=0x000000000013e000
+vm     : 4 GiB identity map, W^X kernel sections, guard=0x0000000000147000
 CRUGOS: vm ready
 CRUGOS: cpu ready
-timer  : 2687182779 Hz (pit), mode=lapic-periodic, 100 Hz tick
+timer  : 2687973354 Hz (pit), mode=lapic-periodic, 100 Hz tick
 CRUGOS: timer ready
 CRUGOS: heap ready
-virtio : blk vda, 32768 sectors, io=0x6180
-virtio : blk vdb, 32768 sectors, io=0x6100
-virtio : blk vdc, 32768 sectors, io=0x6080
-virtio : blk vdd, 32768 sectors, io=0x6000
-CRUGOS: virtio ready (4 device(s))
+virtio : blk vda, 32768 sectors, io=0x6080
+virtio : blk vdb, 32768 sectors, io=0x6000
+CRUGOS: virtio ready (2 device(s))
 CRUGOS: nvme ready (0 device(s))
-CRUGOS: block ready (4 device(s))
+CRUGOS: block ready (2 device(s))
 CRUGOS: gpt ready
+raid   : rebuilt vdb1 as slot 1
 CRUGOS: raid ready
-raid   : level 10, 4 member(s), 2 pair(s), chunk 128 sectors
-CRUGOS: raid healthy (4/4 members)
+CRUGOS: raid rebuilt (1 member(s))
+raid   : level 1, 2 member(s), 1 pair(s), chunk 0 sectors
+CRUGOS: raid healthy (2/2 members)
 CRUGOS: ext4 ready
 CRUGOS: journal ready
 CRUGOS: ext4 /hello.txt: hello from ext4
@@ -165,10 +181,14 @@ CRUGOS: journal selftest ok (1 blocks recovered)
 CRUGOS: writable storage ok
 CRUGOS: selftest ok
 wx     : audit ok, identity map 0..4 GiB, guard unmapped
-heap   : total=61440 B used=12736 B slab_pages=13 large_pages=2
-boot   : pmm=29250 us cpu=422 us vm=651 us traps=380 us timer=65841 us heap=153 us storage=19033 us sched=376 us syscall=112 us total=116222 us
-CRUGOS: phase 3b5 boot ok
+heap   : total=61440 B used=10400 B slab_pages=13 large_pages=2
+boot   : pmm=26550 us cpu=404 us vm=604 us traps=309 us timer=65296 us heap=49 us storage=765275 us sched=305 us syscall=110 us total=858906 us
+CRUGOS: phase 3b6 boot ok
 ```
+
+This excerpt is the `make test-raid-repair` boot: member `vdb1` was zeroed
+before the run, rebuilt from `vda1` in 64-sector blocks, and the ext4 root was
+mounted from the repaired array.
 
 Timing and memory values vary with the host and the QEMU CPU model.
 
@@ -184,6 +204,8 @@ make test-raid10 # boot a healthy four-member RAID10 root and check all disks
 make test-nvme   # boot from an NVMe namespace and check the image
 make test-raid-degraded  # boot RAID1 with one member missing
 make test-raid10-degraded  # boot RAID10 with one member per mirror pair
+make test-raid-repair  # rebuild a blank RAID1 member at boot, then check
+make test-raid10-repair  # rebuild blank RAID10 slots 1 and 3 at boot
 make run         # boot and keep the serial log for inspection
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
 make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles)
@@ -204,7 +226,8 @@ Build artifacts land in `build/x86_64/`; `make run` records
 default in the makefile; `make options` prints the full resolved set. Useful
 variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `QEMU_DISPLAY`, `QEMU_EXTRA`, `OVMF_CODE`, `OVMF_VARS`, `REQUIRE_AVX2`,
-`EXPECT_AVX2`, `EXPECT_RAID`, `EXPECT_NVME`, `NVME_IMG` and `MODE`; see [docs/build.md](docs/build.md).
+`EXPECT_AVX2`, `EXPECT_RAID`, `EXPECT_NVME`, `EXPECT_REBUILD`, `NVME_IMG` and
+`MODE`; see [docs/build.md](docs/build.md).
 
 ## Repository layout
 
@@ -216,7 +239,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/core/` | kernel entry, console, printf, panic, self-tests, scheduler, handles, MsgPort, syscall dispatcher, boot report |
 | `kernel/lib/` | freestanding string, formatting and bitmap routines |
 | `kernel/mm/` | physical allocator, W^X page tables, kernel heap |
-| `kernel/block/` | block-device registry, partitions, bounds checks and RAID1/RAID10 |
+| `kernel/block/` | block-device registry, partitions, bounds checks, RAID1/RAID10 and boot-time rebuild |
 | `kernel/fs/` | GPT, writable ext4, JBD2 journal and the storage boot policy |
 | `drivers/` | PCI, legacy virtio-blk and NVMe block device drivers |
 | `scripts/` | QEMU runner, disk/RAID1/RAID10 image builders, boot/PE/disk/RAID checks, size and reproducibility gates |
@@ -259,15 +282,16 @@ See [docs/boot.md](docs/boot.md) for the full handoff ABI and exit protocol.
 
 ## Roadmap
 
-Phases 0, 1, 2, 3A and 3B-1 through 3B-5 are done. Phase 3A covered the block
+Phases 0, 1, 2, 3A and 3B-1 through 3B-6 are done. Phase 3A covered the block
 layer, legacy virtio-blk, GPT and read-only EXT4; phase 3B-1 added the writable
 EXT4 path and an on-disk consistency gate; phase 3B-2 added JBD2 journal replay
 and ordered metadata journaling; phase 3B-3 added a RAID1 root with healthy and
 degraded boots; phase 3B-4 added a polled NVMe root path; phase 3B-5 added
-RAID10 with healthy four-member and degraded two-member boots. Remaining phase
-3B work is journal/metadata checksums,
-RAID rebuild/hot spare/scrub and a redundant ESP, `crypt.device`
-(AES-256-XTS/Argon2id), and AHCI/USB storage. Later phases cover USB/audio/graphics, Workbench userspace,
+RAID10 with healthy four-member and degraded two-member boots; phase 3B-6 adds
+boot-time rebuild of a blank RAID1/RAID10 member. Remaining phase 3B work is
+journal/metadata checksums, online RAID rebuild, hot spare, scrub and a
+write-intent bitmap, a redundant ESP, `crypt.device` (AES-256-XTS/Argon2id), and
+AHCI/USB storage. Later phases cover USB/audio/graphics, Workbench userspace,
 SMP/IOMMU and virtualisation. See
 [docs/roadmap.md](docs/roadmap.md) for the full sequence and the known
 specification gaps (Crug syntax, cross-architecture compilers and the OVMF

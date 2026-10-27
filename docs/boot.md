@@ -19,7 +19,8 @@ OVMF (UEFI firmware)
        - physical allocator, page tables + W^X
        - GDT/TSS, %gs per-CPU data, IDT and exceptions
        - LAPIC + TSC/LAPIC timer
-       - kernel heap, virtio-blk/NVMe + GPT + writable ext4, JBD2 replay, self-test
+       - kernel heap, virtio-blk/NVMe + GPT + RAID assembly (cold-spare
+         rebuild) + writable ext4, JBD2 replay, self-test
        - scheduler, handles and MsgPort IPC
        - syscall dispatcher behind int 0x80
        - self-tests, boot report, deterministic exit
@@ -30,7 +31,7 @@ OVMF (UEFI firmware)
 `include/crug/bootinfo.h` is the single contract between loader and kernel.
 The structure is versioned (`magic = 0x43524731`, `version = 1`) and the kernel
 refuses to boot if either does not match or if required fields are invalid.
-Phases 1 through 3B-4 did not change the layout.
+Phases 1 through 3B-6 did not change the layout.
 
 | Field | Meaning |
 | --- | --- |
@@ -89,9 +90,13 @@ post-snapshot allocations cannot push it over capacity.
    NVMe driver (PCI class 01/08/02, admin/I/O queues, namespace 1), and the GPT
    of every block device. A partition named `crugroot` is mounted directly;
    otherwise `fd00` partitions are assembled into RAID1 or RAID10 `md0` and
-   mounted. A journaled filesystem is opened through JBD2 and replayed at
-   mount time if necessary. `CRUGOS: virtio ready`, `CRUGOS: nvme ready`,
-   `CRUGOS: block ready`, `CRUGOS: gpt ready`, `CRUGOS: raid ready`, the
+   mounted. A member whose metadata sectors are blank is a cold spare: the
+   kernel assigns it the lowest missing slot, copies the missing data from its
+   mirror and writes fresh metadata before mounting. A journaled filesystem is
+   opened through JBD2 and replayed at mount time if necessary.
+   `CRUGOS: virtio ready`, `CRUGOS: nvme ready`, `CRUGOS: block ready`,
+   `CRUGOS: gpt ready`, `CRUGOS: raid ready`,
+   `CRUGOS: raid rebuilt (<n> member(s))` when a spare was rebuilt, the
    `raid   : level ...` geometry line and
    `CRUGOS: raid healthy`/`raid degraded` when RAID is used, then
    `CRUGOS: ext4 ready`, `CRUGOS: journal ready`, `CRUGOS: storage ready`.
@@ -102,7 +107,7 @@ post-snapshot allocations cannot push it over capacity.
 11. `sti`, then `selftest_run`: allocator, mappings, W^X audit, `int3`, timer,
     heap, block/GPT/ext4/storage (including the read-write round trip and a
     journal replay test), handles, scheduler, message ports and syscalls.
-12. `report_boot`, `CRUGOS: phase 3b5 boot ok`, `arch_exit_qemu(0x10)`.
+12. `report_boot`, `CRUGOS: phase 3b6 boot ok`, `arch_exit_qemu(0x10)`.
 
 Storage is still brought up with interrupts disabled: the virtio driver polls
 its used ring and the NVMe driver polls completion queues between `heap_init`
@@ -194,7 +199,10 @@ records and assembles `md0`, then mounts that. The metadata level selects the
 layout: level 1 mirrors every sector across all members, while level 10
 stripes 64 KiB chunks across mirror pairs and maps each range with
 `(lba / chunk) % (member_count / 2)`. A missing member is allowed unless a
-RAID10 mirror pair loses both members; degraded arrays print
+RAID10 mirror pair loses both members. A member with blank metadata is treated
+as a cold spare and rebuilt synchronously from its mirror (64-sector chunks,
+new checksummed metadata, flush) before the array is used; `CRUGOS: raid
+rebuilt (N member(s))` reports it. Degraded arrays print
 `CRUGOS: raid degraded (N/M members)`, and a healthy array prints
 `CRUGOS: raid healthy (N/M members)` after a geometry line such as
 `raid   : level 10, 4 member(s), 2 pair(s), chunk 128 sectors`. The root mount then reads
@@ -239,6 +247,7 @@ CRUGOS: nvme ready
 CRUGOS: block ready
 CRUGOS: gpt ready
 CRUGOS: raid ready
+CRUGOS: raid rebuilt (1 member(s))  # only when a blank spare was repaired
 raid   : level 10, 4 member(s), 2 pair(s), chunk 128 sectors
 CRUGOS: raid healthy            # or: CRUGOS: raid degraded
 CRUGOS: ext4 ready
@@ -249,7 +258,7 @@ CRUGOS: syscall ready
 CRUGOS: writable storage ok
 CRUGOS: journal selftest ok
 CRUGOS: selftest ok
-CRUGOS: phase 3b5 boot ok
+CRUGOS: phase 3b6 boot ok
 ```
 
 `raid ready` and `raid healthy`/`raid degraded` appear only on the RAID
@@ -275,9 +284,11 @@ init, newlines are also mirrored to the GOP text console, which uses an embedded
   demand paging arrive with user-mode address spaces.
 - Execution is kernel-mode only. There is no user mode, no address-space switch
   and no `SYSCALL` MSR gateway yet; `int 0x80` reaches the same dispatcher.
-- RAID support is RAID1 and RAID10: one `md0` array, no online rebuild, no
-  hot spare, no scrub and no write-intent bitmap. The kernel validates member
-  metadata but never creates or updates it.
+- RAID support is RAID1 and RAID10: one `md0` array. A fully blank member is
+  rebuilt at boot before ext4 mounts; there is no online rebuild, no hot
+  spare, no scrub, no write-intent bitmap and no generation bump. The kernel
+  writes metadata only for members it rebuilds and never rewrites a valid
+  member; a non-zero but invalid record is fatal.
 - Only the boot CPU runs. The LAPIC is enabled and `%gs` per-CPU data exists,
   but AP startup, IOAPIC and external interrupts are phase 5 work.
 - Empty slab pages are not returned to the PMM, and page-table pages created

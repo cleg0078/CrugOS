@@ -1,6 +1,6 @@
 # Building CrugOS
 
-This document describes the phase 3B-5 build system: how the kernel, the UEFI
+This document describes the phase 3B-6 build system: how the kernel, the UEFI
 loader and the test disk images are built, which invariants the link must
 preserve, and how to diagnose the failure modes that are specific to this
 toolchain.
@@ -14,7 +14,7 @@ toolchain.
 | `qemu-system-x86_64` | boot test | 10.x, TCG works without `/dev/kvm` |
 | OVMF | UEFI firmware | `/usr/share/OVMF/OVMF_CODE_4M.fd` + `OVMF_VARS_4M.fd` |
 | `python3` | boot/PE checks | standard library only |
-| `sgdisk`, `mke2fs`, `debugfs`, `e2fsck`, `dd`, `truncate` | test disks | only for `make disk`, `make raid-disks`, `make raid10-disks` and their checks; e2fsprogs |
+| `sgdisk`, `mke2fs`, `debugfs`, `e2fsck`, `dd`, `truncate` | test disks | only for `make disk`, `make raid-disks`, `make raid10-disks` and their checks; `dd` also blanks repair spares; e2fsprogs |
 
 Run `make preflight` to check all of the above.
 
@@ -30,6 +30,8 @@ make test-raid10 # boot a four-member RAID10 root and check every member
 make test-nvme   # boot from an NVMe namespace and check the image
 make test-raid-degraded  # boot RAID1 with one member missing
 make test-raid10-degraded  # boot RAID10 with one member per mirror pair
+make test-raid-repair  # rebuild a blank RAID1 member at boot, then check both
+make test-raid10-repair  # rebuild two blank RAID10 members, then check all four
 make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
 make test-host   # host unit tests for string/printf/ELF/bitmap/VM math/handles
 make disk        # build the GPT/ext4 test disk at build/<arch>/disk.img
@@ -64,6 +66,7 @@ options` prints the complete resolved set (including paths derived from
 | `EXPECT_AVX2` | `yes` | what `make test` requires the guest to report (`no` for compat) |
 | `EXPECT_RAID` | `no` | what `make test` requires for RAID: `no`, `healthy` or `degraded` |
 | `EXPECT_NVME` | `no` | what `make test` requires for NVMe (`yes` needs `nvme0n1`) |
+| `EXPECT_REBUILD` | `no` | number of RAID members the boot must rebuild; `no` also rejects an unexpected rebuild |
 | `CC` | `crugc` | compiler for kernel and loader objects |
 | `LD` | `ld` | linker for the PE32+ loader |
 | `PYTHON` | `python3` | host scripts (boot/disk/EFI checks) |
@@ -219,6 +222,17 @@ pair) and requires `raid degraded (2/4 members)`.
 unique slots and pair coverage, rebuilds the logical array from one member per
 pair, runs `e2fsck -fn` and checks the persisted files on every member.
 
+`make test-raid-repair` builds the two RAID1 members and then zeroes the whole
+`crugraid` partition of `RAID_DISK_B` with
+[scripts/raid-blank.sh](../scripts/raid-blank.sh), keeping its GPT so the disk
+still looks like a replacement member. The boot gate requires
+`CRUGOS: raid rebuilt (1 member(s))` and a healthy array, and
+`check-raid.py` then validates the freshly written metadata on both members.
+`make test-raid10-repair` does the same for slots 1 and 3 and requires
+`raid rebuilt (2 member(s))`; all four members are checked afterwards. Because
+the rebuilt metadata and data are written by the kernel, these gates also cover
+the metadata-write and flush paths.
+
 ## Reproducibility
 
 `make repro` builds `kernel.elf` and `BOOTX64.EFI` twice under different
@@ -253,13 +267,21 @@ randomisation that leaks into the output will fail this target.
   before the queues are programmed. Create SQ status `0x8201` means the
   Create CQ/SQ dwords are reversed (queue id low 16, size high 16). See
   [nvme.md](nvme.md).
-- **`raid   : metadata invalid`**: a member's last two sectors are missing or
-  disagree on magic, CRC, level, chunk, geometry, UUID, generation or slot.
+- **`raid   : metadata invalid`**: a member's last two sectors hold a non-zero
+  record that disagrees on magic, CRC, level, chunk, geometry, UUID, generation
+  or slot. Fully blank metadata is a cold spare and is rebuilt instead.
   Regenerate with `make raid-disks` or `make raid10-disks`; inspect with
   `scripts/check-raid.py` or `scripts/check-raid10.py`.
 - **`raid   : mirror pair N has no member`**: a RAID10 array lost both members
-  of one pair. There is no rebuild; regenerate the images with
+  of one pair, so there is no rebuild source. Regenerate the images with
   `make raid10-disks`.
+- **`raid   : rebuild of <name> failed`**: the copy from the mirror failed; the
+  slot stays missing and the array boots degraded. The serial log shows the
+  failing read or write; check the disk image and the virtio/NVMe path.
+- **Unexpected rebuild in a plain gate**: `boot-check.py` fails any non-repair
+  test that prints `CRUGOS: raid rebuilt`. Blank metadata is only expected after
+  `make raid-repair-disks`/`raid10-repair-disks`; regenerate with
+  `make raid-disks`/`raid10-disks`.
 - **Healthy test boots degraded**: a virtio device did not appear or its
   metadata was rejected. Check the serial `block ready (N device(s))` line and
   QEMU's extra `-drive` pairs; the test scripts pass `EXTRA_DISKS`. A RAID10

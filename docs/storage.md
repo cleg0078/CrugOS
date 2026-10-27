@@ -10,8 +10,9 @@ virtual disks in a RAID1 array and can boot from a single remaining member.
 Phase 3B-4 adds a polled NVMe driver, so the same GPT/ext4/JBD2 stack can boot
 from an NVMe namespace instead of a legacy virtio-blk disk. Phase 3B-5 adds
 RAID10 striping over mirror pairs, with healthy four-member and degraded
-(two-member, one per pair) boot gates. Encryption and metadata checksums are
-later phases.
+(two-member, one per pair) boot gates. Phase 3B-6 rebuilds blank replacement
+members from their mirror at boot, so a swapped disk is repaired before ext4 is
+mounted. Encryption and metadata checksums are later phases.
 
 ```
 virtio-blk-pci (legacy I/O BAR)      NVMe PCIe (class 01/08/02)
@@ -35,6 +36,7 @@ CRUGOS: nvme ready (<n> device(s))
 CRUGOS: block ready (<n> device(s))
 CRUGOS: gpt ready
 CRUGOS: raid ready                    # RAID root only
+CRUGOS: raid rebuilt (<n> member(s))  # only after rebuilding a blank spare
 CRUGOS: raid healthy (<n>/<n> members) # or: CRUGOS: raid degraded (<n>/<n> members)
 CRUGOS: ext4 ready
 CRUGOS: ext4 /hello.txt: hello from ext4
@@ -159,6 +161,18 @@ members of that pair, writes go to both, and assembly fails if any mirror pair
 has no present member. The serial line after `raid ready` reports the actual
 geometry, for example
 `raid   : level 10, 4 member(s), 2 pair(s), chunk 128 sectors`.
+
+A member whose metadata sectors are both zero is a cold spare, not a failure.
+After the valid members define the array, each blank member is assigned the
+lowest missing slot and copied synchronously from a present member of its mirror
+(RAID1: the whole data region; RAID10: only the chunks owned by its pair) in
+64-sector chunks. The kernel then writes a fresh checksummed metadata record to
+the spare, flushes it, prints `raid   : rebuilt <name> as slot <n>` and counts
+it as present, so the array reports healthy. The rebuild is offline: it runs
+before ext4 mounts, adds roughly 0.7 s for the 12 MiB test array, keeps the
+array generation and never rewrites a valid member. If the copy fails the slot
+stays missing and the array boots degraded. See [raid.md](raid.md) for the
+alignment loop and limits.
 
 ## ext4 mount and read path
 
@@ -307,18 +321,22 @@ each has a `crugraid` partition of type `fd00` at LBA 2048..26623, the same
 ext4 image is written to both data regions, and `scripts/raid-meta.py` stamps
 slots 0 and 1 with a shared array UUID and generation. `make test-raid` boots
 with both disks and expects a healthy array; `make test-raid-degraded` boots
-with only the first disk and expects a degraded array. `scripts/check-raid.py`
-validates both metadata copies, runs `e2fsck -fn` on the data region and
-checks the persisted files.
+with only the first disk and expects a degraded array. `make test-raid-repair`
+runs `scripts/raid-blank.sh` on the second member (data and metadata zeroed,
+GPT kept), boots, expects one rebuild and a healthy array, and then verifies
+both members with `scripts/check-raid.py`, which validates metadata copies on
+each member, runs `e2fsck -fn` on the data region and checks the persisted
+files.
 
 `make raid10-disks` builds four such disks with `scripts/mkraid10.sh`:
 slots 0..3, level 10, chunk 128 sectors, and one shared ext4 image. `make
 test-raid10` boots all four members and expects `raid healthy (4/4 members)`;
 `make test-raid10-degraded` boots slots 0 and 2 and expects
-`raid degraded (2/4 members)`. Because each member holds only its pair's
-chunks, `scripts/check-raid10.py` validates metadata and pair coverage, then
-rebuilds the logical array from one member per pair before running `e2fsck
--fn` and checking the persisted files.
+`raid degraded (2/4 members)`. `make test-raid10-repair` blanks slots 1 and 3,
+boots, expects two rebuilds and a healthy array, then checks all four members.
+Because each member holds only its pair's chunks, `scripts/check-raid10.py`
+validates metadata and pair coverage, then rebuilds the logical array from one
+member per pair before running `e2fsck -fn` and checking the persisted files.
 
 To inspect the disks on the host:
 
@@ -342,12 +360,17 @@ scripts/check-raid.py build/x86_64/raid-a.img build/x86_64/raid-b.img
   extracted partition shows the feature flags.
 - `storage: /hello.txt not found`: the image was built without the test file;
   run `make disk` to regenerate it.
-- `raid   : metadata invalid`: a member's last two sectors do not hold a
-  matching `CRA1` record, or the CRC, level, chunk, geometry, UUID or
-  generation disagree. Run `scripts/check-raid.py` or
-  `scripts/check-raid10.py` on the images.
+- `raid   : metadata invalid`: a member's last two sectors hold a non-zero but
+  invalid `CRA1` record, or the CRC, level, chunk, geometry, UUID or generation
+  disagree. Truly blank metadata is treated as a cold spare and rebuilt, not
+  rejected. Run `scripts/check-raid.py` or `scripts/check-raid10.py` on the
+  images.
 - `raid   : mirror pair N has no member`: a RAID10 array lost both members of
-  a pair. Recreate the disks with `make raid10-disks`; there is no rebuild.
+  a pair, so there is no source to rebuild from. Recreate the disks with
+  `make raid10-disks`.
+- `raid   : rebuild of <name> failed` or `raid   : spare <name> has no missing
+  slot`: the copy failed (slot left missing, array boots degraded) or more
+  spares were supplied than there are missing slots (extra spare ignored).
 - `raid   : ... does not match the array geometry`: members carry different
   level/chunk/member counts, sizes, UUIDs or generations. Check that all
   images came from the same `mkraid.sh`/`mkraid10.sh` run.
@@ -389,6 +412,8 @@ scripts/check-raid.py build/x86_64/raid-a.img build/x86_64/raid-b.img
 - The write path handles at most one extent-tree level and does not replace an
   existing rename target; hard links, symlinks, ownership and extended
   attributes are not implemented.
-- RAID1 and RAID10 only, one array (`md0`): no rebuild, no hot spare, no
-  scrub, no dirty bitmap and no metadata updates by the kernel. No `crypt.device`, no AES-256-XTS or
-  Argon2id, and no redundant ESP yet. These remain phase 3B work.
+- RAID1 and RAID10 only, one array (`md0`). Rebuild is boot-time and
+  synchronous, only for fully blank metadata; there is no online rebuild, hot
+  spare, scrub, write-intent bitmap or generation bump. No `crypt.device`, no
+  AES-256-XTS or Argon2id, and no redundant ESP yet. These remain phase 3B
+  work.

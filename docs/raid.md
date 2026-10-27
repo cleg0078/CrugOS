@@ -1,7 +1,8 @@
 # RAID1 and RAID10 storage
 
 Phase 3B-3 added a mirrored block device between the partition layer and the
-ext4 filesystem; phase 3B-5 adds RAID10 striping over mirror pairs. The boot
+ext4 filesystem; phase 3B-5 adds RAID10 striping over mirror pairs, and phase 3B-6 rebuilds a
+blank replacement member from its mirror at boot. The boot
 root is found either directly on a partition named `crugroot` (single-disk
 path, unchanged since phase 3A) or on one array assembled from GPT partitions
 of type `fd00` (Linux RAID) and named `md0`.
@@ -49,8 +50,9 @@ partition size exactly, and `array_sectors` may not exceed `member_sectors-2`.
 
 `raid_assemble()` takes up to `RAID_MAX_MEMBERS` (8) partition devices and:
 
-1. reads the metadata from each member, trying the last sector first and the
-   second-to-last sector second;
+1. probes the metadata on each member, trying the last sector first and the
+   second-to-last sector second; a member whose magic is zero in both copies is
+   a blank cold spare rather than an error;
 2. rejects a bad CRC, a wrong magic/version/level, a non-zero `state`, a slot
    outside `member_count`, a partition size mismatch, or an `array_sectors`
    larger than the data region;
@@ -60,7 +62,9 @@ partition size exactly, and `array_sectors` may not exceed `member_sectors-2`.
    count, geometry and generation, and rejects any later member that disagrees
    or reuses a slot;
 5. for RAID10, rejects the array if any mirror pair has no present member;
-6. registers a block device named `md0` with `array_sectors` sectors.
+6. assigns each blank member to the lowest missing slot and rebuilds it from a
+   present member (see [Cold-spare rebuild](#cold-spare-rebuild));
+7. registers a block device named `md0` with `array_sectors` sectors.
 
 Missing members are allowed: the array reports `present` against the metadata
 `member_count` and boots degraded. A RAID10 array tolerates one missing member
@@ -91,7 +95,52 @@ member keeps serving the pair. Flushes go to all present members.
 
 All I/O is synchronous, 512 bytes per request, and inherits the virtio-blk or
 NVMe polling implementation. There are no write barriers beyond the device
-flush already used by JBD2, no bitmap, no rebuild and no hot spare.
+flush already used by JBD2 and no write-intent bitmap.
+
+## Cold-spare rebuild
+
+A member whose metadata sectors are both zero is treated as a blank
+replacement disk, not as corruption. This is the realistic case after a disk
+swap: the GPT and the `crugraid` partition are recreated, but the array data and
+metadata are missing. At assembly time the kernel:
+
+1. records every blank member as a spare and assembles the array from the
+   valid members;
+2. computes the missing slot mask (`member_count` bits minus the valid slots);
+3. pairs spares with missing slots in ascending slot order (slot 0 first);
+4. copies the array data into the spare synchronously in 64-sector (32 KiB)
+   chunks, then flushes the member;
+5. writes a fresh metadata record to the spare's last two sectors, with the
+   array UUID, level, chunk, geometry and generation of the array and a newly
+   derived `member_uuid`, then flushes again.
+
+RAID1 copies the whole data region. RAID10 copies only the chunks owned by the
+spare's mirror pair:
+
+```
+for (lba = pair * chunk; lba < array_sectors; lba += pairs * chunk)
+    copy min(chunk, array_sectors - lba) sectors from a present pair member
+```
+
+so a rebuilt member ends up byte-identical to its mirror for exactly the chunks
+that pair owns. After the copy the member participates in normal read, write and
+flush I/O and the array reports healthy. The kernel prints one line per rebuilt
+member and a summary marker:
+
+```
+raid   : rebuilt raid-b.img as slot 1
+CRUGOS: raid rebuilt (1 member(s))
+CRUGOS: raid healthy (2/2 members)
+```
+
+A rebuild is offline and synchronous: it happens before ext4 is mounted, so no
+filesystem I/O observes a half-copied member. It is also part of boot time, so a
+replaced member adds roughly the time needed to read and write its share of the
+array (about 0.7 s for the 12 MiB test array). If the rebuild fails, the kernel
+prints `raid   : rebuild of <name> failed`, leaves that slot missing and boots
+degraded; an extra spare with no missing slot is reported and ignored. The
+array generation is not bumped, because the array was never online and there is
+no write-intent bitmap to describe divergent writes.
 
 ## Boot integration
 
@@ -103,8 +152,8 @@ flush already used by JBD2, no bitmap, no rebuild and no hot spare.
 3. A partition named exactly `crugroot` is preferred and mounted directly.
 4. Otherwise all partitions whose type GUID is the Linux RAID GUID
    (`A19D880F-05FC-4D3B-A006-743F0F84911E`) become array members.
-5. `raid_assemble(..., "md0", ...)` runs and prints the array geometry and
-   state.
+5. `raid_assemble(..., "md0", ...)` runs, rebuilds blank cold spares, and
+   prints the array geometry and state.
 6. ext4 is mounted on `md0`; the read-only, write and journal self-tests are
    unchanged and run against the array.
 
@@ -116,6 +165,8 @@ CRUGOS: gpt ready
 CRUGOS: raid ready
 raid   : level 10, 4 member(s), 2 pair(s), chunk 128 sectors
 CRUGOS: raid healthy (4/4 members)      # or: CRUGOS: raid degraded (2/4 members)
+# with a cold spare, additionally:
+# CRUGOS: raid rebuilt (1 member(s))
 CRUGOS: ext4 ready
 CRUGOS: journal ready
 CRUGOS: storage ready
@@ -131,6 +182,7 @@ RAID1 prints `level 1, N member(s), 1 pair(s), chunk 0 sectors` and
 | `scripts/mkraid.sh A B` | two GPT disks with a `crugraid` (`fd00`) partition and one identical ext4 image; slots 0/1, level 1 |
 | `scripts/mkraid10.sh A B C D` | four GPT disks with one ext4 image, slots 0..3, level 10, chunk 128 |
 | `scripts/raid-meta.py` | writes and checksums the 512-byte metadata record; optional level and chunk arguments |
+| `scripts/raid-blank.sh A` | zeroes a member's data and metadata while keeping its GPT, to simulate a blank replacement disk |
 | `scripts/check-raid.py A [B]` | validates RAID1 metadata, geometry and CRC, extracts the data region, runs `e2fsck -fn` and verifies the test files |
 | `scripts/check-raid10.py A [B [C [D]]]` | validates RAID10 metadata, unique slots, pair coverage and CRC, rebuilds the logical array from one member per pair, runs `e2fsck -fn` and verifies the test files on every member |
 
@@ -152,8 +204,10 @@ compares the two RAID1 data regions byte for byte after a healthy boot.
 | `make test` | none | direct `crugroot` path; `EXPECT_RAID=no` |
 | `make test-raid` | two members | `raid healthy (2/2 members)`, exit 33, metadata and ext4 clean |
 | `make test-raid-degraded` | one member | `raid degraded (1/2 members)`, exit 33, metadata and ext4 clean |
+| `make test-raid-repair` | two members, second blank | slot 1 rebuilt, `raid rebuilt (1 member(s))`, healthy, both members clean afterwards |
 | `make test-raid10` | four members, two pairs | `raid healthy (4/4 members)`, exit 33, metadata and ext4 clean |
 | `make test-raid10-degraded` | members 0 and 2 | `raid degraded (2/4 members)`, exit 33, metadata and ext4 clean |
+| `make test-raid10-repair` | members 0 and 2 valid, 1 and 3 blank | slots 1 and 3 rebuilt, `raid rebuilt (2 member(s))`, healthy, all four members clean afterwards |
 | `make test-compat` | none | AVX2-disabled build still passes the direct path |
 
 ## Known limits
@@ -163,15 +217,22 @@ compares the two RAID1 data regions byte for byte after a healthy boot.
   beyond the fixed GPT type, and no installer integration.
 - RAID10 has no spare pair, so it tolerates one failure per pair but not a
   second failure in the same pair; there is no rebalance after a member loss.
-- Metadata is written by host tools. The kernel validates it but never creates
-  or updates it, so it cannot change member count, generation or slot.
+- Metadata is written by host tools and, for a rebuilt member, by the kernel.
+  The kernel only replaces blank spares: it cannot change member count, level,
+  chunk, generation or slot, and it never rewrites a valid member.
+- A member with corrupt non-zero metadata is fatal to assembly; only fully blank
+  metadata is treated as a cold spare.
 - Failed members are tracked only in memory. Reboot retries every member; there
-  is no write-intent bitmap, rebuild, scrub, hot spare or fail-persistence.
+  is no online rebuild, hot spare, scrub, write-intent bitmap or
+  fail-persistence, and the array generation is not bumped by a rebuild.
 - Reads always prefer the first healthy member of a mirror pair, so there is
   no read balancing.
 - No online capacity change, no repair on write mismatch and no bad-sector
   remapping.
 - Only mirrored data on member partitions; the ESP is not mirrored yet.
+- Rebuild is boot-time and synchronous, so booting with a replacement disk is
+  slower (about 0.7 s for the 12 MiB test array) and blocks until the copy
+  finishes.
 
 These are tracked in [roadmap.md](roadmap.md) under the remaining phase 3B
 items.

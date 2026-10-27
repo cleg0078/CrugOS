@@ -9,7 +9,8 @@ real disk; phase 3B-1 makes that filesystem writable and gates it on
 `e2fsck`; phase 3B-2 adds JBD2 journal replay and ordered metadata journaling;
 phase 3B-3 mirrors the root across two disks and boots from a degraded array;
 phase 3B-4 adds a polled NVMe root path; phase 3B-5 stripes the root across
-RAID10 mirror pairs and boots with one member missing per pair.
+RAID10 mirror pairs and boots with one member missing per pair; phase 3B-6
+rebuilds a blank replacement member at boot.
 Every later phase keeps the same BootInfo contract, so the loader does not
 change for memory management, storage, SMP or drivers.
 
@@ -151,12 +152,36 @@ change for memory management, storage, SMP or drivers.
 - `make test-raid10` gates a healthy four-member boot and `make
   test-raid10-degraded` gates a two-member boot (slots 0 and 2).
 
+## Phase 3B-6 - RAID cold-spare rebuild (done)
+
+- Metadata probing now distinguishes a valid member, a fully blank member (both
+  metadata sectors zero) and a corrupt one. Blank members are cold spares
+  instead of fatal errors; non-zero invalid metadata is still rejected.
+- `raid_assemble()` assigns each spare to the lowest missing slot and rebuilds
+  it synchronously from a present member of the same mirror: RAID1 copies the
+  whole data region, RAID10 copies only the chunks owned by its pair, in
+  64-sector chunks followed by a flush.
+- The kernel writes fresh checksummed metadata to the rebuilt member (current
+  geometry, array UUID, generation, new member UUID), flushes, counts it as
+  present and reports `CRUGOS: raid rebuilt (N member(s))` before
+  `raid healthy`. The rebuild happens before ext4 mounts and does not bump the
+  array generation.
+- A rebuild failure leaves the slot missing, so the array boots degraded; extra
+  spares with no missing slot are reported and ignored. A RAID10 pair that lost
+  both members still cannot be assembled.
+- Host tool `scripts/raid-blank.sh` zeroes a member partition while keeping its
+  GPT, simulating a replacement disk. `make test-raid-repair` gates one rebuilt
+  RAID1 member and `make test-raid10-repair` gates two rebuilt RAID10 members;
+  `check-raid.py`/`check-raid10.py` then validate the written metadata and the
+  filesystem on every member.
+
 ## Phase 3B - remaining storage work
 
 - Journal and metadata checksums; multi-descriptor transactions and journal
   wrapping.
 - AHCI and USB storage drivers, hotplug and more than four NVMe controllers.
-- RAID online rebuild, hot spare, scrub and a write-intent bitmap.
+- RAID online rebuild, hot spare, scrub, a write-intent bitmap and persisted
+  failure tracking (rebuild is boot-time and synchronous today).
 - `crypt.device` with AES-256-XTS and Argon2id key derivation.
 - Redundant ESP and a recovery path.
 
