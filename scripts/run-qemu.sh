@@ -11,6 +11,7 @@ DISK_IMG=${DISK_IMG:-}
 EXTRA_DISKS=${EXTRA_DISKS:-}
 NVME_DISK=${NVME_DISK:-}
 NVME_SERIAL=${NVME_SERIAL:-CRUGNVME0}
+AHCI_DISK=${AHCI_DISK:-}
 
 QEMU=${QEMU:-qemu-system-x86_64}
 OVMF_CODE=${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}
@@ -82,6 +83,16 @@ if [[ -n "$NVME_DISK" ]]; then
                -device "nvme,drive=nvme0,serial=$NVME_SERIAL,logical_block_size=512")
 fi
 
+AHCI_ARGS=()
+if [[ -n "$AHCI_DISK" ]]; then
+    if [[ ! -r "$AHCI_DISK" ]]; then
+        echo "run-qemu: missing AHCI image $AHCI_DISK" >&2
+        exit 1
+    fi
+    AHCI_ARGS=(-drive "file=$AHCI_DISK,if=none,id=ahci0,format=raw" \
+               -device "ide-hd,drive=ahci0,bus=ide.1")
+fi
+
 index=1
 for extra in $EXTRA_DISKS; do
     if [[ ! -r "$extra" ]]; then
@@ -93,7 +104,7 @@ for extra in $EXTRA_DISKS; do
     index=$((index + 1))
 done
 
-echo "run-qemu: booting $ESP_DIR (${MEMORY_MB} MiB, ${SMP} vCPU, cpu ${QEMU_CPU:-default}, accel ${QEMU_ACCEL:-default}, display ${QEMU_DISPLAY}, disk ${DISK_IMG:-none}, extra ${EXTRA_DISKS:-none}, nvme ${NVME_DISK:-none}, timeout ${TIMEOUT_SEC}s)"
+echo "run-qemu: booting $ESP_DIR (${MEMORY_MB} MiB, ${SMP} vCPU, cpu ${QEMU_CPU:-default}, accel ${QEMU_ACCEL:-default}, display ${QEMU_DISPLAY}, disk ${DISK_IMG:-none}, extra ${EXTRA_DISKS:-none}, nvme ${NVME_DISK:-none}, ahci ${AHCI_DISK:-none}, timeout ${TIMEOUT_SEC}s)"
 set +e
 TMPDIR="$TMPDIR" timeout --foreground "$TIMEOUT_SEC" "$QEMU" \
     -machine q35 \
@@ -106,6 +117,7 @@ TMPDIR="$TMPDIR" timeout --foreground "$TIMEOUT_SEC" "$QEMU" \
     -drive file=fat:rw:"$ESP_DIR",format=raw,media=disk \
     "${DISK_ARGS[@]}" \
     "${NVME_ARGS[@]}" \
+    "${AHCI_ARGS[@]}" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -display "$QEMU_DISPLAY" \
     -serial "file:$SERIAL_LOG" \

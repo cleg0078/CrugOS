@@ -8,11 +8,12 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 3B-6 RAID rebuild (`v0.10.0`)
+## Status: phase 3B-7 AHCI/SATA (`v0.11.0`)
 
-Phases 1-3B-6 keep the boot path under a kernel that owns memory, CPU state,
+Phases 1-3B-7 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a real crash-consistent filesystem, mirrored/striped
-RAID roots that can rebuild a replacement member, and two storage transports:
+RAID roots that can rebuild a replacement member, and three storage
+transports:
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -140,6 +141,22 @@ Phase 3B-6 rebuilds a cold spare:
   member and `make test-raid10-repair` rebuilds slots 1 and 3, then `e2fsck`
   validates the array from the repaired members.
 
+Phase 3B-7 adds a polled AHCI/SATA driver:
+
+- PCI class `01/06/01` discovery (QEMU q35 exposes the ICH9 controller at
+  `00:1f.2`), 32-bit BAR5 sizing and an uncached mapping — for a BAR inside the
+  4 GiB identity window the driver uses `vm_protect_page()` with `PCD|PWT`
+  instead of `vm_map_page()`, because the identity PTE is already present;
+- ports are capped by `CAP.NP` and by the mapped BAR window, and an empty port
+  is given a 20 ms link window instead of the 1000 ms command timeout, which
+  keeps the six-port q35 boot at ~185 ms instead of ~4.1 s;
+- `IDENTIFY DEVICE` supplies 48-bit LBA capacity and the logical sector size,
+  drives are registered as `sda`..`sdh`, and reads/writes go through an 8 KiB
+  bounce buffer with `READ/WRITE DMA EXT` and `FLUSH CACHE EXT`;
+- `storage_init()` now probes virtio-blk, NVMe and AHCI and mounts `crugroot`
+  (or a RAID array) on any of them; `make test-ahci` boots with only a SATA
+  image and runs the same JBD2, writable-ext4 and `e2fsck` gates.
+
 It detects AVX2, enables XSAVE state and, by default, refuses to boot without
 AVX2. Self-tests run at boot, then the kernel prints a boot report to a 16550
 serial port and the framebuffer and exits QEMU deterministically for automated
@@ -148,29 +165,28 @@ testing.
 Verified in this tree:
 
 ```
-CrugOS 0.10.0 (phase 3b6) -- Amiga-inspired microkernel bring-up
+CrugOS 0.11.0 (phase 3b7) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.10.0
-pmm    : 118388 pages (462 MiB), free 118387, bitmap 131072 B
+CRUGOS: version 0.11.0
+pmm    : 118442 pages (462 MiB), free 118441, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
-vm     : 4 GiB identity map, W^X kernel sections, guard=0x0000000000147000
+vm     : 4 GiB identity map, W^X kernel sections, guard=0x000000000014a000
 CRUGOS: vm ready
 CRUGOS: cpu ready
-timer  : 2687973354 Hz (pit), mode=lapic-periodic, 100 Hz tick
+timer  : 2688576035 Hz (pit), mode=lapic-periodic, 100 Hz tick
 CRUGOS: timer ready
 CRUGOS: heap ready
-virtio : blk vda, 32768 sectors, io=0x6080
-virtio : blk vdb, 32768 sectors, io=0x6000
-CRUGOS: virtio ready (2 device(s))
+CRUGOS: virtio ready (0 device(s))
 CRUGOS: nvme ready (0 device(s))
+ahci   : sda 1032192 sectors, port 0
+ahci   : sdb 32768 sectors, port 1
+CRUGOS: ahci ready (2 device(s))
 CRUGOS: block ready (2 device(s))
+storage: no GPT on sda
+gpt    : 1 partition(s), root 'crugroot' LBA 2048..26623
 CRUGOS: gpt ready
-raid   : rebuilt vdb1 as slot 1
-CRUGOS: raid ready
-CRUGOS: raid rebuilt (1 member(s))
-raid   : level 1, 2 member(s), 1 pair(s), chunk 0 sectors
-CRUGOS: raid healthy (2/2 members)
+CRUGOS: root device sdb1
 CRUGOS: ext4 ready
 CRUGOS: journal ready
 CRUGOS: ext4 /hello.txt: hello from ext4
@@ -181,14 +197,14 @@ CRUGOS: journal selftest ok (1 blocks recovered)
 CRUGOS: writable storage ok
 CRUGOS: selftest ok
 wx     : audit ok, identity map 0..4 GiB, guard unmapped
-heap   : total=61440 B used=10400 B slab_pages=13 large_pages=2
-boot   : pmm=26550 us cpu=404 us vm=604 us traps=309 us timer=65296 us heap=49 us storage=765275 us sched=305 us syscall=110 us total=858906 us
-CRUGOS: phase 3b6 boot ok
+heap   : total=57344 B used=7952 B slab_pages=12 large_pages=2
+boot   : pmm=25572 us cpu=366 us vm=580 us traps=293 us timer=65312 us heap=45 us storage=90248 us sched=304 us syscall=104 us total=182828 us
+CRUGOS: phase 3b7 boot ok
 ```
 
-This excerpt is the `make test-raid-repair` boot: member `vdb1` was zeroed
-before the run, rebuilt from `vda1` in 64-sector blocks, and the ext4 root was
-mounted from the repaired array.
+This excerpt is the `make test-ahci` boot: no virtio or NVMe disk is attached,
+so the ESP and the test image are both reached through the q35 AHCI controller
+(`sda` is the firmware's ESP disk, `sdb` is the ext4 root).
 
 Timing and memory values vary with the host and the QEMU CPU model.
 
@@ -202,6 +218,7 @@ make test        # boot under QEMU/OVMF and verify the boot contract
 make test-raid   # boot a healthy two-member RAID1 root and check both disks
 make test-raid10 # boot a healthy four-member RAID10 root and check all disks
 make test-nvme   # boot from an NVMe namespace and check the image
+make test-ahci   # boot from a SATA disk and check the image
 make test-raid-degraded  # boot RAID1 with one member missing
 make test-raid10-degraded  # boot RAID10 with one member per mirror pair
 make test-raid-repair  # rebuild a blank RAID1 member at boot, then check
@@ -214,6 +231,7 @@ make disk        # generate the GPT/ext4 test disk
 make raid-disks  # generate the two RAID1 member disks
 make raid10-disks  # generate the four RAID10 member disks
 make nvme-disk   # generate the GPT/ext4 image used by test-nvme
+make ahci-disk   # generate the GPT/ext4 image used by test-ahci
 make version     # print the release version from VERSION
 make options     # print every build/QEMU/storage option and its value
 make size        # kernel budget: <1 MiB stretch, <2 MiB hard
@@ -226,8 +244,8 @@ Build artifacts land in `build/x86_64/`; `make run` records
 default in the makefile; `make options` prints the full resolved set. Useful
 variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `QEMU_DISPLAY`, `QEMU_EXTRA`, `OVMF_CODE`, `OVMF_VARS`, `REQUIRE_AVX2`,
-`EXPECT_AVX2`, `EXPECT_RAID`, `EXPECT_NVME`, `EXPECT_REBUILD`, `NVME_IMG` and
-`MODE`; see [docs/build.md](docs/build.md).
+`EXPECT_AVX2`, `EXPECT_RAID`, `EXPECT_NVME`, `EXPECT_REBUILD`, `EXPECT_AHCI`,
+`NVME_IMG`, `AHCI_IMG` and `MODE`; see [docs/build.md](docs/build.md).
 
 ## Repository layout
 
@@ -241,11 +259,11 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/mm/` | physical allocator, W^X page tables, kernel heap |
 | `kernel/block/` | block-device registry, partitions, bounds checks, RAID1/RAID10 and boot-time rebuild |
 | `kernel/fs/` | GPT, writable ext4, JBD2 journal and the storage boot policy |
-| `drivers/` | PCI, legacy virtio-blk and NVMe block device drivers |
+| `drivers/` | PCI, legacy virtio-blk, NVMe and AHCI/SATA block device drivers |
 | `scripts/` | QEMU runner, disk/RAID1/RAID10 image builders, boot/PE/disk/RAID checks, size and reproducibility gates |
 | `tests/host/` | host unit tests for freestanding code |
 | `tools/` | host-side development tools (`gen-font.py`) |
-| `docs/` | [build](docs/build.md), [boot](docs/boot.md), [storage](docs/storage.md), [NVMe](docs/nvme.md), [RAID1/RAID10](docs/raid.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
+| `docs/` | [build](docs/build.md), [boot](docs/boot.md), [storage](docs/storage.md), [NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
 
 ## Versioning
 
@@ -282,16 +300,17 @@ See [docs/boot.md](docs/boot.md) for the full handoff ABI and exit protocol.
 
 ## Roadmap
 
-Phases 0, 1, 2, 3A and 3B-1 through 3B-6 are done. Phase 3A covered the block
+Phases 0, 1, 2, 3A and 3B-1 through 3B-7 are done. Phase 3A covered the block
 layer, legacy virtio-blk, GPT and read-only EXT4; phase 3B-1 added the writable
 EXT4 path and an on-disk consistency gate; phase 3B-2 added JBD2 journal replay
 and ordered metadata journaling; phase 3B-3 added a RAID1 root with healthy and
 degraded boots; phase 3B-4 added a polled NVMe root path; phase 3B-5 added
-RAID10 with healthy four-member and degraded two-member boots; phase 3B-6 adds
-boot-time rebuild of a blank RAID1/RAID10 member. Remaining phase 3B work is
+RAID10 with healthy four-member and degraded two-member boots; phase 3B-6 added
+boot-time rebuild of a blank RAID1/RAID10 member; phase 3B-7 adds a polled
+AHCI/SATA driver and a SATA-root boot gate. Remaining phase 3B work is
 journal/metadata checksums, online RAID rebuild, hot spare, scrub and a
 write-intent bitmap, a redundant ESP, `crypt.device` (AES-256-XTS/Argon2id), and
-AHCI/USB storage. Later phases cover USB/audio/graphics, Workbench userspace,
+USB storage/hotplug. Later phases cover USB/audio/graphics, Workbench userspace,
 SMP/IOMMU and virtualisation. See
 [docs/roadmap.md](docs/roadmap.md) for the full sequence and the known
 specification gaps (Crug syntax, cross-architecture compilers and the OVMF

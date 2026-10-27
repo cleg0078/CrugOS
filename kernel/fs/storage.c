@@ -2,6 +2,7 @@
 #include <crug/block.h>
 #include <crug/virtio.h>
 #include <crug/nvme.h>
+#include <crug/ahci.h>
 #include <crug/gpt.h>
 #include <crug/ext4.h>
 #include <crug/journal.h>
@@ -45,6 +46,7 @@ static int storage_mount_root(struct block_device *part)
     if (!part)
         return -1;
     g_root_part = part;
+    kprintf("CRUGOS: root device %s\n", g_root_part->name);
     if (ext4_mount(&g_root_fs, g_root_part, 0) != 0) {
         kprintf("storage: ext4 mount failed\n");
         return -1;
@@ -164,6 +166,7 @@ int storage_init(void)
 {
     int virtio_devices;
     int nvme_devices;
+    int ahci_devices;
     u32 disks;
     u32 i;
     int ret;
@@ -173,7 +176,9 @@ int storage_init(void)
     kprintf("CRUGOS: virtio ready (%d device(s))\n", virtio_devices);
     nvme_devices = nvme_init();
     kprintf("CRUGOS: nvme ready (%d device(s))\n", nvme_devices);
-    if (virtio_devices + nvme_devices <= 0) {
+    ahci_devices = ahci_init();
+    kprintf("CRUGOS: ahci ready (%d device(s))\n", ahci_devices);
+    if (virtio_devices + nvme_devices + ahci_devices <= 0) {
         kprintf("storage: no block device driver\n");
         return -1;
     }
@@ -184,11 +189,10 @@ int storage_init(void)
     }
     kprintf("CRUGOS: block ready (%u device(s))\n", disks);
     for (i = 0; i < disks; i++) {
-        if (gpt_parse(g_disks[i], &g_tables[i]) == 1) {
+        if (gpt_parse(g_disks[i], &g_tables[i]) == 1)
             g_parsed[i] = 1;
-        } else {
+        else
             kprintf("storage: no GPT on %s\n", g_disks[i]->name);
-        }
     }
     ret = storage_direct_root(disks);
     if (ret < 0)

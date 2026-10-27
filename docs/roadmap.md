@@ -10,7 +10,8 @@ real disk; phase 3B-1 makes that filesystem writable and gates it on
 phase 3B-3 mirrors the root across two disks and boots from a degraded array;
 phase 3B-4 adds a polled NVMe root path; phase 3B-5 stripes the root across
 RAID10 mirror pairs and boots with one member missing per pair; phase 3B-6
-rebuilds a blank replacement member at boot.
+rebuilds a blank replacement member at boot; phase 3B-7 boots the same
+GPT/ext4/RAID stack from an AHCI/SATA disk.
 Every later phase keeps the same BootInfo contract, so the loader does not
 change for memory management, storage, SMP or drivers.
 
@@ -175,11 +176,29 @@ change for memory management, storage, SMP or drivers.
   `check-raid.py`/`check-raid10.py` then validate the written metadata and the
   filesystem on every member.
 
+## Phase 3B-7 - AHCI/SATA (done)
+
+- `drivers/block/ahci.c` discovers controllers by PCI class `01/06/01` (q35
+  ICH9 at `00:1f.2`), caps ports by `CAP.NP` and by the mapped BAR window, and
+  brings up a command list, FIS area and command table per populated port.
+- `IDENTIFY DEVICE` supplies the 48-bit LBA capacity; drives register as
+  `sda`..`sdh` and use `READ/WRITE DMA EXT`, `WRITE DMA EXT` and `FLUSH CACHE
+  EXT` with an 8 KiB bounce buffer and a single PRDT entry.
+- BAR sizing fixes: the 32-bit mask must set the upper 32 bits before
+  `~mask + 1`, and a BAR that already falls inside the 4 GiB identity map is
+  reprotected with `vm_protect_page()` (`PCD|PWT`) instead of `vm_map_page()`.
+- Empty ports use a 20 ms link window instead of the 1000 ms command timeout,
+  which removed 4 s from a q35 boot with four unpopulated ports.
+- `storage_init()` probes virtio-blk, NVMe and AHCI together and prefers a GPT
+  partition named `crugroot`; the serial log names the root device.
+- `make test-ahci` boots from a SATA disk attached on `ide.1` and then runs
+  `check-disk.py`, so the SATA path is gated by `e2fsck` and file contents.
+
 ## Phase 3B - remaining storage work
 
 - Journal and metadata checksums; multi-descriptor transactions and journal
   wrapping.
-- AHCI and USB storage drivers, hotplug and more than four NVMe controllers.
+- USB storage drivers, hotplug and more than four NVMe/AHCI controllers.
 - RAID online rebuild, hot spare, scrub, a write-intent bitmap and persisted
   failure tracking (rebuild is boot-time and synchronous today).
 - `crypt.device` with AES-256-XTS and Argon2id key derivation.

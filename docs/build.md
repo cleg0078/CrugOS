@@ -1,6 +1,6 @@
 # Building CrugOS
 
-This document describes the phase 3B-6 build system: how the kernel, the UEFI
+This document describes the phase 3B-7 build system: how the kernel, the UEFI
 loader and the test disk images are built, which invariants the link must
 preserve, and how to diagnose the failure modes that are specific to this
 toolchain.
@@ -28,6 +28,7 @@ make test        # boot, verify markers/version/AVX2, then e2fsck the disk
 make test-raid   # boot a two-member RAID1 root and check both members
 make test-raid10 # boot a four-member RAID10 root and check every member
 make test-nvme   # boot from an NVMe namespace and check the image
+make test-ahci   # boot from a SATA disk and check the image
 make test-raid-degraded  # boot RAID1 with one member missing
 make test-raid10-degraded  # boot RAID10 with one member per mirror pair
 make test-raid-repair  # rebuild a blank RAID1 member at boot, then check both
@@ -38,6 +39,7 @@ make disk        # build the GPT/ext4 test disk at build/<arch>/disk.img
 make raid-disks  # build the two GPT/ext4 RAID1 member disks
 make raid10-disks  # build the four GPT/ext4 RAID10 member disks
 make nvme-disk   # build the GPT/ext4 image used by test-nvme
+make ahci-disk   # build the GPT/ext4 image used by test-ahci
 make check-disk  # e2fsck and persisted-file checks on the current disk
 make size        # kernel size budget (<1 MiB stretch, <2 MiB hard)
 make check-efi   # PE32+ structure checks on the loader
@@ -66,6 +68,7 @@ options` prints the complete resolved set (including paths derived from
 | `EXPECT_AVX2` | `yes` | what `make test` requires the guest to report (`no` for compat) |
 | `EXPECT_RAID` | `no` | what `make test` requires for RAID: `no`, `healthy` or `degraded` |
 | `EXPECT_NVME` | `no` | what `make test` requires for NVMe (`yes` needs `nvme0n1`) |
+| `EXPECT_AHCI` | `no` | what `make test` requires for AHCI/SATA (`yes` needs an `sd?` root) |
 | `EXPECT_REBUILD` | `no` | number of RAID members the boot must rebuild; `no` also rejects an unexpected rebuild |
 | `CC` | `crugc` | compiler for kernel and loader objects |
 | `LD` | `ld` | linker for the PE32+ loader |
@@ -83,6 +86,7 @@ options` prints the complete resolved set (including paths derived from
 | `RAID10_DISK_A..D` | `build/<arch>/raid10-a.img`..`raid10-d.img` | RAID10 members attached as `vda`..`vdd` |
 | `NVME_IMG` | `build/<arch>/nvme.img` | image attached as an NVMe namespace |
 | `NVME_SERIAL` | `CRUGNVME0` | QEMU NVMe serial reported by OVMF |
+| `AHCI_IMG` | `build/<arch>/ahci.img` | image attached as a SATA disk on `ide.1` |
 | `EXTRA_DISKS` | empty | space-separated images attached after `DISK_IMG` |
 
 ## Version stamping
@@ -200,6 +204,13 @@ with only `NVME_IMG` attached to QEMU's `nvme` device, requires
 The driver maps the 64-bit BAR above 4 GiB, disables any controller state left
 by OVMF, creates queues and identifies namespace 1; see [nvme.md](nvme.md).
 
+`make test-ahci` regenerates `build/<arch>/ahci.img` and attaches it to the
+q35 onboard AHCI controller as `ide.1` (`-device ide-hd,drive=ahci0,bus=ide.1`),
+so the firmware's ESP disk stays on port 0. The gate requires
+`CRUGOS: ahci ready`, an `ahci   : sd? <n> sectors` line, a
+`CRUGOS: root device sd?` line and then `check-disk.py` on the image. See
+[ahci.md](ahci.md) for the BAR mapping and port link-timeout details.
+
 `make raid-disks` runs [scripts/mkraid.sh](../scripts/mkraid.sh) and
 [scripts/raid-meta.py](../scripts/raid-meta.py) to build two 16 MiB GPT disks
 with one type-`fd00` `crugraid` partition each, identical ext4 data and
@@ -262,6 +273,13 @@ randomisation that leaks into the output will fail this target.
   `MEMORY_MB=512`.
 - **`virtio : queue setup failed`**: the disk was attached as a modern-only
   device or without `disable-modern=on`; use the QEMU flags above.
+- **`ahci   : BAR setup failed`**: the 32-bit BAR mask must set the upper 32
+  bits (`mask |= 0xFFFFFFFF00000000ull`) before `~mask + 1`; a BAR inside the
+  identity map must be reprotected with `vm_protect_page()` instead of
+  `vm_map_page()`. See [ahci.md](ahci.md).
+- **SATA boot spends seconds in `ahci_init`**: an empty port was polled with
+  the full 1000 ms command timeout; empty ports use `AHCI_LINK_TIMEOUT_MS`
+  (20 ms) instead.
 - **NVMe timeout or `controller not ready`**: check CSTS at `0x1C` and AQA at
   `0x24`; a controller left enabled by OVMF must be disabled and RDY polled
   before the queues are programmed. Create SQ status `0x8201` means the
@@ -277,7 +295,7 @@ randomisation that leaks into the output will fail this target.
   `make raid10-disks`.
 - **`raid   : rebuild of <name> failed`**: the copy from the mirror failed; the
   slot stays missing and the array boots degraded. The serial log shows the
-  failing read or write; check the disk image and the virtio/NVMe path.
+  failing read or write; check the disk image and the virtio/NVMe/AHCI path.
 - **Unexpected rebuild in a plain gate**: `boot-check.py` fails any non-repair
   test that prints `CRUGOS: raid rebuilt`. Blank metadata is only expected after
   `make raid-repair-disks`/`raid10-repair-disks`; regenerate with

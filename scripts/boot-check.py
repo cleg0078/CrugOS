@@ -2,7 +2,8 @@
 """Verify a CrugOS boot: serial markers, guest version, AVX2 policy, storage mode and exit code.
 
 usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE \
-    [VERSION_FILE [EXPECT_AVX2 [EXPECT_RAID [EXPECT_NVME [EXPECT_REBUILD]]]]]
+    [VERSION_FILE [EXPECT_AVX2 [EXPECT_RAID [EXPECT_NVME [EXPECT_REBUILD \
+    [EXPECT_AHCI]]]]]]
 """
 
 import re
@@ -27,7 +28,8 @@ REQUIRED_MARKERS = (
     "CRUGOS: journal selftest ok",
     "CRUGOS: selftest ok",
     "CRUGOS: nvme ready",
-    "CRUGOS: phase 3b6 boot ok",
+    "CRUGOS: ahci ready",
+    "CRUGOS: phase 3b7 boot ok",
 )
 VERSION_PATTERN = re.compile(r"CRUGOS: version (\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?)")
 SUCCESS_EXIT = 33  # isa-debug-exit: port 0xf4 value 0x10 -> (0x10 << 1) | 1
@@ -43,10 +45,10 @@ def fail(message: str, log: str) -> int:
 
 
 def main() -> int:
-    if len(sys.argv) not in (3, 4, 5, 6, 7, 8):
+    if len(sys.argv) not in (3, 4, 5, 6, 7, 8, 9):
         print("usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE "
               "[VERSION_FILE [EXPECT_AVX2 [EXPECT_RAID [EXPECT_NVME "
-              "[EXPECT_REBUILD]]]]]",
+              "[EXPECT_REBUILD [EXPECT_AHCI]]]]]]",
               file=sys.stderr)
         return 2
 
@@ -57,6 +59,7 @@ def main() -> int:
     expect_raid = sys.argv[5] if len(sys.argv) >= 6 else "no"
     expect_nvme = sys.argv[6] if len(sys.argv) >= 7 else "no"
     expect_rebuild = sys.argv[7] if len(sys.argv) >= 8 else "no"
+    expect_ahci = sys.argv[8] if len(sys.argv) >= 9 else "no"
 
     if not serial_path.exists():
         return fail(f"missing serial log {serial_path}", "")
@@ -108,6 +111,14 @@ def main() -> int:
         if not match or int(match.group(1)) < 1:
             return fail("expected at least one NVMe block device", text)
 
+    if expect_ahci not in ("no", "yes"):
+        return fail(f"invalid EXPECT_AHCI {expect_ahci!r}", text)
+    if expect_ahci == "yes":
+        if not re.search(r"CRUGOS: root device sd[a-z]", text):
+            return fail("expected an AHCI root but the guest mounted a different device", text)
+        if not re.search(r"ahci\s*: sd[a-z] \d+ sectors", text):
+            return fail("expected at least one AHCI block device", text)
+
     if expect_rebuild == "no" and "CRUGOS: raid rebuilt" in text:
         return fail("unexpected RAID member rebuild during boot", text)
     if expect_rebuild != "no":
@@ -134,7 +145,8 @@ def main() -> int:
                    if line.lstrip().startswith("boot") and ":" in line]
     print("ok: boot markers found, version", guest_version,
           "avx2", expect_avx2, "raid", expect_raid,
-          "nvme", expect_nvme, "rebuild", expect_rebuild, "QEMU exit status", status)
+          "nvme", expect_nvme, "rebuild", expect_rebuild,
+          "ahci", expect_ahci, "QEMU exit status", status)
     for line in boot_report:
         print("  " + line)
     return 0

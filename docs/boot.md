@@ -19,7 +19,7 @@ OVMF (UEFI firmware)
        - physical allocator, page tables + W^X
        - GDT/TSS, %gs per-CPU data, IDT and exceptions
        - LAPIC + TSC/LAPIC timer
-       - kernel heap, virtio-blk/NVMe + GPT + RAID assembly (cold-spare
+       - kernel heap, virtio-blk/NVMe/AHCI + GPT + RAID assembly (cold-spare
          rebuild) + writable ext4, JBD2 replay, self-test
        - scheduler, handles and MsgPort IPC
        - syscall dispatcher behind int 0x80
@@ -31,7 +31,7 @@ OVMF (UEFI firmware)
 `include/crug/bootinfo.h` is the single contract between loader and kernel.
 The structure is versioned (`magic = 0x43524731`, `version = 1`) and the kernel
 refuses to boot if either does not match or if required fields are invalid.
-Phases 1 through 3B-6 did not change the layout.
+Phases 1 through 3B-7 did not change the layout.
 
 | Field | Meaning |
 | --- | --- |
@@ -87,18 +87,21 @@ post-snapshot allocations cannot push it over capacity.
    stay disabled until the execution model exists.
 7. `heap_init`: slab caches and large-allocation headers. `CRUGOS: heap ready`.
 8. `storage_init`: `block_init`, the legacy virtio-blk devices, then the
-   NVMe driver (PCI class 01/08/02, admin/I/O queues, namespace 1), and the GPT
+   NVMe driver (PCI class 01/08/02, admin/I/O queues, namespace 1) and the AHCI
+   driver (PCI class 01/06/01, port bring-up, IDENTIFY, `sd` names), and the GPT
    of every block device. A partition named `crugroot` is mounted directly;
    otherwise `fd00` partitions are assembled into RAID1 or RAID10 `md0` and
    mounted. A member whose metadata sectors are blank is a cold spare: the
    kernel assigns it the lowest missing slot, copies the missing data from its
    mirror and writes fresh metadata before mounting. A journaled filesystem is
    opened through JBD2 and replayed at mount time if necessary.
-   `CRUGOS: virtio ready`, `CRUGOS: nvme ready`, `CRUGOS: block ready`,
+   `CRUGOS: virtio ready`, `CRUGOS: nvme ready`, `CRUGOS: ahci ready`,
+   `CRUGOS: block ready`,
    `CRUGOS: gpt ready`, `CRUGOS: raid ready`,
    `CRUGOS: raid rebuilt (<n> member(s))` when a spare was rebuilt, the
    `raid   : level ...` geometry line and
    `CRUGOS: raid healthy`/`raid degraded` when RAID is used, then
+   `CRUGOS: root device <partition>` for the selected root partition, then
    `CRUGOS: ext4 ready`, `CRUGOS: journal ready`, `CRUGOS: storage ready`.
 9. `sched_init`: per-class run queues, boot thread id 0 and the idle thread.
    `CRUGOS: sched ready`.
@@ -107,11 +110,11 @@ post-snapshot allocations cannot push it over capacity.
 11. `sti`, then `selftest_run`: allocator, mappings, W^X audit, `int3`, timer,
     heap, block/GPT/ext4/storage (including the read-write round trip and a
     journal replay test), handles, scheduler, message ports and syscalls.
-12. `report_boot`, `CRUGOS: phase 3b6 boot ok`, `arch_exit_qemu(0x10)`.
+12. `report_boot`, `CRUGOS: phase 3b7 boot ok`, `arch_exit_qemu(0x10)`.
 
 Storage is still brought up with interrupts disabled: the virtio driver polls
-its used ring and the NVMe driver polls completion queues between `heap_init`
-and `sched_init`.
+its used ring, the NVMe driver polls completion queues and the AHCI driver polls
+port registers between `heap_init` and `sched_init`.
 
 ## Page tables
 
@@ -190,8 +193,8 @@ mode yet: the self-test invokes the same gate from ring 0.
 
 ## Storage
 
-The boot disks are legacy PCI virtio-blk devices (`vda`..`vdh`) or NVMe
-namespaces (`nvme0n1`..). `storage_init()` parses every disk's GPT and prefers
+The boot disks are legacy PCI virtio-blk devices (`vda`..`vdh`), NVMe
+namespaces (`nvme0n1`..) or AHCI/SATA drives (`sda`..`sdh`). `storage_init()` parses every disk's GPT and prefers
 a partition named
 `crugroot`, mounted directly as ext4. If there is none, it collects the
 partitions whose type is Linux RAID (`fd00`), validates their 512-byte metadata
@@ -244,6 +247,7 @@ CRUGOS: timer ready
 CRUGOS: heap ready
 CRUGOS: virtio ready
 CRUGOS: nvme ready
+CRUGOS: ahci ready
 CRUGOS: block ready
 CRUGOS: gpt ready
 CRUGOS: raid ready
@@ -258,7 +262,7 @@ CRUGOS: syscall ready
 CRUGOS: writable storage ok
 CRUGOS: journal selftest ok
 CRUGOS: selftest ok
-CRUGOS: phase 3b6 boot ok
+CRUGOS: phase 3b7 boot ok
 ```
 
 `raid ready` and `raid healthy`/`raid degraded` appear only on the RAID
@@ -280,7 +284,9 @@ init, newlines are also mirrored to the GOP text console, which uses an embedded
 
 - The identity map of normal memory is limited to the low 4 GiB, although
   `vm_map_page()` can map any canonical address (the NVMe BAR at
-  `0xc000000000` uses this). User address spaces, a higher-half kernel and
+  `0xc000000000` uses this; the AHCI BAR at `0x810c4000` is already inside the
+  identity map, so the driver reprotects its pages with `vm_protect_page()` and
+  `PCD|PWT`). User address spaces, a higher-half kernel and
   demand paging arrive with user-mode address spaces.
 - Execution is kernel-mode only. There is no user mode, no address-space switch
   and no `SYSCALL` MSR gateway yet; `int 0x80` reaches the same dispatcher.
@@ -294,7 +300,7 @@ init, newlines are also mirrored to the GOP text console, which uses an embedded
 - Empty slab pages are not returned to the PMM, and page-table pages created
   while splitting huge pages are not reclaimed.
 - Storage is writable with JBD2 replay and ordered metadata journaling, but
-  legacy virtio-blk and NVMe roots, polled requests, a single extent-tree
+  legacy virtio-blk, NVMe and AHCI/SATA roots, polled requests, a single extent-tree
   level, one descriptor per transaction, no journal or metadata checksums,
   no `crypt.device` yet.
 - `SMEP`/`SMAP` are enabled only when the CPU reports them; `qemu64` does not.

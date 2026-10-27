@@ -12,11 +12,12 @@ from an NVMe namespace instead of a legacy virtio-blk disk. Phase 3B-5 adds
 RAID10 striping over mirror pairs, with healthy four-member and degraded
 (two-member, one per pair) boot gates. Phase 3B-6 rebuilds blank replacement
 members from their mirror at boot, so a swapped disk is repaired before ext4 is
-mounted. Encryption and metadata checksums are later phases.
+mounted. Phase 3B-7 adds a polled AHCI/SATA driver, so the same stack can boot
+from a SATA disk as well. Encryption and metadata checksums are later phases.
 
 ```
-virtio-blk-pci (legacy I/O BAR)      NVMe PCIe (class 01/08/02)
-  -> drivers/block/virtio_blk.c        -> drivers/block/nvme.c
+virtio-blk-pci (legacy I/O BAR)  NVMe PCIe (class 01/08/02)  AHCI/SATA (class 01/06/01)
+  -> drivers/block/virtio_blk.c    -> drivers/block/nvme.c    -> drivers/block/ahci.c
   -> kernel/block/block.c          registry, partitions, bounds checks, flush
   -> kernel/fs/gpt.c               GPT header + entries, CRC32
   -> kernel/block/raid.c           optional RAID1/RAID10 array "md0"
@@ -33,11 +34,13 @@ markers are:
 ```
 CRUGOS: virtio ready (<n> device(s))
 CRUGOS: nvme ready (<n> device(s))
+CRUGOS: ahci ready (<n> device(s))
 CRUGOS: block ready (<n> device(s))
 CRUGOS: gpt ready
 CRUGOS: raid ready                    # RAID root only
 CRUGOS: raid rebuilt (<n> member(s))  # only after rebuilding a blank spare
 CRUGOS: raid healthy (<n>/<n> members) # or: CRUGOS: raid degraded (<n>/<n> members)
+CRUGOS: root device (<partition>)
 CRUGOS: ext4 ready
 CRUGOS: ext4 /hello.txt: hello from ext4
 CRUGOS: journal ready
@@ -47,8 +50,8 @@ CRUGOS: writable storage ok
 CRUGOS: journal selftest ok (<n> blocks recovered)
 ```
 
-A missing virtio/NVMe device, an unusable GPT, a bad RAID metadata record or an
-ext4 mount failure panics (`storage: ...`) because the phase 3 boot gate expects a
+A missing virtio/NVMe/AHCI device, an unusable GPT, a bad RAID metadata record
+or an ext4 mount failure panics (`storage: ...`) because the phase 3 boot gate expects a
 root filesystem. The read/write self-test also panics if any write-path
 operation fails, so a broken write path cannot silently boot. The init step time
 is reported as `storage=` in the `boot   :` timing line.
@@ -58,8 +61,8 @@ is reported as `storage=` in the `boot   :` timing line.
 `include/crug/block.h` defines a `block_device`: a 16-byte name, a sector
 count, a 512-byte sector size, read/write/flush callbacks, a private pointer and
 a registry link. Devices register with `block_register()`; legacy virtio disks
-are named `vda`..`vdh`, NVMe namespaces are `nvme0n1`.., and an assembled RAID
-array is `md0`.
+are named `vda`..`vdh`, NVMe namespaces are `nvme0n1`.., AHCI drives are
+`sda`..`sdh`, and an assembled RAID array is `md0`.
 `block_read()` and `block_write()` reject
 out-of-range requests, `block_partition()` creates an offset view that reuses
 the parent device, and `block_flush()` forwards a cache flush to the backing
@@ -129,6 +132,28 @@ QEMU attaches an NVMe namespace with:
 `make test-nvme` builds the same GPT/ext4 image as `make disk`, boots with only
 the NVMe disk, requires `CRUGOS: nvme ready (1 device(s))` and `nvme0n1`, and
 runs `scripts/check-disk.py` on the image.
+
+## AHCI / SATA
+
+`drivers/block/ahci.c` discovers controllers by PCI class `01/06/01`, which on
+q35 is the ICH9 AHCI at `00:1f.2`. Ports are capped by `CAP.NP` and by the
+mapped BAR window, empty ports get a 20 ms link window, and each populated port
+is brought up with a command list, FIS area and command table. `IDENTIFY
+DEVICE` supplies the 48-bit LBA capacity, and drives register as `sda`..`sdh`
+with `READ/WRITE DMA EXT`, `FLUSH CACHE EXT` and an 8 KiB bounce buffer.
+
+QEMU attaches a SATA disk with:
+
+```
+-drive file=<ahci.img>,if=none,id=ahci0,format=raw
+-device ide-hd,drive=ahci0,bus=ide.1
+```
+
+`make test-ahci` builds the same GPT/ext4 image, boots with only that disk, and
+requires `CRUGOS: ahci ready`, an `sd?` drive and an `sd?` root device before it
+runs `scripts/check-disk.py`. Note that the firmware ESP disk is also on this
+controller (port 0), so a passing boot normally prints two `sd` devices. See
+[ahci.md](ahci.md) for the register map, BAR mapping rules and limits.
 
 ## GPT
 
@@ -314,7 +339,8 @@ journal was checkpointed and cleared: a leftover dirty journal makes
 `e2fsck` fail the gate.
 
 `make nvme-disk` builds `build/x86_64/nvme.img` with the same `mkdisk.sh`
-recipe (GPT `crugroot` plus ext4) for `make test-nvme`.
+recipe (GPT `crugroot` plus ext4) for `make test-nvme`. `make ahci-disk` builds
+`build/x86_64/ahci.img` the same way for `make test-ahci`.
 
 `make raid-disks` builds two 16 MiB GPT disks with `scripts/mkraid.sh`:
 each has a `crugraid` partition of type `fd00` at LBA 2048..26623, the same
@@ -377,6 +403,11 @@ scripts/check-raid.py build/x86_64/raid-a.img build/x86_64/raid-b.img
 - `CRUGOS: raid degraded` on a two-disk test: one virtio device did not appear
   or its metadata was rejected; the serial log lists the devices found. A
   four-member RAID10 test showing `2/4` is expected for the degraded gate.
+- `ahci   : BAR setup failed`: 32-bit BAR mask overflow or a BAR inside the
+  identity map that needs `vm_protect_page()` instead of `vm_map_page()`; see
+  [ahci.md](ahci.md).
+- `CRUGOS: ahci ready (0 device(s))` in `make test-ahci`: the image was not
+  attached on `bus=ide.1`, or the port never reported `SSTS.DET == 3`.
 - `nvme   : controller not ready` or an NVMe timeout: CSTS/AQA offsets,
   firmware leaving the controller enabled, or a BAR above 4 GiB not mapped by
   the generic page-table path; see [nvme.md](nvme.md).
@@ -397,12 +428,14 @@ scripts/check-raid.py build/x86_64/raid-a.img build/x86_64/raid-b.img
 
 ## Known limits
 
-- Up to eight legacy virtio-blk disks and up to four NVMe controllers with one
-  namespace each; no AHCI, USB storage or hotplug.
+- Up to eight legacy virtio-blk disks, up to four NVMe controllers with one
+  namespace each, and up to four AHCI controllers/four drives; no USB storage
+  and no hotplug.
 - Polled I/O with no request merging, no interrupts and no DMA address
   translation (identity map for virtio; NVMe PRPs point at identity-mapped
-  bounce pages). Virtio issues one sector per request; NVMe issues one command
-  per block call.
+  bounce pages; AHCI uses a single PRDT entry over an 8 KiB bounce buffer).
+  Virtio issues one sector per request; NVMe and AHCI issue one command per
+  block call and AHCI uses one non-queued command slot.
 - GPT only: no MBR boot disks, no backup-table repair and no partition
   creation.
 - ext4 has JBD2 replay and ordered metadata journaling, but no journal

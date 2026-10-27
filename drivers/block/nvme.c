@@ -286,6 +286,8 @@ static int nvme_bar_setup(struct nvme_ctrl *c, u8 bus, u8 dev, u8 fn)
     mask = (u64)(lo_mask & ~0xFu);
     if (is64)
         mask |= (u64)hi_mask << 32;
+    else
+        mask |= 0xFFFFFFFF00000000ull;
     size = ~mask + 1ull;
     if (size < 0x1000ull || (size & (size - 1ull)) != 0)
         return -1;

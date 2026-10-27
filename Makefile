@@ -11,6 +11,7 @@
 #   make test-raid  boot RAID1 (two members) and verify member disks
 #   make test-raid10  boot RAID10 (four members) and verify member disks
 #   make test-nvme   boot from an NVMe namespace and verify the disk
+#   make test-ahci   boot from a SATA (AHCI) disk and verify the disk
 #   make test-raid-degraded  boot RAID1 with one member missing
 #   make test-raid10-degraded  boot RAID10 with one member per pair
 #   make test-raid-repair  boot RAID1 with one blank member and rebuild it
@@ -50,6 +51,7 @@ EXPECT_AVX2 ?= yes
 EXPECT_RAID ?= no
 EXPECT_NVME ?= no
 EXPECT_REBUILD ?= no
+EXPECT_AHCI ?= no
 
 # QEMU / firmware options.
 MEMORY_MB ?= 512
@@ -97,6 +99,7 @@ RAID10_DISK_B ?= $(BUILD)/raid10-b.img
 RAID10_DISK_C ?= $(BUILD)/raid10-c.img
 RAID10_DISK_D ?= $(BUILD)/raid10-d.img
 NVME_IMG ?= $(BUILD)/nvme.img
+AHCI_IMG ?= $(BUILD)/ahci.img
 NVME_SERIAL ?= CRUGNVME0
 EXTRA_DISKS ?=
 
@@ -133,9 +136,9 @@ LOADER_SOURCES := $(wildcard boot/efi/*.c)
 LOADER_OBJECTS := $(patsubst %,$(OBJ)/%.o,$(basename $(LOADER_SOURCES)))
 LOADER_DEPS := $(LOADER_OBJECTS:.o=.d)
 
-.PHONY: all kernel loader esp disk raid-disks raid10-disks nvme-disk \
+.PHONY: all kernel loader esp disk raid-disks raid10-disks nvme-disk ahci-disk \
         raid-repair-disks raid10-repair-disks run test test-compat \
-        test-raid test-raid-degraded test-raid10 test-raid10-degraded test-nvme \
+        test-raid test-raid-degraded test-raid10 test-raid10-degraded test-nvme test-ahci \
         test-raid-repair test-raid10-repair \
         check-disk size check-efi repro test-host preflight version options clean distclean help
 
@@ -204,6 +207,11 @@ nvme-disk: scripts/mkdisk.sh
 	$(Q)scripts/mkdisk.sh $(NVME_IMG) $(DISK_SIZE_MB)
 	@echo "  NVME  $(NVME_IMG)"
 
+ahci-disk: scripts/mkdisk.sh
+	$(Q)rm -f $(AHCI_IMG)
+	$(Q)scripts/mkdisk.sh $(AHCI_IMG) $(DISK_SIZE_MB)
+	@echo "  AHCI  $(AHCI_IMG)"
+
 raid-repair-disks: raid-disks scripts/raid-blank.sh
 	$(Q)scripts/raid-blank.sh $(RAID_DISK_B)
 	@echo "  BLANK $(RAID_DISK_B) (cold spare)"
@@ -228,12 +236,13 @@ run: esp
 		DISK_IMG=$(if $(DISK_IMG),$(abspath $(DISK_IMG)),) \
 		NVME_DISK=$(if $(NVME_DISK),$(abspath $(NVME_DISK)),) \
 		NVME_SERIAL="$(NVME_SERIAL)" EXTRA_DISKS="$(EXTRA_DISKS)" \
+		AHCI_DISK=$(if $(AHCI_DISK),$(abspath $(AHCI_DISK)),) \
 		scripts/run-qemu.sh
 
 test:
 	$(Q)rm -f $(DISK_IMG)
 	$(Q)$(MAKE) --no-print-directory run
-	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" "$(EXPECT_RAID)" "$(EXPECT_NVME)" "$(EXPECT_REBUILD)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" "$(EXPECT_RAID)" "$(EXPECT_NVME)" "$(EXPECT_REBUILD)" "$(EXPECT_AHCI)"
 	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 
 test-compat:
@@ -241,41 +250,46 @@ test-compat:
 
 test-raid: esp raid-disks
 	$(Q)$(MAKE) --no-print-directory run DISK_IMG=$(RAID_DISK_A) EXTRA_DISKS=$(RAID_DISK_B)
-	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" healthy "$(EXPECT_NVME)" "$(EXPECT_REBUILD)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" healthy "$(EXPECT_NVME)" "$(EXPECT_REBUILD)" "$(EXPECT_AHCI)"
 	$(Q)$(PYTHON) scripts/check-raid.py $(RAID_DISK_A) $(RAID_DISK_B)
 
 test-raid-degraded: esp raid-disks
 	$(Q)$(MAKE) --no-print-directory run DISK_IMG=$(RAID_DISK_A)
-	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" degraded "$(EXPECT_NVME)" "$(EXPECT_REBUILD)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" degraded "$(EXPECT_NVME)" "$(EXPECT_REBUILD)" "$(EXPECT_AHCI)"
 	$(Q)$(PYTHON) scripts/check-raid.py $(RAID_DISK_A)
 
 test-raid10: esp raid10-disks
 	$(Q)$(MAKE) --no-print-directory run DISK_IMG=$(RAID10_DISK_A) \
 		EXTRA_DISKS="$(RAID10_DISK_B) $(RAID10_DISK_C) $(RAID10_DISK_D)"
-	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" healthy "$(EXPECT_NVME)" "$(EXPECT_REBUILD)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" healthy "$(EXPECT_NVME)" "$(EXPECT_REBUILD)" "$(EXPECT_AHCI)"
 	$(Q)$(PYTHON) scripts/check-raid10.py $(RAID10_DISK_A) $(RAID10_DISK_B) $(RAID10_DISK_C) $(RAID10_DISK_D)
 
 test-raid10-degraded: esp raid10-disks
 	$(Q)$(MAKE) --no-print-directory run DISK_IMG=$(RAID10_DISK_A) \
 		EXTRA_DISKS="$(RAID10_DISK_C)"
-	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" degraded "$(EXPECT_NVME)" "$(EXPECT_REBUILD)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" degraded "$(EXPECT_NVME)" "$(EXPECT_REBUILD)" "$(EXPECT_AHCI)"
 	$(Q)$(PYTHON) scripts/check-raid10.py $(RAID10_DISK_A) $(RAID10_DISK_C)
 
 test-raid-repair: esp raid-repair-disks
 	$(Q)$(MAKE) --no-print-directory run DISK_IMG=$(RAID_DISK_A) EXTRA_DISKS=$(RAID_DISK_B)
-	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" healthy no 1
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" healthy no 1 "$(EXPECT_AHCI)"
 	$(Q)$(PYTHON) scripts/check-raid.py $(RAID_DISK_A) $(RAID_DISK_B)
 
 test-raid10-repair: esp raid10-repair-disks
 	$(Q)$(MAKE) --no-print-directory run DISK_IMG=$(RAID10_DISK_A) \
 		EXTRA_DISKS="$(RAID10_DISK_B) $(RAID10_DISK_C) $(RAID10_DISK_D)"
-	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" healthy no 2
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" healthy no 2 "$(EXPECT_AHCI)"
 	$(Q)$(PYTHON) scripts/check-raid10.py $(RAID10_DISK_A) $(RAID10_DISK_B) $(RAID10_DISK_C) $(RAID10_DISK_D)
 
 test-nvme: esp nvme-disk
 	$(Q)$(MAKE) --no-print-directory run DISK_IMG= NVME_DISK=$(NVME_IMG)
-	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" no yes "$(EXPECT_REBUILD)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" no yes "$(EXPECT_REBUILD)" "$(EXPECT_AHCI)"
 	$(Q)$(PYTHON) scripts/check-disk.py $(NVME_IMG)
+
+test-ahci: esp ahci-disk
+	$(Q)$(MAKE) --no-print-directory run DISK_IMG= AHCI_DISK=$(AHCI_IMG)
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" no no no yes
+	$(Q)$(PYTHON) scripts/check-disk.py $(AHCI_IMG)
 
 check-disk:
 	@if [ -n "$(DISK_IMG)" ] && [ ! -f "$(DISK_IMG)" ]; then \
@@ -319,6 +333,7 @@ options:
 	@printf '  %-16s %s\n' EXPECT_RAID "$(EXPECT_RAID)"
 	@printf '  %-16s %s\n' EXPECT_NVME "$(EXPECT_NVME)"
 	@printf '  %-16s %s\n' EXPECT_REBUILD "$(EXPECT_REBUILD)"
+	@printf '  %-16s %s\n' EXPECT_AHCI "$(EXPECT_AHCI)"
 	@printf '  %-16s %s\n' MEMORY_MB "$(MEMORY_MB)"
 	@printf '  %-16s %s\n' SMP "$(SMP)"
 	@printf '  %-16s %s\n' TIMEOUT_SEC "$(TIMEOUT_SEC)"
@@ -337,6 +352,7 @@ options:
 	@printf '  %-16s %s\n' RAID10_DISK_D "$(RAID10_DISK_D)"
 	@printf '  %-16s %s\n' NVME_IMG "$(NVME_IMG)"
 	@printf '  %-16s %s\n' NVME_SERIAL "$(NVME_SERIAL)"
+	@printf '  %-16s %s\n' AHCI_IMG "$(AHCI_IMG)"
 	@printf '  %-16s %s\n' EXTRA_DISKS "$(EXTRA_DISKS)"
 	@printf '  %-16s %s\n' BUILD "$(BUILD)"
 	@printf '  %-16s %s\n' KERNEL "$(KERNEL)"
