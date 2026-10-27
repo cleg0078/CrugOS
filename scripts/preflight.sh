@@ -2,6 +2,11 @@
 # Verify the toolchain needed to build, boot and check CrugOS.
 set -uo pipefail
 
+CC=${CC:-crugc}
+LD=${LD:-ld}
+PYTHON=${PYTHON:-python3}
+QEMU=${QEMU:-qemu-system-x86_64}
+
 failures=0
 warnings=0
 
@@ -25,10 +30,10 @@ optional() {
     fi
 }
 
-require crugc
-require ld
-require python3
-require qemu-system-x86_64
+require "$CC"
+require "$LD"
+require "$PYTHON"
+require "$QEMU"
 require objcopy
 require sgdisk
 require mke2fs
@@ -39,14 +44,14 @@ require dd
 optional size
 optional sha256sum
 
-if command -v crugc >/dev/null 2>&1; then
-    printf '  crugc: %s\n' "$(crugc --version 2>/dev/null | head -n 1)"
+if command -v "$CC" >/dev/null 2>&1; then
+    printf '  crugc: %s\n' "$("$CC" --version 2>/dev/null | head -n 1)"
 fi
-if command -v ld >/dev/null 2>&1; then
-    printf '  ld:    %s\n' "$(ld --version 2>/dev/null | head -n 1)"
+if command -v "$LD" >/dev/null 2>&1; then
+    printf '  ld:    %s\n' "$("$LD" --version 2>/dev/null | head -n 1)"
 fi
-if command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    printf '  qemu:  %s\n' "$(qemu-system-x86_64 --version | head -n 1)"
+if command -v "$QEMU" >/dev/null 2>&1; then
+    printf '  qemu:  %s\n' "$("$QEMU" --version | head -n 1)"
 fi
 
 OVMF_CODE=${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}
@@ -66,7 +71,7 @@ else
     echo "note: /dev/kvm absent, QEMU will run with TCG emulation"
 fi
 
-py=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo '?')
+py=$("$PYTHON" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo '?')
 printf 'ok: %-18s %s\n' python "$py"
 
 if [[ $failures -gt 0 ]]; then

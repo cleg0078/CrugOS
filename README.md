@@ -151,15 +151,18 @@ make check-disk  # e2fsck + persisted-file checks on the latest test disk
 make disk        # generate the GPT/ext4 test disk
 make raid-disks  # generate the two RAID1 member disks
 make version     # print the release version from VERSION
+make options     # print every build/QEMU/storage option and its value
 make size        # kernel budget: <1 MiB stretch, <2 MiB hard
 make check-efi   # PE32+ structure checks on the loader
 make repro       # two builds must be byte-identical
 ```
 
 Build artifacts land in `build/x86_64/`; `make run` records
-`build/x86_64/serial.log`, `debug.log` and `exit-code.txt`. Useful variables
-include `MEMORY_MB`, `QEMU_CPU`, `REQUIRE_AVX2` and `MODE`; see
-[docs/build.md](docs/build.md).
+`build/x86_64/serial.log`, `debug.log` and `exit-code.txt`. Every knob has a
+default in the makefile; `make options` prints the full resolved set. Useful
+variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
+`QEMU_DISPLAY`, `QEMU_EXTRA`, `OVMF_CODE`, `OVMF_VARS`, `REQUIRE_AVX2`,
+`EXPECT_AVX2`, `EXPECT_RAID` and `MODE`; see [docs/build.md](docs/build.md).
 
 ## Repository layout
 

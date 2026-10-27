@@ -17,6 +17,9 @@ MEMORY_MB=${MEMORY_MB:-512}
 SMP=${SMP:-1}
 TIMEOUT_SEC=${TIMEOUT_SEC:-30}
 QEMU_CPU=${QEMU_CPU:-}
+QEMU_ACCEL=${QEMU_ACCEL:-}
+QEMU_DISPLAY=${QEMU_DISPLAY:-none}
+QEMU_EXTRA=${QEMU_EXTRA:-}
 
 for tool in "$QEMU"; do
     if ! command -v "$tool" >/dev/null 2>&1; then
@@ -47,6 +50,16 @@ if [[ -n "$QEMU_CPU" ]]; then
     CPU_ARGS=(-cpu "$QEMU_CPU")
 fi
 
+ACCEL_ARGS=()
+if [[ -n "$QEMU_ACCEL" ]]; then
+    ACCEL_ARGS=(-accel "$QEMU_ACCEL")
+fi
+
+EXTRA_ARGS=()
+if [[ -n "$QEMU_EXTRA" ]]; then
+    read -r -a EXTRA_ARGS <<< "$QEMU_EXTRA"
+fi
+
 DISK_ARGS=()
 if [[ -n "$DISK_IMG" ]]; then
     if [[ ! -r "$DISK_IMG" ]]; then
@@ -68,21 +81,23 @@ for extra in $EXTRA_DISKS; do
     index=$((index + 1))
 done
 
-echo "run-qemu: booting $ESP_DIR (${MEMORY_MB} MiB, ${SMP} vCPU, cpu ${QEMU_CPU:-default}, disk ${DISK_IMG:-none}, extra ${EXTRA_DISKS:-none}, timeout ${TIMEOUT_SEC}s)"
+echo "run-qemu: booting $ESP_DIR (${MEMORY_MB} MiB, ${SMP} vCPU, cpu ${QEMU_CPU:-default}, accel ${QEMU_ACCEL:-default}, display ${QEMU_DISPLAY}, disk ${DISK_IMG:-none}, extra ${EXTRA_DISKS:-none}, timeout ${TIMEOUT_SEC}s)"
 set +e
 TMPDIR="$TMPDIR" timeout --foreground "$TIMEOUT_SEC" "$QEMU" \
     -machine q35 \
     -m "$MEMORY_MB" \
     -smp "$SMP" \
+    "${ACCEL_ARGS[@]}" \
     "${CPU_ARGS[@]}" \
     -drive if=pflash,format=raw,unit=0,readonly=on,file="$OVMF_CODE" \
     -drive if=pflash,format=raw,unit=1,file="$VARS_COPY" \
     -drive file=fat:rw:"$ESP_DIR",format=raw,media=disk \
     "${DISK_ARGS[@]}" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-    -display none \
+    -display "$QEMU_DISPLAY" \
     -serial "file:$SERIAL_LOG" \
     -debugcon "file:$DEBUG_LOG" \
+    "${EXTRA_ARGS[@]}" \
     -no-reboot
 status=$?
 set -e

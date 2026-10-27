@@ -14,25 +14,44 @@
 #   make repro      verify the build is bit-for-bit reproducible
 #   make preflight  check the local toolchain
 #   make version    print the release version from VERSION
+#   make options    print every build, CPU, QEMU and storage option
 #
-# Variables: ARCH=x86_64 MODE=release|debug|size V=1 REQUIRE_AVX2=1|0
+# Every knob has a default below; override it on the command line, e.g.
+#   make test MEMORY_MB=1024 QEMU_CPU=qemu64
+# Run 'make options' for the complete list and current values.
 
 SHELL := /bin/bash
 .DEFAULT_GOAL := all
 .DELETE_ON_ERROR:
 .SUFFIXES:
 
+# Toolchain and host tools. Command-line overrides still win.
+CC := crugc
+LD := ld
+PYTHON ?= python3
+QEMU ?= qemu-system-x86_64
+
+# Build selection.
 ARCH ?= x86_64
 MODE ?= release
 BUILD_ROOT ?= build
 V ?= 0
+
+# CPU policy and expected guest result.
 REQUIRE_AVX2 ?= 1
 QEMU_CPU ?= qemu64,+avx,+avx2
 EXPECT_AVX2 ?= yes
+EXPECT_RAID ?= no
 
-CC := crugc
-LD := ld
-PYTHON := python3
+# QEMU / firmware options.
+MEMORY_MB ?= 512
+SMP ?= 1
+TIMEOUT_SEC ?= 30
+QEMU_ACCEL ?=
+QEMU_DISPLAY ?= none
+QEMU_EXTRA ?=
+OVMF_CODE ?= /usr/share/OVMF/OVMF_CODE_4M.fd
+OVMF_VARS ?= /usr/share/OVMF/OVMF_VARS_4M.fd
 
 # VERSION is the single source of truth for the release number.
 CRUGOS_VERSION := $(shell cat VERSION 2>/dev/null || echo 0.0.0-dev)
@@ -101,7 +120,7 @@ LOADER_OBJECTS := $(patsubst %,$(OBJ)/%.o,$(basename $(LOADER_SOURCES)))
 LOADER_DEPS := $(LOADER_OBJECTS:.o=.d)
 
 .PHONY: all kernel loader esp disk raid-disks run test test-compat test-raid test-raid-degraded \
-        check-disk size check-efi repro test-host preflight version clean distclean help
+        check-disk size check-efi repro test-host preflight version options clean distclean help
 
 all: esp
 
@@ -164,14 +183,18 @@ run: esp
 	@mkdir -p $(BUILD)/tmp
 	$(Q)TMPDIR=$(abspath $(BUILD)/tmp) ESP_DIR=$(abspath $(ESP)) \
 		SERIAL_LOG=$(abspath $(SERIAL_LOG)) DEBUG_LOG=$(abspath $(DEBUG_LOG)) \
-		EXIT_CODE_FILE=$(abspath $(QEMU_EXIT)) QEMU_CPU="$(QEMU_CPU)" \
+		EXIT_CODE_FILE=$(abspath $(QEMU_EXIT)) \
+		QEMU="$(QEMU)" OVMF_CODE="$(OVMF_CODE)" OVMF_VARS="$(OVMF_VARS)" \
+		MEMORY_MB="$(MEMORY_MB)" SMP="$(SMP)" TIMEOUT_SEC="$(TIMEOUT_SEC)" \
+		QEMU_CPU="$(QEMU_CPU)" QEMU_ACCEL="$(QEMU_ACCEL)" \
+		QEMU_DISPLAY="$(QEMU_DISPLAY)" QEMU_EXTRA="$(QEMU_EXTRA)" \
 		DISK_IMG=$(abspath $(DISK_IMG)) EXTRA_DISKS="$(EXTRA_DISKS)" \
 		scripts/run-qemu.sh
 
 test:
 	$(Q)rm -f $(DISK_IMG)
 	$(Q)$(MAKE) --no-print-directory run
-	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" "$(EXPECT_RAID)"
 	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 
 test-compat:
@@ -204,10 +227,47 @@ test-host:
 	$(Q)$(MAKE) -C tests/host run
 
 preflight:
-	$(Q)scripts/preflight.sh
+	$(Q)CC="$(CC)" LD="$(LD)" PYTHON="$(PYTHON)" QEMU="$(QEMU)" \
+		OVMF_CODE="$(OVMF_CODE)" OVMF_VARS="$(OVMF_VARS)" \
+		scripts/preflight.sh
 
 version:
 	@echo "CrugOS $(CRUGOS_VERSION)"
+
+options:
+	@echo "CrugOS $(CRUGOS_VERSION) options"
+	@printf '  %-16s %s\n' ARCH "$(ARCH)"
+	@printf '  %-16s %s\n' MODE "$(MODE)"
+	@printf '  %-16s %s\n' BUILD_ROOT "$(BUILD_ROOT)"
+	@printf '  %-16s %s\n' V "$(V) (1 = verbose commands)"
+	@printf '  %-16s %s\n' CC "$(CC)"
+	@printf '  %-16s %s\n' LD "$(LD)"
+	@printf '  %-16s %s\n' PYTHON "$(PYTHON)"
+	@printf '  %-16s %s\n' QEMU "$(QEMU)"
+	@printf '  %-16s %s\n' REQUIRE_AVX2 "$(REQUIRE_AVX2)"
+	@printf '  %-16s %s\n' QEMU_CPU "$(QEMU_CPU)"
+	@printf '  %-16s %s\n' EXPECT_AVX2 "$(EXPECT_AVX2)"
+	@printf '  %-16s %s\n' EXPECT_RAID "$(EXPECT_RAID)"
+	@printf '  %-16s %s\n' MEMORY_MB "$(MEMORY_MB)"
+	@printf '  %-16s %s\n' SMP "$(SMP)"
+	@printf '  %-16s %s\n' TIMEOUT_SEC "$(TIMEOUT_SEC)"
+	@printf '  %-16s %s\n' QEMU_ACCEL "$(QEMU_ACCEL)"
+	@printf '  %-16s %s\n' QEMU_DISPLAY "$(QEMU_DISPLAY)"
+	@printf '  %-16s %s\n' QEMU_EXTRA "$(QEMU_EXTRA)"
+	@printf '  %-16s %s\n' OVMF_CODE "$(OVMF_CODE)"
+	@printf '  %-16s %s\n' OVMF_VARS "$(OVMF_VARS)"
+	@printf '  %-16s %s\n' DISK_IMG "$(DISK_IMG)"
+	@printf '  %-16s %s\n' DISK_SIZE_MB "$(DISK_SIZE_MB)"
+	@printf '  %-16s %s\n' RAID_DISK_A "$(RAID_DISK_A)"
+	@printf '  %-16s %s\n' RAID_DISK_B "$(RAID_DISK_B)"
+	@printf '  %-16s %s\n' EXTRA_DISKS "$(EXTRA_DISKS)"
+	@printf '  %-16s %s\n' BUILD "$(BUILD)"
+	@printf '  %-16s %s\n' KERNEL "$(KERNEL)"
+	@printf '  %-16s %s\n' LOADER "$(LOADER)"
+	@printf '  %-16s %s\n' ESP "$(ESP)"
+	@printf '  %-16s %s\n' SERIAL_LOG "$(SERIAL_LOG)"
+	@printf '  %-16s %s\n' DEBUG_LOG "$(DEBUG_LOG)"
+	@printf '  %-16s %s\n' QEMU_EXIT "$(QEMU_EXIT)"
 
 clean:
 	$(Q)rm -rf $(BUILD)
@@ -219,6 +279,6 @@ distclean: clean
 	@echo "  RM    build"
 
 help:
-	@sed -n '2,19p' Makefile | sed 's/^# \{0,1\}//'
+	@sed -n '2,/^$$/p' Makefile | sed 's/^# \{0,1\}//'
 
 -include $(KERNEL_DEPS) $(LOADER_DEPS)

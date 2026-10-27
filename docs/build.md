@@ -36,11 +36,14 @@ make check-efi   # PE32+ structure checks on the loader
 make repro       # two independent builds must be byte-identical
 make preflight   # toolchain/firmware availability
 make version     # print the release version from VERSION
+make options     # print every option below with its current value
 make clean       # remove build/<arch>
 make distclean   # remove build/ and host test artifacts
 ```
 
-Useful variables:
+Useful variables. Every row can be overridden on the command line; `make
+options` prints the complete resolved set (including paths derived from
+`BUILD_ROOT`).
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -52,7 +55,17 @@ Useful variables:
 | `TIMEOUT_SEC` | `30` | QEMU wall-clock limit for `make run`/`make test` |
 | `QEMU_CPU` | `qemu64,+avx,+avx2` | `-cpu` model; empty means QEMU's default |
 | `REQUIRE_AVX2` | `1` | `0` builds a kernel that boots without AVX2 |
-| `EXPECT_AVX2` | `yes` | what `make test` requires the guest to report |
+| `EXPECT_AVX2` | `yes` | what `make test` requires the guest to report (`no` for compat) |
+| `EXPECT_RAID` | `no` | what `make test` requires for RAID: `no`, `healthy` or `degraded` |
+| `CC` | `crugc` | compiler for kernel and loader objects |
+| `LD` | `ld` | linker for the PE32+ loader |
+| `PYTHON` | `python3` | host scripts (boot/disk/EFI checks) |
+| `QEMU` | `qemu-system-x86_64` | emulator binary |
+| `OVMF_CODE` | `/usr/share/OVMF/OVMF_CODE_4M.fd` | OVMF firmware code image |
+| `OVMF_VARS` | `/usr/share/OVMF/OVMF_VARS_4M.fd` | OVMF variable store (copied per run) |
+| `QEMU_ACCEL` | empty | `-accel` backend, e.g. `tcg` or `kvm`; empty lets QEMU choose |
+| `QEMU_DISPLAY` | `none` | `-display` value; `none` keeps runs headless |
+| `QEMU_EXTRA` | empty | extra whitespace-separated QEMU arguments |
 | `BUILD_ROOT` | `build` | output root; `test-compat` uses `build/compat` |
 | `DISK_IMG` | `build/<arch>/disk.img` | raw disk image attached as `vda` |
 | `DISK_SIZE_MB` | `16` | size of the generated test disk |
