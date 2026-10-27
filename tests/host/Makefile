@@ -6,8 +6,8 @@ CPPFLAGS := -I../../include -I../../boot/efi
 BUILD := build
 BIN := $(BUILD)/unit-tests
 
-SOURCES := main.c test_string.c test_printf.c test_elf.c \
-           ../../kernel/lib/string.c ../../kernel/lib/printf.c \
+SOURCES := main.c test_string.c test_printf.c test_elf.c test_bitmap.c test_vm_math.c \
+           ../../kernel/lib/string.c ../../kernel/lib/printf.c ../../kernel/lib/bitmap.c \
            ../../boot/efi/elf.c
 
 .PHONY: all run clean

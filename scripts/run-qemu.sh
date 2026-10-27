@@ -14,6 +14,7 @@ OVMF_VARS=${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}
 MEMORY_MB=${MEMORY_MB:-512}
 SMP=${SMP:-1}
 TIMEOUT_SEC=${TIMEOUT_SEC:-30}
+QEMU_CPU=${QEMU_CPU:-}
 
 for tool in "$QEMU"; do
     if ! command -v "$tool" >/dev/null 2>&1; then
@@ -39,12 +40,18 @@ rm -f "$SERIAL_LOG" "$DEBUG_LOG" "$EXIT_CODE_FILE"
 VARS_COPY=$(dirname "$SERIAL_LOG")/OVMF_VARS.fd
 cp "$OVMF_VARS" "$VARS_COPY"
 
-echo "run-qemu: booting $ESP_DIR (${MEMORY_MB} MiB, ${SMP} vCPU, timeout ${TIMEOUT_SEC}s)"
+CPU_ARGS=()
+if [[ -n "$QEMU_CPU" ]]; then
+    CPU_ARGS=(-cpu "$QEMU_CPU")
+fi
+
+echo "run-qemu: booting $ESP_DIR (${MEMORY_MB} MiB, ${SMP} vCPU, cpu ${QEMU_CPU:-default}, timeout ${TIMEOUT_SEC}s)"
 set +e
 TMPDIR="$TMPDIR" timeout --foreground "$TIMEOUT_SEC" "$QEMU" \
     -machine q35 \
     -m "$MEMORY_MB" \
     -smp "$SMP" \
+    "${CPU_ARGS[@]}" \
     -drive if=pflash,format=raw,unit=0,readonly=on,file="$OVMF_CODE" \
     -drive if=pflash,format=raw,unit=1,file="$VARS_COPY" \
     -drive file=fat:rw:"$ESP_DIR",format=raw,media=disk \

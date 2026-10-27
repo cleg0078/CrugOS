@@ -13,6 +13,8 @@ void test_fail(const char *file, int line, const char *what)
 void test_string_functions(void);
 void test_printf_functions(void);
 void test_elf_loader(void);
+void test_bitmap_functions(void);
+void test_vm_math(void);
 
 int main(void)
 {
@@ -20,6 +22,8 @@ int main(void)
     RUN(test_string_functions);
     RUN(test_printf_functions);
     RUN(test_elf_loader);
+    RUN(test_bitmap_functions);
+    RUN(test_vm_math);
     printf("%d checks, %d failure(s)\n", tests_run, tests_failed);
     return tests_failed == 0 ? 0 : 1;
 }

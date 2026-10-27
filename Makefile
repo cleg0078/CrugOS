@@ -4,13 +4,14 @@
 #   make run        boot the ESP image under QEMU + OVMF
 #   make test       boot and verify the serial markers / exit code
 #   make test-host  build and run host unit tests
+#   make test-compat  boot a compatibility build (no AVX2 required)
 #   make size       enforce the kernel size budget
 #   make check-efi  validate the loader as a PE32+ EFI application
 #   make repro      verify the build is bit-for-bit reproducible
 #   make preflight  check the local toolchain
 #   make version    print the release version from VERSION
 #
-# Variables: ARCH=x86_64 MODE=release|debug|size V=1
+# Variables: ARCH=x86_64 MODE=release|debug|size V=1 REQUIRE_AVX2=1|0
 
 SHELL := /bin/bash
 .DEFAULT_GOAL := all
@@ -21,6 +22,9 @@ ARCH ?= x86_64
 MODE ?= release
 BUILD_ROOT ?= build
 V ?= 0
+REQUIRE_AVX2 ?= 1
+QEMU_CPU ?= qemu64,+avx,+avx2
+EXPECT_AVX2 ?= yes
 
 CC := crugc
 LD := ld
@@ -29,6 +33,7 @@ PYTHON := python3
 # VERSION is the single source of truth for the release number.
 CRUGOS_VERSION := $(shell cat VERSION 2>/dev/null || echo 0.0.0-dev)
 VERSION_FLAGS := -DCRUG_VERSION_STR='"$(CRUGOS_VERSION)"'
+AVX2_FLAGS := -DCRUG_REQUIRE_AVX2=$(REQUIRE_AVX2)
 
 ifeq ($(V),1)
 Q :=
@@ -67,8 +72,9 @@ WARN_FLAGS := -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare
 COMMON_FLAGS := -std=gnu11 -fcrug-kernel -ffreestanding -fno-pic -fno-pie \
                 -fno-stack-protector -fno-ident -fno-asynchronous-unwind-tables \
                 -fno-unwind-tables -fno-builtin -fno-omit-frame-pointer -mno-red-zone \
-                -Iinclude -MMD -MP $(VERSION_FLAGS) $(WARN_FLAGS) $(MODE_FLAGS)
-KERNEL_FLAGS := $(COMMON_FLAGS) -mno-sse -mno-sse2 -mno-mmx -mno-80387 -fno-builtin
+                -Iinclude -MMD -MP $(VERSION_FLAGS) $(AVX2_FLAGS) $(WARN_FLAGS) $(MODE_FLAGS)
+KERNEL_FLAGS := $(COMMON_FLAGS) -mno-sse -mno-sse2 -mno-mmx -mno-80387 \
+                -mno-avx -mno-avx2 -mno-avx512f -fno-builtin
 LOADER_FLAGS := $(COMMON_FLAGS) -fshort-wchar
 
 KERNEL_LDFLAGS := -nostdlib -static -no-pie -Wl,--build-id=none \
@@ -84,8 +90,8 @@ LOADER_SOURCES := $(wildcard boot/efi/*.c)
 LOADER_OBJECTS := $(patsubst %,$(OBJ)/%.o,$(basename $(LOADER_SOURCES)))
 LOADER_DEPS := $(LOADER_OBJECTS:.o=.d)
 
-.PHONY: all kernel loader esp run test size check-efi repro test-host preflight \
-        version clean distclean help
+.PHONY: all kernel loader esp run test test-compat size check-efi repro test-host \
+        preflight version clean distclean help
 
 all: esp
 
@@ -131,11 +137,14 @@ run: esp
 	@mkdir -p $(BUILD)/tmp
 	$(Q)TMPDIR=$(abspath $(BUILD)/tmp) ESP_DIR=$(abspath $(ESP)) \
 		SERIAL_LOG=$(abspath $(SERIAL_LOG)) DEBUG_LOG=$(abspath $(DEBUG_LOG)) \
-		EXIT_CODE_FILE=$(abspath $(QEMU_EXIT)) \
+		EXIT_CODE_FILE=$(abspath $(QEMU_EXIT)) QEMU_CPU="$(QEMU_CPU)" \
 		scripts/run-qemu.sh
 
 test: run
-	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)"
+
+test-compat:
+	$(Q)$(MAKE) test BUILD_ROOT=build/compat REQUIRE_AVX2=0 QEMU_CPU=qemu64 EXPECT_AVX2=no
 
 size: $(KERNEL)
 	$(Q)scripts/size-report.sh $(KERNEL)
@@ -165,6 +174,6 @@ distclean: clean
 	@echo "  RM    build"
 
 help:
-	@sed -n '2,13p' Makefile | sed 's/^# \{0,1\}//'
+	@sed -n '2,14p' Makefile | sed 's/^# \{0,1\}//'
 
 -include $(KERNEL_DEPS) $(LOADER_DEPS)

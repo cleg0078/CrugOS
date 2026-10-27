@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Verify a CrugOS boot: serial markers, guest version and exit code.
+"""Verify a CrugOS boot: serial markers, guest version, AVX2 policy and exit code.
 
-usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE [VERSION_FILE]
+usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE [VERSION_FILE [EXPECT_AVX2]]
 """
 
 import re
@@ -10,7 +10,12 @@ from pathlib import Path
 
 REQUIRED_MARKERS = (
     "CRUGOS: hello",
-    "CRUGOS: phase 0 boot ok",
+    "CRUGOS: pmm ready",
+    "CRUGOS: vm ready",
+    "CRUGOS: cpu ready",
+    "CRUGOS: timer ready",
+    "CRUGOS: selftest ok",
+    "CRUGOS: phase 1 boot ok",
 )
 VERSION_PATTERN = re.compile(r"CRUGOS: version (\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?)")
 SUCCESS_EXIT = 33  # isa-debug-exit: port 0xf4 value 0x10 -> (0x10 << 1) | 1
@@ -26,13 +31,15 @@ def fail(message: str, log: str) -> int:
 
 
 def main() -> int:
-    if len(sys.argv) not in (3, 4):
-        print("usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE [VERSION_FILE]", file=sys.stderr)
+    if len(sys.argv) not in (3, 4, 5):
+        print("usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE [VERSION_FILE [EXPECT_AVX2]]",
+              file=sys.stderr)
         return 2
 
     serial_path = Path(sys.argv[1])
     exit_path = Path(sys.argv[2])
-    version_path = Path(sys.argv[3]) if len(sys.argv) == 4 else None
+    version_path = Path(sys.argv[3]) if len(sys.argv) >= 4 else None
+    expect_avx2 = sys.argv[4] if len(sys.argv) >= 5 else "yes"
 
     if not serial_path.exists():
         return fail(f"missing serial log {serial_path}", "")
@@ -61,6 +68,11 @@ def main() -> int:
         if guest_version != expected:
             return fail(f"guest version {guest_version!r} != VERSION {expected!r}", text)
 
+    if expect_avx2 == "yes" and "avx2=yes" not in text:
+        return fail("AVX2 was required but the guest did not report avx2=yes", text)
+    if expect_avx2 == "no" and "avx2=no" not in text:
+        return fail("compatibility build expected avx2=no", text)
+
     raw_exit = exit_path.read_text().strip()
     try:
         status = int(raw_exit)
@@ -72,7 +84,7 @@ def main() -> int:
 
     boot_report = [line for line in text.splitlines() if line.startswith("boot:")]
     print("ok: boot markers found, version", guest_version,
-          "QEMU exit status", status)
+          "avx2", expect_avx2, "QEMU exit status", status)
     for line in boot_report:
         print("  " + line)
     return 0

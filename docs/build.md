@@ -1,6 +1,6 @@
 # Building CrugOS
 
-This document describes the phase 0 build system: how the kernel and the UEFI
+This document describes the phase 1 build system: how the kernel and the UEFI
 loader are compiled and linked, which invariants the link must preserve, and how
 to diagnose the failure modes that are specific to this toolchain.
 
@@ -21,8 +21,9 @@ Run `make preflight` to check all of the above.
 ```
 make             # kernel.elf, BOOTX64.EFI and the ESP tree
 make run         # boot the ESP tree under QEMU + OVMF
-make test        # boot and verify serial markers, guest version + exit status
-make test-host   # host unit tests for string/printf/ELF loader
+make test        # boot and verify serial markers, guest version, AVX2 + exit status
+make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
+make test-host   # host unit tests for string/printf/ELF/bitmap/VM math
 make size        # kernel size budget (<1 MiB stretch, <2 MiB hard)
 make check-efi   # PE32+ structure checks on the loader
 make repro       # two independent builds must be byte-identical
@@ -32,8 +33,20 @@ make clean       # remove build/<arch>
 make distclean   # remove build/ and host test artifacts
 ```
 
-Useful variables: `ARCH=x86_64` (only arch implemented), `MODE=release|debug|size`,
-`V=1` for verbose command lines.
+Useful variables:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `ARCH` | `x86_64` | only architecture implemented |
+| `MODE` | `release` | `release`, `debug` or `size` |
+| `V` | `0` | `V=1` prints full command lines |
+| `MEMORY_MB` | `512` | guest RAM; see the firmware floor below |
+| `SMP` | `1` | vCPUs (the phase 1 kernel uses the boot CPU only) |
+| `TIMEOUT_SEC` | `30` | QEMU wall-clock limit for `make run`/`make test` |
+| `QEMU_CPU` | `qemu64,+avx,+avx2` | `-cpu` model; empty means QEMU's default |
+| `REQUIRE_AVX2` | `1` | `0` builds a kernel that boots without AVX2 |
+| `EXPECT_AVX2` | `yes` | what `make test` requires the guest to report |
+| `BUILD_ROOT` | `build` | output root; `test-compat` uses `build/compat` |
 
 ## Version stamping
 
@@ -69,9 +82,12 @@ Link flags that matter:
 `--build-id=none` keeps the image reproducible and removes a non-loadable note.
 The script discards `.comment`, `.note*`, `.eh_frame`, `.rela*` and dynamic
 sections; the kernel must not need runtime relocations. C sources are compiled
-with `-fno-pic -fno-pie -fno-builtin -fno-stack-protector -mno-red-zone` and no
-SSE/FPU (`-mno-sse -mno-sse2 -mno-mmx -mno-80387`), so the compiler never emits
-floating-point state save/restore in interrupt-adjacent code.
+with `-fno-pic -fno-pie -fno-builtin -fno-stack-protector -mno-red-zone`, no
+SSE/FPU (`-mno-sse -mno-sse2 -mno-mmx -mno-80387`) and no AVX
+(`-mno-avx -mno-avx2 -mno-avx512f`). The compiler therefore never emits vector
+state save/restore in interrupt-adjacent code before the context-switch path
+owns XSAVE state. AVX2 detection and `XCR0` setup are described in
+[cpu.md](cpu.md).
 
 ## Loader link
 
@@ -97,6 +113,22 @@ Hard-won constraints (each of these was a real OVMF failure):
 5. No `mtools` is required: QEMU's `vvfat` driver exposes the ESP directory
    directly. The process `TMPDIR` must be writable.
 
+## Firmware memory floor
+
+OVMF 4M needs a substantial amount of RAM before it will boot from QEMU's
+`vvfat` ESP. Measured with this QEMU/OVMF pair:
+
+| `MEMORY_MB` | Result |
+| --- | --- |
+| 16, 32 | QEMU exits 0; no serial output |
+| 64, 128 | OVMF reports `No bootable option or device was found` |
+| 256 | booted once, then failed the same way on a re-run |
+| 512 | reliable; used by all gates |
+
+This is a firmware limit, not a kernel limit: the kernel load image is about
+200 KiB. The specification's 16 MiB headless target needs a leaner boot path and
+is tracked in [roadmap.md](roadmap.md).
+
 ## Reproducibility
 
 `make repro` builds `kernel.elf` and `BOOTX64.EFI` twice under different
@@ -114,5 +146,15 @@ randomisation that leaks into the output will fail this target.
   omitted.
 - **`ExitBootServices failed`**: the memory map changed between snapshot and
   call; the loader retries three times, re-reading the map each time.
+- **QEMU resets in a loop / no output after the handoff**: a page-table bug.
+  Re-run with `-d int,cpu_reset -D qemu-int.log` and look for the first
+  exception (`v=0e` with `e=0011` is an NX fault on instruction fetch, a common
+  symptom of setting `NX` on a page-directory entry that points at a page
+  table).
+- **`#PF` in the kernel with a present+instruction-fetch error**: check that
+  `.text` is mapped executable and that every page-table-referencing PDE has
+  `NX` clear.
+- **No boot at low `MEMORY_MB`**: see the firmware memory floor above; use
+  `MEMORY_MB=512`.
 - **QEMU exits before OVMF starts**: verify the firmware paths and that
   `OVMF_VARS` is writable (the run script copies it into `build/`).

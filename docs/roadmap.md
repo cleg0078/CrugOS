@@ -1,10 +1,10 @@
 # Roadmap
 
-The specification defines 38 phases/gates. Phase 0 (this tree) establishes the
-smallest end-to-end path: firmware -> loader -> kernel -> serial/framebuffer
-report -> deterministic exit. Every later phase builds on the same BootInfo
-contract, so the loader does not need to change for memory management, SMP or
-drivers.
+The specification defines 38 phases/gates. Phase 0 established the smallest
+end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
+phase 1 makes the kernel own physical memory, page tables, exceptions and
+timers. Every later phase keeps the same BootInfo contract, so the loader does
+not change for memory management, SMP or drivers.
 
 ## Phase 0 - bootstrap (done)
 
@@ -13,13 +13,26 @@ drivers.
 - Kernel: freestanding Crug, serial/debugcon/framebuffer consoles, `ksnprintf`,
   panic with stack scan, boot report, size budget, host unit tests, QEMU boot test.
 
-## Phase 1 - memory and CPU
+## Phase 1 - memory and CPU (done)
 
-- Bitmap physical allocator over `BootInfo.memory_map` (4 KiB pages, never the
-  kernel, framebuffer or boot metadata).
-- Kernel page tables with W^X: no writable+executable mapping, NX on data.
-- GDT/IDT, exception handlers, per-CPU data via `%gs`.
-- APIC + HPET/TSC timer; TSC frequency calibration from ACPI/CPUID.
+- Loader invariant: post-snapshot allocations (kernel, framebuffer, BootInfo and
+  the normalized map itself) are marked `BOOTLOADER`/`KERNEL`/`FRAMEBUFFER`, and
+  boot stops if any `USABLE` range overlaps them.
+- Bitmap physical allocator over `BootInfo.memory_map`: 4 KiB frames, one bit
+  per frame, 1 = used. Never allocates the kernel, bitmap, framebuffer, ACPI or
+  boot metadata; allocation zeroes the frame and supports contiguous/aligned
+  ranges.
+- Kernel page tables: identity map of 0..4 GiB with 2 MiB huge pages, 4 KiB
+  granularity for the kernel image and the boot stack. `W^X`: `.text` is
+  read/execute, `.rodata` is read-only NX, `.data`/`.bss` are writable NX, and a
+  4 KiB guard page sits below the boot stack.
+- GDT/TSS, per-CPU data via `%gs`, IDT with 256 vectors, exception dispatch
+  (`#BP` returns; other faults panic), double-fault IST stack and `int3` selftest.
+- LAPIC + timer: PIC masked, TSC frequency from CPUID 0x15/0x16 or a PIT
+  calibration, TSC-deadline when available, otherwise LAPIC periodic at 100 Hz;
+  monotonic nanoseconds and calibrated boot-stage timings.
+- AVX2 detection and XSAVE enablement (`CR4.OSXSAVE`, `XCR0=0x7`); the default
+  build requires AVX2, `REQUIRE_AVX2=0` builds a compatibility kernel.
 
 ## Phase 2 - execution model
 
@@ -58,8 +71,12 @@ drivers.
    prerequisite for the capability/ownership-heavy phases (G0.5).
 2. The spec targets x86_64 -> aarch64 -> riscv64, but only a native x86_64
    `crugc` exists. aarch64/riscv64 bring-up requires a cross backend.
-3. Boot performance targets (<250 ms) need a timer calibration and boot-stage
-   instrumentation harness; phase 0 only records a raw TSC delta.
-4. The spec's single 16 MiB headless target is validated by `make run
-   MEMORY_MB=16` once phase 1 memory management lands (the firmware itself
-   needs more in phase 0).
+3. Boot performance targets (<250 ms) now have calibrated stage timings in the
+   boot report, but the gate is not enforced yet; boot currently spends most of
+   its time in PIT-based TSC calibration.
+4. The spec's 16 MiB headless target cannot be met with OVMF: under this
+   QEMU/OVMF pair `MEMORY_MB=16`, `32`, `64` and `128` fail before the loader
+   runs (`No bootable option` or no output), and 256 MiB is not reliable. The
+   kernel itself is small (about 200 KiB load, 128 KiB of that is the PMM
+   bitmap for a 4 GiB cap), so the limit is firmware memory use, not kernel
+   memory use. A leaner boot path or a lower RAM cap is future work.

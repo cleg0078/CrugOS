@@ -13,6 +13,19 @@
 
 typedef void (*kernel_entry_point)(const boot_info *info);
 
+static u64 loader_page_round(u64 size)
+{
+    return (size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+}
+
+static int loader_ranges_overlap(u64 a_base, u64 a_size, u64 b_base, u64 b_size)
+{
+    if (a_size == 0 || b_size == 0) {
+        return 0;
+    }
+    return a_base < b_base + b_size && b_base < a_base + a_size;
+}
+
 static int guid_equal(const efi_guid *a, const efi_guid *b)
 {
     int i;
@@ -173,6 +186,9 @@ EFIAPI efi_status efi_main(efi_handle image, efi_system_table *system_table)
     memory_region *map;
     u64 map_count = 0;
     u64 map_capacity;
+    u64 map_bytes;
+    u64 info_bytes;
+    u64 kernel_bytes;
     void *kernel_data = 0;
     u64 kernel_size = 0;
     framebuffer_info fb;
@@ -214,7 +230,8 @@ EFIAPI efi_status efi_main(efi_handle image, efi_system_table *system_table)
 
     loader_snapshot_memmap();
     map_capacity = g_memmap_size / (g_memmap_desc_size ? g_memmap_desc_size : 48) + 32;
-    map = loader_alloc_pages(map_capacity * sizeof(memory_region));
+    map_bytes = loader_page_round(map_capacity * sizeof(memory_region));
+    map = loader_alloc_pages(map_bytes);
     if (!map) {
         loader_fail("cannot allocate normalized memory map");
     }
@@ -224,25 +241,48 @@ EFIAPI efi_status efi_main(efi_handle image, efi_system_table *system_table)
         loader_fail("cannot normalize memory map");
     }
 
-    info = loader_alloc_pages(sizeof(boot_info));
+    info_bytes = loader_page_round(sizeof(boot_info));
+    info = loader_alloc_pages(info_bytes);
     if (!info) {
         loader_fail("cannot allocate boot info");
     }
     memset(info, 0, sizeof(*info));
 
-    if (loader_memmap_mark(map, &map_count, map_capacity, image_info.base, image_info.size,
+    kernel_bytes = loader_page_round(image_info.size);
+    if (loader_memmap_mark(map, &map_count, map_capacity, image_info.base, kernel_bytes,
                            CRUG_MEM_KERNEL) != 0) {
         loader_fail("cannot mark kernel memory");
     }
     if (fb.base != 0 && fb.size != 0) {
-        if (loader_memmap_mark(map, &map_count, map_capacity, fb.base, fb.size,
-                               CRUG_MEM_FRAMEBUFFER) != 0) {
+        if (loader_memmap_mark(map, &map_count, map_capacity, fb.base,
+                               loader_page_round(fb.size), CRUG_MEM_FRAMEBUFFER) != 0) {
             loader_fail("cannot mark framebuffer memory");
         }
     }
-    if (loader_memmap_mark(map, &map_count, map_capacity, (u64)(uintptr)info, sizeof(boot_info),
+    if (loader_memmap_mark(map, &map_count, map_capacity, (u64)(uintptr)info, info_bytes,
                            CRUG_MEM_BOOTLOADER) != 0) {
         loader_fail("cannot mark boot info memory");
+    }
+    if (loader_memmap_mark(map, &map_count, map_capacity, (u64)(uintptr)map, map_bytes,
+                           CRUG_MEM_BOOTLOADER) != 0) {
+        loader_fail("cannot mark normalized memory map");
+    }
+
+    {
+        u64 i;
+        for (i = 0; i < map_count; i++) {
+            if (map[i].kind != CRUG_MEM_USABLE) {
+                continue;
+            }
+            if (loader_ranges_overlap(map[i].base, map[i].size, image_info.base, kernel_bytes) ||
+                loader_ranges_overlap(map[i].base, map[i].size, (u64)(uintptr)map, map_bytes) ||
+                loader_ranges_overlap(map[i].base, map[i].size, (u64)(uintptr)info, info_bytes) ||
+                (fb.base != 0 &&
+                 loader_ranges_overlap(map[i].base, map[i].size, fb.base,
+                                       loader_page_round(fb.size)))) {
+                loader_fail("memory map invariant violated");
+            }
+        }
     }
 
     info->magic = BOOTINFO_MAGIC;

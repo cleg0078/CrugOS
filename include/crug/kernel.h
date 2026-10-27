@@ -37,6 +37,17 @@ void panic(const char *fmt, ...) CRUG_NORETURN CRUG_PRINTF(1, 2);
 
 void bootinfo_validate(const boot_info *bi);
 u64 bootinfo_usable_bytes(const boot_info *bi);
-void report_boot(const boot_info *bi, u64 tsc_delta);
+
+typedef struct boot_timings {
+    u64 start;
+    u64 pmm;
+    u64 cpu;
+    u64 vm;
+    u64 traps;
+    u64 timer;
+} boot_timings;
+
+void report_boot(const boot_info *bi, const boot_timings *timings);
+void selftest_run(void);
 
 #endif /* CRUG_KERNEL_H */
