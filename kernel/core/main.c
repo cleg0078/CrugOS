@@ -30,7 +30,7 @@ void kernel_main(const boot_info *bi)
     trace("K:console");
 
     console_write("\n");
-    console_write("CrugOS " CRUG_VERSION_STR " (phase 3b) -- Amiga-inspired microkernel bring-up\n");
+    console_write("CrugOS " CRUG_VERSION_STR " (phase 3b2) -- Amiga-inspired microkernel bring-up\n");
     console_write("CRUGOS: hello\n");
     kprintf("CRUGOS: version %s\n", CRUG_VERSION_STR);
 
@@ -76,7 +76,7 @@ void kernel_main(const boot_info *bi)
 
     report_boot(bi, &t);
 
-    kprintf("CRUGOS: phase 3b boot ok\n");
+    kprintf("CRUGOS: phase 3b2 boot ok\n");
     trace("K:exit-ok");
     arch_exit_qemu(0x10);
 }

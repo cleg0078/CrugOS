@@ -27,8 +27,8 @@ sgdisk --clear \
     "$out" >/dev/null
 
 truncate -s "${part_mb}M" "$tmp/part.img"
-mke2fs -q -t ext4 -F -b 1024 -I 256 \
-    -O ^has_journal,^metadata_csum,^64bit,^flex_bg,^dir_index,^resize_inode,^sparse_super,^large_file \
+mke2fs -q -t ext4 -F -b 1024 -I 256 -J size=1 \
+    -O has_journal,^metadata_csum,^64bit,^flex_bg,^dir_index,^resize_inode,^sparse_super,^large_file,^orphan_file \
     "$tmp/part.img"
 printf 'hello from ext4\n' > "$tmp/hello.txt"
 debugfs -w -R "write $tmp/hello.txt /hello.txt" "$tmp/part.img" >/dev/null

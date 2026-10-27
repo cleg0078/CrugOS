@@ -5,6 +5,8 @@
 
 #define EXT4_MOUNT_RW 0x0001u
 
+struct journal;
+
 struct ext4_fs {
     struct block_device *bd;
     u32 block_size;
@@ -28,6 +30,8 @@ struct ext4_fs {
     u32 next_ino_hint;
     u32 next_block_hint;
     u8 *gdt;
+    void *journal;
+    u16 state;
 };
 
 int ext4_mount(struct ext4_fs *fs, struct block_device *bd, u32 flags);

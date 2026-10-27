@@ -4,7 +4,9 @@ Phase 3A is a vertical slice: a real GPT disk with an ext4 filesystem is read
 through a PCI virtio-blk device during boot. Phase 3B-1 adds a write path and
 verifies it by creating, rewriting, renaming, truncating and deleting files in a
 scratch directory, then checking the resulting filesystem with e2fsck on the host.
-RAID, encryption and journal replay are still later phases.
+Phase 3B-2 adds JBD2 journal replay and ordered metadata journaling, and proves
+recovery at mount time. RAID, encryption and metadata checksums are later
+phases.
 
 ```
 virtio-blk-pci (legacy I/O BAR)
@@ -26,9 +28,11 @@ CRUGOS: block ready (<device>, <sectors> sectors)
 CRUGOS: gpt ready
 CRUGOS: ext4 ready
 CRUGOS: ext4 /hello.txt: hello from ext4
+CRUGOS: journal ready
 CRUGOS: storage ready
 ...
 CRUGOS: writable storage ok
+CRUGOS: journal selftest ok (<n> blocks recovered)
 ```
 
 A missing virtio device, an unusable GPT or an ext4 mount failure panics
@@ -105,17 +109,22 @@ is created.
 - `FILETYPE`, `EXTENTS`, `64BIT` and `FLEX_BG` incompatible features;
 - `SPARSE_SUPER`, `LARGE_FILE`, `HUGE_FILE`, `DIR_NLINK` and `EXTRA_ISIZE`
   read-only-compatible features;
-- a clean filesystem: `s_state` must be `EXT2_VALID_FS` (1), because a
-  read-only mount cannot replay the journal;
+- a clean filesystem, or a dirty one whose journal can be replayed; a read-only
+  mount is refused while the journal is dirty, while `EXT4_MOUNT_RW` replays
+  it first;
 - extent trees of depth up to 5, plus the legacy 12 direct blocks and single
   indirect block;
 - linear directories; `DIR_INDEX` (htree) is rejected.
 
 Unsupported features are rejected at mount time rather than misread:
-`META_BG`, `INLINE_DATA`, `ENCRYPT`, `METADATA_CSUM`, the journal recovery
-flag and any unknown incompatible or read-only-compatible bit. There is no
-journal replay and no triple-indirect or double-indirect extent mapping beyond
-the single indirect block.
+`META_BG`, `INLINE_DATA`, `ENCRYPT`, `METADATA_CSUM`, `RO_COMPAT_RECOVER`
+without a journal and any unknown incompatible bit. There is no triple-indirect
+or double-indirect extent mapping beyond the single indirect block.
+
+When `COMPAT_HAS_JOURNAL` is set, `ext4_mount()` opens the journal before it
+loads the group descriptor table. A read-only mount fails if `s_start` is
+non-zero; a read-write mount replays the journal first. A non-journaled
+filesystem still requires the clean `s_state == 1` marker.
 
 The directory walk copies entries into a caller buffer and stops on a
 malformed record. `ext4_read_file()` allocates one block-sized scratch buffer
@@ -136,13 +145,19 @@ table into the heap and allows these operations:
 | `ext4_unlink(path)` | removes the directory entry, decrements the parent link count, frees blocks and the inode |
 | `ext4_rmdir(path)` | requires an empty directory, removes it and adjusts the parent link and used-directory counts |
 | `ext4_rename(old, new)` | moves an entry between directories, updating both parents; replacing a target is not supported |
-| `ext4_fsync(fs)` | issues a virtio flush and returns any device error |
+| `ext4_fsync(fs)` | commits the current journal transaction and issues a virtio flush |
 
 Writes use the extent tree only. A newly created file has an inline extent root;
 the first overflow allocates one leaf block and turns the root into a depth-1
 index (no depth-2 growth yet). The legacy direct/single-indirect mapping is
-read-only. There is no journal (JBD2), no checksum metadata and no delayed
-allocation.
+read-only. There is no checksum metadata and no delayed allocation.
+
+Every public write call runs inside one journal transaction: the wrapper calls
+`journal_begin()`, runs the existing `*_impl` operation, then commits. Nested
+operations (for example `ext4_rename()` calling `unlink`/`rmdir`) share the
+same transaction through the journal depth counter. File data blocks bypass the
+journal and are written directly; all metadata blocks (inode, bitmap, group
+descriptor, directory and extent leaf) are queued in the journal.
 
 ### Allocation correctness details
 
@@ -157,9 +172,50 @@ allocation.
   every directory add or remove writes the parent inode so link counts and
   sizes survive a remount.
 - Group descriptor free counters and the superblock free counts/state are
-  written back; `ext4_umount()` marks the filesystem clean and flushes it.
+  written back; `ext4_umount()` marks the filesystem clean and flushes it
+  after the final journal commit succeeds. If that commit fails the
+  superblock stays dirty so the next mount replays or discards the journal.
   Mounting read-only after a clean unmount passes the same clean-state check
   the boot path uses.
+
+## JBD2 journal
+
+The journal is the standard JBD2 JBD2_V2 layout stored in inode 8 and mapped
+through the normal extent path. All journal fields are big-endian.
+
+| Item | Value |
+| --- | --- |
+| Superblock | block 0, magic `0xC03B3998`, type 4 |
+| Descriptor block | type 1, tags of block number + flags + 16-byte UUID |
+| Commit block | type 2, same sequence as the descriptor |
+| Sequence | superblock bytes 24..27; start block bytes 28..31 |
+| Feature flags | 0, so no journal checksums and no 64-bit block numbers |
+
+`journal_open()` validates the magic, block size, `maxlen`, `first` and
+start range, then replays a dirty log. Recovery reads the descriptor at
+`s_start`, parses tags until `JBD2_FLAG_LAST_TAG`, validates the following
+commit block *before* writing any data, applies every data block with raw
+device writes, advances to the next sequence, and finally clears `s_start`.
+An incomplete or corrupt transaction is not applied; the journal is cleared so
+the filesystem can be mounted again.
+
+The writer (`journal_commit`) is ordered:
+
+1. flush the device so file data blocks are durable;
+2. set `s_start = first` and `s_sequence` in the journal superblock;
+3. write one descriptor block, the queued metadata blocks and a commit block;
+4. flush, then checkpoint the metadata to its final location;
+5. flush, clear `s_start` and increment `s_sequence`.
+
+A transaction is limited to one descriptor: at most `(block_size - 12) / 24`
+metadata blocks (42 for 1 KiB blocks). This keeps replay's one-descriptor
+validation simple; operations that would exceed it fail instead of emitting a
+transaction the replay path cannot drain.
+
+`CRUGOS: journal selftest ok` is printed after the write self-test queues a
+dirty data block, unmounts *without* clearing the journal, remounts read-write
+and verifies that `journal_open()` recovered the block. The host `e2fsck`
+gate then confirms the resulting filesystem is clean.
 
 ## Test disk
 
@@ -168,8 +224,9 @@ by default, `DISK_SIZE_MB` overrides):
 
 - GPT, one partition at LBA 2048..26623 (12 MiB), type `8300`, name
   `crugroot`;
-- ext4 with 1 KiB blocks, `^has_journal`, `^metadata_csum`, `^64bit`,
-  `^flex_bg`, `^dir_index`, `^resize_inode`, `^sparse_super`, `^large_file`;
+- ext4 with 1 KiB blocks, `has_journal` with a 1 MiB journal (`-J size=1`),
+  `^metadata_csum`, `^64bit`, `^flex_bg`, `^dir_index`, `^resize_inode`,
+  `^sparse_super`, `^large_file`, `^orphan_file`;
 - `/hello.txt` containing `hello from ext4`.
 
 `make run` and `make test` depend on `disk` and pass the image as `vda`.
@@ -177,7 +234,9 @@ by default, `DISK_SIZE_MB` overrides):
 then runs `scripts/check-disk.py`. The checker extracts the `crugroot`
 partition, runs `e2fsck -fn`, verifies `/hello.txt`, and verifies that the
 5000-byte pattern written by the kernel survived as a 1000-byte
-`/selftest/b.txt` after truncation and a read-only remount.
+`/selftest/b.txt` after truncation and a read-only remount. It also proves the
+journal was checkpointed and cleared: a leftover dirty journal makes
+`e2fsck` fail the gate.
 
 To inspect the partition on the host:
 
@@ -203,6 +262,12 @@ e2fsck -fn /tmp/part.img
   log contains the individual step that returned the error. Run
   `scripts/check-disk.py` on the image to see whether e2fsck or the file
   content check failed.
+- `storage: journal selftest failed`: the dirty-journal replay did not restore
+  the block, or the remount could not replay it. A read-only mount of a dirty
+  journal is refused by design; use `EXT4_MOUNT_RW` to recover.
+- A write returning `-1` after a large metadata operation: the transaction
+  tried to queue more metadata blocks than a single descriptor can hold. Split
+  the operation into smaller writes.
 - A timeout in `virtio_submit()` means the device never completed a request;
   QEMU was probably given a modern-only device or a wrong disk image.
 
@@ -213,8 +278,10 @@ e2fsck -fn /tmp/part.img
   no DMA address translation (identity map only).
 - GPT only: no MBR boot disks, no backup-table repair and no partition
   creation.
-- ext4 has no journal replay, no metadata checksums, no directory index and no
-  delayed allocation. The mount is refused if the filesystem is not clean.
+- ext4 has JBD2 replay and ordered metadata journaling, but no journal
+  checksums, no metadata checksums, no directory index and no delayed
+  allocation. Transactions use one descriptor and are not wrapped by the
+  writer; a transaction larger than the descriptor capacity fails.
 - The write path handles at most one extent-tree level and does not replace an
   existing rename target; hard links, symlinks, ownership and extended
   attributes are not implemented.

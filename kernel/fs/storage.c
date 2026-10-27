@@ -3,8 +3,10 @@
 #include <crug/virtio.h>
 #include <crug/gpt.h>
 #include <crug/ext4.h>
+#include <crug/journal.h>
 #include <crug/string.h>
 #include <crug/kernel.h>
+#include "ext4_internal.h"
 
 static struct ext4_fs g_root_fs;
 static struct block_device *g_root_part;
@@ -59,6 +61,8 @@ int storage_init(void)
         return -1;
     }
     kprintf("CRUGOS: ext4 ready\n");
+    if (g_root_fs.journal)
+        kprintf("CRUGOS: journal ready\n");
     memset(g_hello, 0, sizeof(g_hello));
     if (ext4_read_file(&g_root_fs, "/hello.txt", g_hello,
                        sizeof(g_hello) - 1, &g_hello_size) != 0) {
@@ -83,6 +87,46 @@ static int storage_cleanup(struct ext4_fs *fs)
     ext4_unlink(fs, "/selftest/tmp.txt");
     ext4_rmdir(fs, "/selftest");
     return 0;
+}
+
+static int storage_journal_test(struct ext4_fs *fs)
+{
+    static u8 original[1024];
+    static u8 dirty[1024];
+    static u8 verify[1024];
+    u64 phys = 0;
+    u32 i;
+
+    if (fs->block_size != sizeof(original))
+        return 0;
+    for (i = 0; i < sizeof(original); i++) {
+        original[i] = (u8)((i * 11u + 5u) & 0xFFu);
+        dirty[i] = (u8)(~original[i]);
+    }
+    if (ext4_create(fs, "/selftest/j.bin", 0644) != 0)
+        return 0;
+    if (ext4_write_file(fs, "/selftest/j.bin", original, sizeof(original)) != 0)
+        return 0;
+    if (ext4_fsync(fs) != 0)
+        return 0;
+    if (ext4_file_block(fs, "/selftest/j.bin", 0, &phys) != 0)
+        return 0;
+    if (journal_test_dirty(fs, phys, dirty, sizeof(dirty)) != 0)
+        return 0;
+    if (ext4_umount(fs) != 0)
+        return 0;
+    if (ext4_mount(fs, g_root_part, EXT4_MOUNT_RW) != 0)
+        return 0;
+    if (block_read(fs->bd, phys * fs->sectors_per_block,
+                   fs->sectors_per_block, verify) != 0)
+        return 0;
+    if (memcmp(verify, dirty, sizeof(dirty)) != 0)
+        return 0;
+    if (ext4_unlink(fs, "/selftest/j.bin") != 0)
+        return 0;
+    kprintf("CRUGOS: journal selftest ok (%llu blocks recovered)\n",
+            (unsigned long long)journal_recovered_blocks(fs));
+    return 1;
 }
 
 static int storage_rw_test(void)
@@ -125,6 +169,8 @@ static int storage_rw_test(void)
     if (ext4_unlink(&fs, "/selftest/tmp.txt") != 0)
         goto fail;
     if (ext4_lookup(&fs, "/selftest/tmp.txt", &ino) == 0)
+        goto fail;
+    if (!storage_journal_test(&fs))
         goto fail;
     if (ext4_umount(&fs) != 0) {
         kprintf("storage: writable unmount failed\n");

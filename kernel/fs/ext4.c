@@ -3,11 +3,12 @@
 #include <crug/heap.h>
 #include <crug/bitmap.h>
 #include <crug/kernel.h>
+#include <crug/journal.h>
+#include "ext4_inode.h"
+#include "ext4_internal.h"
 
 #define EXT4_MAGIC 0xEF53u
-#define EXT4_EXTENTS_FL 0x00080000u
 #define EXT4_EXT_MAGIC 0xF30Au
-#define EXT4_ROOT_INO 2u
 
 #define EXT4_FEATURE_COMPAT_HAS_JOURNAL 0x0004u
 #define EXT4_FEATURE_COMPAT_DIR_INDEX 0x0040u
@@ -21,49 +22,6 @@
 #define EXT4_FEATURE_RO_HUGE_FILE 0x0008u
 #define EXT4_FEATURE_RO_DIR_NLINK 0x0020u
 #define EXT4_FEATURE_RO_EXTRA_ISIZE 0x0040u
-
-struct ext4_inode {
-    u16 mode;
-    u16 uid;
-    u32 size_lo;
-    u32 atime;
-    u32 ctime;
-    u32 mtime;
-    u32 dtime;
-    u16 gid;
-    u16 links_count;
-    u32 blocks_lo;
-    u32 flags;
-    u32 osd1;
-    u32 block[15];
-    u32 generation;
-    u32 file_acl_lo;
-    u32 size_high;
-    u32 obso_faddr;
-    u8 osd2[12];
-} __attribute__((packed));
-
-struct ext4_extent_header {
-    u16 magic;
-    u16 entries;
-    u16 max;
-    u16 depth;
-    u32 generation;
-} __attribute__((packed));
-
-struct ext4_extent {
-    u32 ee_block;
-    u16 ee_len;
-    u16 ee_start_hi;
-    u32 ee_start_lo;
-} __attribute__((packed));
-
-struct ext4_extent_idx {
-    u32 ei_block;
-    u32 ei_leaf_lo;
-    u16 ei_leaf_hi;
-    u16 ei_unused;
-} __attribute__((packed));
 
 static u16 rd16(const u8 *p)
 {
@@ -80,8 +38,18 @@ static int read_block(struct ext4_fs *fs, u64 block, void *buf)
 {
     if (block == 0)
         return -1;
+    if (fs->journal && journal_lookup(fs, block, buf))
+        return 0;
     return block_read(fs->bd, block * fs->sectors_per_block,
                       fs->sectors_per_block, buf);
+}
+
+static int write_data_block(struct ext4_fs *fs, u64 block, const void *buf)
+{
+    if (block == 0)
+        return -1;
+    return block_write(fs->bd, block * fs->sectors_per_block,
+                       fs->sectors_per_block, buf);
 }
 
 static int read_group_desc(struct ext4_fs *fs, u32 group, u8 *desc)
@@ -256,6 +224,58 @@ static int bmap(struct ext4_fs *fs, const struct ext4_inode *inode, u32 lblk,
     return ret;
 }
 
+int ext4_raw_read_block(struct ext4_fs *fs, u64 block, void *buf)
+{
+    if (!fs || block == 0 || block >= fs->blocks_count)
+        return -1;
+    return block_read(fs->bd, block * fs->sectors_per_block,
+                      fs->sectors_per_block, buf);
+}
+
+int ext4_raw_write_block(struct ext4_fs *fs, u64 block, const void *buf)
+{
+    if (!fs || block == 0 || block >= fs->blocks_count)
+        return -1;
+    return block_write(fs->bd, block * fs->sectors_per_block,
+                       fs->sectors_per_block, buf);
+}
+
+int ext4_journal_map_block(struct ext4_fs *fs, u64 logical, u64 *phys)
+{
+    struct ext4_inode inode;
+    int ret;
+
+    if (!fs || !phys || read_inode(fs, 8, &inode) != 0)
+        return -1;
+    ret = bmap(fs, &inode, (u32)logical, phys);
+    return ret == 0 ? 0 : -1;
+}
+
+u64 ext4_journal_block_count(struct ext4_fs *fs)
+{
+    struct ext4_inode inode;
+    u64 size;
+
+    if (!fs || read_inode(fs, 8, &inode) != 0)
+        return 0;
+    size = (u64)inode.size_lo | ((u64)inode.size_high << 32);
+    return size / fs->block_size;
+}
+
+int ext4_file_block(struct ext4_fs *fs, const char *path, u32 lblk, u64 *phys)
+{
+    struct ext4_inode inode;
+    u32 ino;
+    int ret;
+
+    if (!fs || !path || !phys || ext4_lookup(fs, path, &ino) != 0)
+        return -1;
+    if (read_inode(fs, ino, &inode) != 0)
+        return -1;
+    ret = bmap(fs, &inode, lblk, phys);
+    return ret == 0 ? 0 : -1;
+}
+
 static int dir_walk(struct ext4_fs *fs, u32 ino, const char *target,
                     char *list, usize cap, usize *used)
 {
@@ -354,10 +374,11 @@ static int ext4_probe(struct ext4_fs *fs, struct block_device *bd)
         return -1;
     if (rd16(sb + 0x38) != EXT4_MAGIC)
         return -1;
-    /* EXT2_VALID_FS: refuse an unclean or orphaned filesystem. A
-       read-only mount cannot replay the journal. */
+    /* EXT2_VALID_FS: a clean filesystem has state 1. A journaled
+       filesystem may be state 0 after a crash; mount recovery repairs
+       it before the filesystem is used. */
     state = rd16(sb + 0x3A);
-    if (state != 1)
+    if (state != 1 && state != 0)
         return -1;
     log_block = rd32(sb + 0x18);
     if (log_block > 2)
@@ -406,10 +427,11 @@ static int ext4_probe(struct ext4_fs *fs, struct block_device *bd)
     ro = fs->feature_ro_compat;
     if (ro & ~(EXT4_FEATURE_RO_SPARSE_SUPER | EXT4_FEATURE_RO_LARGE_FILE |
                EXT4_FEATURE_RO_HUGE_FILE | EXT4_FEATURE_RO_DIR_NLINK |
-               EXT4_FEATURE_RO_EXTRA_ISIZE))
+               EXT4_FEATURE_RO_EXTRA_ISIZE | EXT4_FEATURE_RO_RECOVER))
         return -1;
-    if (ro & EXT4_FEATURE_RO_RECOVER)
+    if ((ro & EXT4_FEATURE_RO_RECOVER) && !(compat & EXT4_FEATURE_COMPAT_HAS_JOURNAL))
         return -1;
+    fs->state = state;
     fs->groups = (fs->blocks_count + fs->blocks_per_group - 1) /
                  fs->blocks_per_group;
     fs->gdt_block = (u64)fs->first_data_block + 1;
@@ -423,6 +445,7 @@ static int ext4_probe(struct ext4_fs *fs, struct block_device *bd)
 static void ext4_release(struct ext4_fs *fs)
 {
     if (fs) {
+        journal_close(fs);
         kfree(fs->gdt);
         memset(fs, 0, sizeof(*fs));
     }
@@ -566,8 +589,9 @@ static int write_block(struct ext4_fs *fs, u64 block, const void *buf)
 {
     if (block == 0)
         return -1;
-    return block_write(fs->bd, block * fs->sectors_per_block,
-                       fs->sectors_per_block, buf);
+    if (journal_is_active(fs))
+        return journal_queue(fs, block, buf);
+    return write_data_block(fs, block, buf);
 }
 
 static int read_super(struct ext4_fs *fs, u8 *sb)
@@ -797,7 +821,7 @@ static int alloc_block(struct ext4_fs *fs, u64 *out)
             u8 *zero = (u8 *)kzalloc(fs->block_size);
             if (!zero)
                 return -1;
-            if (write_block(fs, block, zero) != 0) {
+            if (write_data_block(fs, block, zero) != 0) {
                 kfree(zero);
                 return -1;
             }
@@ -1221,7 +1245,7 @@ static int truncate_inode(struct ext4_fs *fs, u32 ino,
             return -1;
         }
         memset(buf + off, 0, fs->block_size - off);
-        if (write_block(fs, phys, buf) != 0) {
+        if (write_data_block(fs, phys, buf) != 0) {
             kfree(buf);
             return -1;
         }
@@ -1232,7 +1256,7 @@ static int truncate_inode(struct ext4_fs *fs, u32 ino,
     return write_inode(fs, ino, inode);
 }
 
-int ext4_truncate(struct ext4_fs *fs, const char *path, u64 size)
+static int ext4_truncate_impl(struct ext4_fs *fs, const char *path, u64 size)
 {
     struct ext4_inode inode;
     u32 ino;
@@ -1560,8 +1584,12 @@ int ext4_mount(struct ext4_fs *fs, struct block_device *bd, u32 flags)
     if (ext4_probe(fs, bd) != 0)
         return -1;
     fs->flags = flags;
-    if ((flags & EXT4_MOUNT_RW) &&
-        (fs->feature_compat & EXT4_FEATURE_COMPAT_HAS_JOURNAL)) {
+    if (fs->feature_compat & EXT4_FEATURE_COMPAT_HAS_JOURNAL) {
+        if (journal_open(fs, (flags & EXT4_MOUNT_RW) != 0) != 0) {
+            ext4_release(fs);
+            return -1;
+        }
+    } else if (fs->state != 1) {
         ext4_release(fs);
         return -1;
     }
@@ -1589,16 +1617,24 @@ int ext4_umount(struct ext4_fs *fs)
     if (!fs)
         return -1;
     if (fs->flags & EXT4_MOUNT_RW) {
-        if (write_super_state(fs, 1) != 0)
+        if (journal_commit(fs) != 0) {
+            /* Keep the superblock marked dirty so the next mount replays
+               or discards the journal instead of trusting the on-disk
+               metadata. */
             ret = -1;
-        if (block_flush(fs->bd) != 0)
-            ret = -1;
+        } else {
+            if (write_super_state(fs, 1) != 0)
+                ret = -1;
+            if (block_flush(fs->bd) != 0)
+                ret = -1;
+        }
     }
+    journal_close(fs);
     ext4_release(fs);
     return ret;
 }
 
-int ext4_create(struct ext4_fs *fs, const char *path, u16 mode)
+static int ext4_create_impl(struct ext4_fs *fs, const char *path, u16 mode)
 {
     char parent_path[256];
     char name[256];
@@ -1638,7 +1674,7 @@ int ext4_create(struct ext4_fs *fs, const char *path, u16 mode)
     return 0;
 }
 
-int ext4_mkdir(struct ext4_fs *fs, const char *path, u16 mode)
+static int ext4_mkdir_impl(struct ext4_fs *fs, const char *path, u16 mode)
 {
     char parent_path[256];
     char name[256];
@@ -1720,8 +1756,8 @@ int ext4_mkdir(struct ext4_fs *fs, const char *path, u16 mode)
     return 0;
 }
 
-int ext4_write_file(struct ext4_fs *fs, const char *path, const void *buf,
-                    usize len)
+static int ext4_write_file_impl(struct ext4_fs *fs, const char *path,
+                               const void *buf, usize len)
 {
     struct ext4_inode inode;
     u32 ino;
@@ -1771,7 +1807,7 @@ int ext4_write_file(struct ext4_fs *fs, const char *path, const void *buf,
         }
         memset(block, 0, fs->block_size);
         memcpy(block, (const u8 *)buf + off, chunk);
-        if (write_block(fs, phys, block) != 0) {
+        if (write_data_block(fs, phys, block) != 0) {
             kfree(block);
             return -1;
         }
@@ -1782,7 +1818,7 @@ int ext4_write_file(struct ext4_fs *fs, const char *path, const void *buf,
     return write_inode(fs, ino, &inode);
 }
 
-int ext4_unlink(struct ext4_fs *fs, const char *path)
+static int ext4_unlink_impl(struct ext4_fs *fs, const char *path)
 {
     char parent_path[256];
     char name[256];
@@ -1817,7 +1853,7 @@ int ext4_unlink(struct ext4_fs *fs, const char *path)
     return free_inode(fs, ino);
 }
 
-int ext4_rmdir(struct ext4_fs *fs, const char *path)
+static int ext4_rmdir_impl(struct ext4_fs *fs, const char *path)
 {
     char parent_path[256];
     char name[256];
@@ -1857,7 +1893,8 @@ int ext4_rmdir(struct ext4_fs *fs, const char *path)
     return adjust_dirs_count(fs, ino, -1);
 }
 
-int ext4_rename(struct ext4_fs *fs, const char *oldpath, const char *newpath)
+static int ext4_rename_impl(struct ext4_fs *fs, const char *oldpath,
+                            const char *newpath)
 {
     char old_parent_path[256];
     char new_parent_path[256];
@@ -1944,5 +1981,85 @@ int ext4_fsync(struct ext4_fs *fs)
 {
     if (!fs || !fs->bd)
         return -1;
+    if (journal_commit(fs) != 0)
+        return -1;
     return block_flush(fs->bd);
+}
+
+static int ext4_txn_end(struct ext4_fs *fs, int ret)
+{
+    if (journal_commit(fs) != 0)
+        return -1;
+    return ret;
+}
+
+int ext4_create(struct ext4_fs *fs, const char *path, u16 mode)
+{
+    int ret;
+
+    if (journal_begin(fs) != 0)
+        return -1;
+    ret = ext4_create_impl(fs, path, mode);
+    return ext4_txn_end(fs, ret);
+}
+
+int ext4_mkdir(struct ext4_fs *fs, const char *path, u16 mode)
+{
+    int ret;
+
+    if (journal_begin(fs) != 0)
+        return -1;
+    ret = ext4_mkdir_impl(fs, path, mode);
+    return ext4_txn_end(fs, ret);
+}
+
+int ext4_write_file(struct ext4_fs *fs, const char *path, const void *buf,
+                    usize len)
+{
+    int ret;
+
+    if (journal_begin(fs) != 0)
+        return -1;
+    ret = ext4_write_file_impl(fs, path, buf, len);
+    return ext4_txn_end(fs, ret);
+}
+
+int ext4_truncate(struct ext4_fs *fs, const char *path, u64 size)
+{
+    int ret;
+
+    if (journal_begin(fs) != 0)
+        return -1;
+    ret = ext4_truncate_impl(fs, path, size);
+    return ext4_txn_end(fs, ret);
+}
+
+int ext4_unlink(struct ext4_fs *fs, const char *path)
+{
+    int ret;
+
+    if (journal_begin(fs) != 0)
+        return -1;
+    ret = ext4_unlink_impl(fs, path);
+    return ext4_txn_end(fs, ret);
+}
+
+int ext4_rmdir(struct ext4_fs *fs, const char *path)
+{
+    int ret;
+
+    if (journal_begin(fs) != 0)
+        return -1;
+    ret = ext4_rmdir_impl(fs, path);
+    return ext4_txn_end(fs, ret);
+}
+
+int ext4_rename(struct ext4_fs *fs, const char *oldpath, const char *newpath)
+{
+    int ret;
+
+    if (journal_begin(fs) != 0)
+        return -1;
+    ret = ext4_rename_impl(fs, oldpath, newpath);
+    return ext4_txn_end(fs, ret);
 }
