@@ -5,6 +5,8 @@
 #   make test       boot and verify the serial markers / exit code
 #   make test-host  build and run host unit tests
 #   make test-compat  boot a compatibility build (no AVX2 required)
+#   make disk       build the GPT/ext4 test disk
+#   make check-disk run e2fsck and file checks on the test disk
 #   make size       enforce the kernel size budget
 #   make check-efi  validate the loader as a PE32+ EFI application
 #   make repro      verify the build is bit-for-bit reproducible
@@ -93,7 +95,7 @@ LOADER_SOURCES := $(wildcard boot/efi/*.c)
 LOADER_OBJECTS := $(patsubst %,$(OBJ)/%.o,$(basename $(LOADER_SOURCES)))
 LOADER_DEPS := $(LOADER_OBJECTS:.o=.d)
 
-.PHONY: all kernel loader esp disk run test test-compat size check-efi repro test-host \
+.PHONY: all kernel loader esp disk run test test-compat check-disk size check-efi repro test-host \
         preflight version clean distclean help
 
 all: esp
@@ -154,11 +156,17 @@ run: esp disk
 		EXIT_CODE_FILE=$(abspath $(QEMU_EXIT)) QEMU_CPU="$(QEMU_CPU)" \
 		DISK_IMG=$(abspath $(DISK_IMG)) scripts/run-qemu.sh
 
-test: run
+test:
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(MAKE) --no-print-directory run
 	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)"
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 
 test-compat:
 	$(Q)$(MAKE) test BUILD_ROOT=build/compat REQUIRE_AVX2=0 QEMU_CPU=qemu64 EXPECT_AVX2=no
+
+check-disk: disk
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 
 size: $(KERNEL)
 	$(Q)scripts/size-report.sh $(KERNEL)
@@ -188,6 +196,6 @@ distclean: clean
 	@echo "  RM    build"
 
 help:
-	@sed -n '2,14p' Makefile | sed 's/^# \{0,1\}//'
+	@sed -n '2,16p' Makefile | sed 's/^# \{0,1\}//'
 
 -include $(KERNEL_DEPS) $(LOADER_DEPS)

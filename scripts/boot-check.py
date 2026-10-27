@@ -21,8 +21,9 @@ REQUIRED_MARKERS = (
     "CRUGOS: gpt ready",
     "CRUGOS: ext4 ready",
     "CRUGOS: storage ready",
+    "CRUGOS: writable storage ok",
     "CRUGOS: selftest ok",
-    "CRUGOS: phase 3 boot ok",
+    "CRUGOS: phase 3b boot ok",
 )
 VERSION_PATTERN = re.compile(r"CRUGOS: version (\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?)")
 SUCCESS_EXIT = 33  # isa-debug-exit: port 0xf4 value 0x10 -> (0x10 << 1) | 1

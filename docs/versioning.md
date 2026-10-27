@@ -1,8 +1,8 @@
 # Versioning
 
 CrugOS uses [Semantic Versioning 2.0.0](https://semver.org/) with annotated
-`vMAJOR.MINOR.PATCH` Git tags. The current release is `v0.4.0` (phase 3A:
-read-only storage stack).
+`vMAJOR.MINOR.PATCH` Git tags. The current release is `v0.5.0` (phase 3B-1:
+writable ext4 with an on-disk consistency gate).
 
 ## Source of truth
 
@@ -47,6 +47,7 @@ patch.
 vi VERSION                       # pick the new SemVer
 make distclean && make test      # clean build, boot gate, guest version check
 make size check-efi test-host repro
+make check-disk                  # e2fsck + persisted files on the test disk
 git add -A && git commit -m "release: vX.Y.Z"
 git tag -a vX.Y.Z -m "CrugOS vX.Y.Z"
 git push origin main vX.Y.Z
@@ -60,3 +61,4 @@ git push origin main vX.Y.Z
 | `v0.2.0` | 2026-10-27 | phase 1: bitmap physical allocator, identity page tables with W^X, GDT/IDT and exceptions, LAPIC timer and TSC calibration, AVX2 baseline; BootInfo stays v1 |
 | `v0.3.0` | 2026-10-27 | phase 2: kernel heap, threads and scheduling classes, handles, MsgPort IPC, single `int 0x80` syscall dispatcher; BootInfo stays v1 |
 | `v0.4.0` | 2026-10-27 | phase 3A: block layer, legacy virtio-blk, GPT, read-only ext4, generated test disk; BootInfo stays v1 and the kernel ABI is unchanged |
+| `v0.5.0` | 2026-10-27 | phase 3B-1: writable ext4 (create/mkdir/write/truncate/unlink/rmdir/rename/fsync), virtio flush, boot write self-test and `e2fsck` disk gate; BootInfo stays v1 and the kernel ABI is unchanged |

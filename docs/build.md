@@ -1,6 +1,6 @@
 # Building CrugOS
 
-This document describes the phase 3 build system: how the kernel, the UEFI
+This document describes the phase 3B-1 build system: how the kernel, the UEFI
 loader and the test disk image are built, which invariants the link must
 preserve, and how to diagnose the failure modes that are specific to this
 toolchain.
@@ -14,7 +14,7 @@ toolchain.
 | `qemu-system-x86_64` | boot test | 10.x, TCG works without `/dev/kvm` |
 | OVMF | UEFI firmware | `/usr/share/OVMF/OVMF_CODE_4M.fd` + `OVMF_VARS_4M.fd` |
 | `python3` | boot/PE checks | standard library only |
-| `sgdisk`, `mke2fs`, `debugfs`, `dd`, `truncate` | test disk | only for `make disk`; `mke2fs`/`debugfs` come from e2fsprogs |
+| `sgdisk`, `mke2fs`, `debugfs`, `e2fsck`, `dd`, `truncate` | test disk | only for `make disk` / `make check-disk`; e2fsprogs |
 
 Run `make preflight` to check all of the above.
 
@@ -23,10 +23,11 @@ Run `make preflight` to check all of the above.
 ```
 make             # kernel.elf, BOOTX64.EFI and the ESP tree
 make run         # boot the ESP tree under QEMU + OVMF
-make test        # boot and verify serial markers, guest version, AVX2 + exit status
+make test        # boot, verify markers/version/AVX2, then e2fsck the disk
 make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
 make test-host   # host unit tests for string/printf/ELF/bitmap/VM math/handles
 make disk        # build the GPT/ext4 test disk at build/<arch>/disk.img
+make check-disk  # e2fsck and persisted-file checks on the current disk
 make size        # kernel size budget (<1 MiB stretch, <2 MiB hard)
 make check-efi   # PE32+ structure checks on the loader
 make repro       # two independent builds must be byte-identical
@@ -147,9 +148,14 @@ containing `/hello.txt`. It requires `sgdisk`, `mke2fs`, `debugfs`, `dd` and
 ```
 
 `make run` and `make test` depend on `disk`, so the first boot builds the image.
-The kernel mounts it read-only; there is no write path and no journal. The
-supported ext4 subset, on-disk layout and failure modes are documented in
-[storage.md](storage.md).
+The kernel mounts it read-only during `storage_init`, then the boot self-test
+remounts it read-write, creates and mutates files under `/selftest`, unmounts
+cleanly and remounts read-only to verify the persisted data. `make test`
+regenerates the image, boots the kernel and then runs
+[scripts/check-disk.py](../scripts/check-disk.py), which extracts the partition
+and requires `e2fsck -fn` to be clean. `make check-disk` runs only that disk
+check on the existing image. The supported ext4 subset, write path, on-disk
+layout and failure modes are documented in [storage.md](storage.md).
 
 ## Reproducibility
 
@@ -180,6 +186,14 @@ randomisation that leaks into the output will fail this target.
   `MEMORY_MB=512`.
 - **`virtio : queue setup failed`**: the disk was attached as a modern-only
   device or without `disable-modern=on`; use the QEMU flags above.
+- **`storage: writable test failed`**: the in-kernel write path failed. The
+  serial log names the step; `make check-disk` shows whether the on-disk state
+  or the file contents are wrong. A bitmap-offset bug shows up as
+  `Multiply-claimed block(s)` in `e2fsck`.
+- **`e2fsck` reports bitmap differences or wrong link counts**: block bitmap bits
+  are relative to the group's first block (`s_first_data_block + group *
+  blocks_per_group`), not absolute block numbers. Check the allocation code in
+  `kernel/fs/ext4.c`.
 - **`storage: ext4 mount failed`**: the image has an unsupported feature or is
   not clean. Extract the partition with `dd` and inspect it with
   `dumpe2fs -h`; `make disk` regenerates a known-good image.

@@ -11,7 +11,10 @@
 #define VIRTIO_STATUS_FEATURES_OK 8u
 #define VIRTIO_STATUS_FAILED      128u
 
-#define VIRTIO_BLK_T_IN  0u
-#define VIRTIO_BLK_T_OUT 1u
+#define VIRTIO_BLK_T_IN    0u
+#define VIRTIO_BLK_T_OUT   1u
+#define VIRTIO_BLK_T_FLUSH 4u
+
+#define VIRTIO_BLK_F_FLUSH 9u
 
 int virtio_blk_init(void);

@@ -4,7 +4,7 @@ set -euo pipefail
 
 out=${1:?usage: mkdisk.sh OUTPUT [SIZE_MB]}
 size_mb=${2:-16}
-part_sectors=12288
+part_sectors=24576
 part_mb=$((part_sectors / 2048))
 
 for tool in truncate sgdisk mke2fs debugfs dd; do

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify the toolchain needed to build and boot CrugOS phase 0.
+# Verify the toolchain needed to build, boot and check CrugOS.
 set -uo pipefail
 
 failures=0
@@ -30,6 +30,12 @@ require ld
 require python3
 require qemu-system-x86_64
 require objcopy
+require sgdisk
+require mke2fs
+require debugfs
+require e2fsck
+require truncate
+require dd
 optional size
 optional sha256sum
 

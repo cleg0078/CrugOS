@@ -8,10 +8,10 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 3A storage stack (`v0.4.0`)
+## Status: phase 3B-1 writable ext4 (`v0.5.0`)
 
-Phase 2 keeps the phase 1 machine under the kernel and adds the execution model
-the rest of the system will use:
+Phases 1-3B-1 keep the boot path under a kernel that owns memory, CPU state,
+the execution model and a real writable filesystem:
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -44,14 +44,25 @@ LAPIC timer with a calibrated TSC. Phase 2 adds:
 Phase 3A adds a working storage path from PCI to a real filesystem:
 
 - a PCI configuration-space scanner and a legacy virtio-blk driver (`vda`),
-  with a polled split virtqueue and a 500 ms completion timeout;
-- a block-device registry with bounds-checked I/O and partition offset views;
+  with a polled split virtqueue, a 500 ms completion timeout and virtio flush;
+- a block-device registry with bounds-checked I/O, flush propagation and
+  partition offset views;
 - GPT parsing with protective-MBR, header and entry CRC32 validation;
-- a read-only ext4 driver (1/2/4 KiB blocks, extents, 32/64-byte group
-  descriptors, linear directories) that rejects unsupported features instead of
-  misreading them;
+- an ext4 driver (1/2/4 KiB blocks, extents, 32/64-byte group descriptors,
+  linear directories) that rejects unsupported features instead of misreading
+  them;
 - a generated 16 MiB GPT/ext4 test disk (`make disk`) containing `/hello.txt`,
   read and verified during boot.
+
+Phase 3B-1 makes that filesystem writable:
+
+- create, mkdir, write, truncate, unlink, rmdir, rename and fsync, with extent
+  allocation, inode/block bitmaps and group free counts kept consistent;
+- a boot self-test that creates `/selftest`, writes a 5000-byte pattern,
+  renames and truncates it to 1000 bytes, deletes a temporary file, unmounts
+  cleanly and remounts read-only to verify the result;
+- a host `e2fsck` gate (`scripts/check-disk.py`) that also extracts the image
+  and checks the persisted file contents.
 
 It detects AVX2, enables XSAVE state and, by default, refuses to boot without
 AVX2. Self-tests run at boot, then the kernel prints a boot report to a 16550
@@ -61,30 +72,31 @@ testing.
 Verified in this tree:
 
 ```
-CrugOS 0.4.0 (phase 3) -- Amiga-inspired microkernel bring-up
+CrugOS 0.5.0 (phase 3b) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.4.0
-pmm    : 118444 pages (462 MiB), free 118443, bitmap 131072 B
+CRUGOS: version 0.5.0
+pmm    : 118433 pages (462 MiB), free 118432, bitmap 131072 B
 CRUGOS: pmm ready
-vm     : 4 GiB identity map, W^X kernel sections, guard=0x000000000012f000
+vm     : 4 GiB identity map, W^X kernel sections, guard=0x0000000000135000
 CRUGOS: vm ready
 CRUGOS: cpu ready
 CRUGOS: timer ready
 CRUGOS: heap ready
 virtio : blk vda, 32768 sectors, io=0x6000
 CRUGOS: block ready (vda, 32768 sectors)
-gpt    : 1 partition(s), root 'crugroot' LBA 2048..14335
+gpt    : 1 partition(s), root 'crugroot' LBA 2048..26623
 CRUGOS: gpt ready
 CRUGOS: ext4 ready
 CRUGOS: ext4 /hello.txt: hello from ext4
 CRUGOS: storage ready
 CRUGOS: sched ready
 CRUGOS: syscall ready
+CRUGOS: writable storage ok
 CRUGOS: selftest ok
 wx     : audit ok, identity map 0..4 GiB, guard unmapped
-heap   : total=32768 B used=5648 B slab_pages=6 large_pages=2
-boot   : pmm=27672 us cpu=389 us vm=574 us traps=326 us timer=65284 us heap=60 us storage=4067 us sched=298 us syscall=107 us total=98779 us
-CRUGOS: phase 3 boot ok
+heap   : total=40960 B used=6800 B slab_pages=8 large_pages=2
+boot   : pmm=26739 us cpu=383 us vm=589 us traps=329 us timer=65325 us heap=45 us storage=5613 us sched=291 us syscall=95 us total=99415 us
+CRUGOS: phase 3b boot ok
 ```
 
 Timing and memory values vary with the host and the QEMU CPU model.
@@ -98,6 +110,7 @@ make test        # boot under QEMU/OVMF and verify the boot contract
 make run         # boot and keep the serial log for inspection
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
 make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles)
+make check-disk  # e2fsck + persisted-file checks on the latest test disk
 make disk        # generate the GPT/ext4 test disk
 make version     # print the release version from VERSION
 make size        # kernel budget: <1 MiB stretch, <2 MiB hard
@@ -121,9 +134,9 @@ include `MEMORY_MB`, `QEMU_CPU`, `REQUIRE_AVX2` and `MODE`; see
 | `kernel/lib/` | freestanding string, formatting and bitmap routines |
 | `kernel/mm/` | physical allocator, W^X page tables, kernel heap |
 | `kernel/block/` | block-device registry, bounds checks and partitions |
-| `kernel/fs/` | GPT, read-only ext4 and the storage boot policy |
+| `kernel/fs/` | GPT, writable ext4 and the storage boot policy |
 | `drivers/` | PCI and block device drivers (legacy virtio-blk) |
-| `scripts/` | QEMU runner, disk-image builder, boot/PE checks, size and reproducibility gates |
+| `scripts/` | QEMU runner, disk-image builder, boot/PE/disk checks, size and reproducibility gates |
 | `tests/host/` | host unit tests for freestanding code |
 | `tools/` | host-side development tools (`gen-font.py`) |
 | `docs/` | [build](docs/build.md), [boot](docs/boot.md), [storage](docs/storage.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
@@ -163,10 +176,12 @@ See [docs/boot.md](docs/boot.md) for the full handoff ABI and exit protocol.
 
 ## Roadmap
 
-Phases 0, 1, 2 and 3A are done. Phase 3A covers the block layer, legacy
-virtio-blk, GPT and read-only EXT4; phase 3B adds RAID1/10, `crypt.device`
-(AES-256-XTS/Argon2id), the EXT4 write path and journal replay. Later phases
-cover USB/audio/graphics, Workbench userspace, SMP/IOMMU and virtualisation. See
+Phases 0, 1, 2, 3A and 3B-1 are done. Phase 3A covered the block layer, legacy
+virtio-blk, GPT and read-only EXT4; phase 3B-1 added the writable EXT4 path and
+an on-disk consistency gate. Remaining phase 3B work is JBD2 journal replay,
+`crypt.device` (AES-256-XTS/Argon2id), RAID1/10 with a redundant ESP, and
+AHCI/NVMe. Later phases cover USB/audio/graphics, Workbench userspace, SMP/IOMMU
+and virtualisation. See
 [docs/roadmap.md](docs/roadmap.md) for the full sequence and the known
 specification gaps (Crug syntax, cross-architecture compilers and the OVMF
 minimum RAM floor).

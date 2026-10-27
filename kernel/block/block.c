@@ -67,6 +67,13 @@ int block_write(struct block_device *bd, u64 lba, u32 count, const void *buf)
     return bd->write(bd, lba, count, buf);
 }
 
+int block_flush(struct block_device *bd)
+{
+    if (!bd)
+        return -1;
+    return bd->flush ? bd->flush(bd) : 0;
+}
+
 struct partition_priv {
     struct block_device *parent;
     u64 first_lba;
@@ -83,6 +90,12 @@ static int partition_write(struct block_device *bd, u64 lba, u32 count,
 {
     struct partition_priv *p = (struct partition_priv *)bd->priv;
     return block_write(p->parent, p->first_lba + lba, count, buf);
+}
+
+static int partition_flush(struct block_device *bd)
+{
+    struct partition_priv *p = (struct partition_priv *)bd->priv;
+    return block_flush(p->parent);
 }
 
 struct block_device *block_partition(struct block_device *parent, u64 first_lba,
@@ -110,6 +123,7 @@ struct block_device *block_partition(struct block_device *parent, u64 first_lba,
     bd->sector_size = CRUG_SECTOR_SIZE;
     bd->read = partition_read;
     bd->write = parent->write ? partition_write : 0;
+    bd->flush = parent->flush ? partition_flush : 0;
     bd->priv = p;
     if (block_register(bd) != 0) {
         kfree(p);

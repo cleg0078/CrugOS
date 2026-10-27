@@ -61,6 +61,8 @@ struct virtio_blk {
     struct virtq_used *used;
     struct virtio_blk_req *req;
     u16 last_used;
+    u32 features;
+    int has_flush;
 };
 
 static struct virtio_blk g_vblk;
@@ -148,6 +150,50 @@ static int virtio_submit(struct virtio_blk *v, int write, u64 lba)
     return 0;
 }
 
+static int virtio_submit_flush(struct virtio_blk *v)
+{
+    u16 head;
+    u64 deadline;
+
+    v->req->status = 0xFFu;
+    v->req->hdr.type = VIRTIO_BLK_T_FLUSH;
+    v->req->hdr.reserved = 0;
+    v->req->hdr.sector = 0;
+    v->desc[0].addr = pmm_virt_to_phys(&v->req->hdr);
+    v->desc[0].len = sizeof(v->req->hdr);
+    v->desc[0].flags = VIRTQ_DESC_F_NEXT;
+    v->desc[0].next = 1;
+    v->desc[1].addr = pmm_virt_to_phys(&v->req->status);
+    v->desc[1].len = 1;
+    v->desc[1].flags = VIRTQ_DESC_F_WRITE;
+    v->desc[1].next = 0;
+
+    head = (u16)(v->avail->idx % v->qsize);
+    v->avail->ring[head] = 0;
+    __sync_synchronize();
+    v->avail->idx++;
+    __sync_synchronize();
+    outw((u16)(v->io + 0x10), 0);
+
+    deadline = timer_monotonic_ns() + 500000000ull;
+    while (v->used->idx == v->last_used) {
+        if (timer_monotonic_ns() > deadline)
+            return -1;
+    }
+    __sync_synchronize();
+    v->last_used = v->used->idx;
+    return v->req->status == 0 ? 0 : -1;
+}
+
+static int virtio_blk_flush(struct block_device *bd)
+{
+    struct virtio_blk *v = (struct virtio_blk *)bd->priv;
+
+    if (!g_vblk_ready || !v->has_flush)
+        return 0;
+    return virtio_submit_flush(v);
+}
+
 static int virtio_blk_read(struct block_device *bd, u64 lba, u32 count, void *buf)
 {
     struct virtio_blk *v = (struct virtio_blk *)bd->priv;
@@ -202,7 +248,16 @@ int virtio_blk_init(void)
     virtio_status(io, 0);
     virtio_status(io, VIRTIO_STATUS_ACKNOWLEDGE);
     virtio_status(io, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
-    outl((u16)(io + 0x04), 0); /* accept no optional features */
+    {
+        u32 host_features = inl(io);
+        u32 guest_features = 0;
+
+        if (host_features & (1u << VIRTIO_BLK_F_FLUSH))
+            guest_features |= (1u << VIRTIO_BLK_F_FLUSH);
+        g_vblk.features = guest_features;
+        g_vblk.has_flush = guest_features != 0;
+        outl((u16)(io + 0x04), guest_features);
+    }
     virtio_status(io, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER |
                       VIRTIO_STATUS_FEATURES_OK);
     if (!(virtio_get_status(io) & VIRTIO_STATUS_FEATURES_OK)) {
@@ -231,6 +286,7 @@ int virtio_blk_init(void)
     g_vblk.bd.sector_size = CRUG_SECTOR_SIZE;
     g_vblk.bd.read = virtio_blk_read;
     g_vblk.bd.write = virtio_blk_write;
+    g_vblk.bd.flush = virtio_blk_flush;
     g_vblk.bd.priv = &g_vblk;
     strncpy(g_vblk.bd.name, "vda", BLOCK_NAME_MAX - 1);
     g_vblk_ready = 1;

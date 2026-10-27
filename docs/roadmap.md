@@ -5,7 +5,8 @@ end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
 phase 1 makes the kernel own physical memory, page tables, exceptions and
 timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
 IPC and syscalls); phase 3A adds a working block/GPT/ext4 read-only path to a
-real disk. Every later phase keeps the same BootInfo contract, so the loader
+real disk; phase 3B-1 makes that filesystem writable and gates it on
+`e2fsck`. Every later phase keeps the same BootInfo contract, so the loader
 does not change for memory management, storage, SMP or drivers.
 
 ## Phase 0 - bootstrap (done)
@@ -69,12 +70,30 @@ does not change for memory management, storage, SMP or drivers.
   verified during boot; `block ready`, `gpt ready`, `ext4 ready` and
   `storage ready` markers.
 
-## Phase 3B - redundant, encrypted and writable storage
+## Phase 3B-1 - writable ext4 (done)
 
+- Write path: `ext4_create`, `ext4_mkdir`, `ext4_write_file`, `ext4_truncate`,
+  `ext4_unlink`, `ext4_rmdir`, `ext4_rename` and `ext4_fsync`, with extent
+  allocation and one extent-tree leaf level.
+- Consistent allocation: block bitmap bits relative to
+  `s_first_data_block + group * blocks_per_group`, inode bitmap bits relative to
+  `group * inodes_per_group`, group free counts plus `used_dirs_count`, and
+  parent link counts persisted on every directory change.
+- Block-layer flush forwarding and the legacy virtio `VIRTIO_BLK_T_FLUSH`
+  command, used by `ext4_fsync` and clean unmount.
+- Boot self-test that creates, writes, renames, truncates, deletes, unmounts
+  cleanly and remounts read-only to verify persistence.
+- Host on-disk gate: `scripts/check-disk.py` extracts the partition, requires
+  `e2fsck -fn` to be clean and checks the persisted `/hello.txt` and
+  `/selftest/b.txt` contents. `make test` runs it automatically.
+
+## Phase 3B - remaining storage work
+
+- JBD2 journal replay and metadata checksums (the write path is not crash
+  consistent yet).
 - AHCI and NVMe drivers, multiple block devices and hotplug.
 - RAID1/RAID10 over `block.device`, degraded-mode boot and rebuild.
 - `crypt.device` with AES-256-XTS and Argon2id key derivation.
-- EXT4 write path and JBD2 journal replay.
 - Redundant ESP and a recovery path.
 
 ## Phase 4 - devices and userspace

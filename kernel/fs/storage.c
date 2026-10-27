@@ -2,6 +2,7 @@
 #include <crug/block.h>
 #include <crug/virtio.h>
 #include <crug/gpt.h>
+#include <crug/ext4.h>
 #include <crug/string.h>
 #include <crug/kernel.h>
 
@@ -53,7 +54,7 @@ int storage_init(void)
     if (!g_root_part)
         return -1;
     kprintf("CRUGOS: gpt ready\n");
-    if (ext4_mount(&g_root_fs, g_root_part) != 0) {
+    if (ext4_mount(&g_root_fs, g_root_part, 0) != 0) {
         kprintf("storage: ext4 mount failed\n");
         return -1;
     }
@@ -75,6 +76,89 @@ int storage_init(void)
     return 1;
 }
 
+static int storage_cleanup(struct ext4_fs *fs)
+{
+    ext4_unlink(fs, "/selftest/b.txt");
+    ext4_unlink(fs, "/selftest/a.txt");
+    ext4_unlink(fs, "/selftest/tmp.txt");
+    ext4_rmdir(fs, "/selftest");
+    return 0;
+}
+
+static int storage_rw_test(void)
+{
+    static struct ext4_fs fs;
+    static u8 pattern[5000];
+    static u8 check[1024];
+    u64 size;
+    u32 ino;
+    u32 i;
+
+    if (ext4_mount(&fs, g_root_part, EXT4_MOUNT_RW) != 0) {
+        kprintf("storage: writable mount failed\n");
+        return 0;
+    }
+    storage_cleanup(&fs);
+    if (ext4_mkdir(&fs, "/selftest", 0755) != 0)
+        goto fail;
+    if (ext4_create(&fs, "/selftest/a.txt", 0644) != 0)
+        goto fail;
+    for (i = 0; i < sizeof(pattern); i++)
+        pattern[i] = (u8)((i * 7u + 3u) & 0xFFu);
+    if (ext4_write_file(&fs, "/selftest/a.txt", pattern, sizeof(pattern)) != 0)
+        goto fail;
+    if (ext4_fsync(&fs) != 0)
+        goto fail;
+    memset(check, 0, sizeof(check));
+    if (ext4_read_file(&fs, "/selftest/a.txt", check, sizeof(check), &size) != 0)
+        goto fail;
+    if (size != sizeof(pattern) || memcmp(check, pattern, sizeof(check)) != 0)
+        goto fail;
+    if (ext4_rename(&fs, "/selftest/a.txt", "/selftest/b.txt") != 0)
+        goto fail;
+    if (ext4_lookup(&fs, "/selftest/a.txt", &ino) == 0)
+        goto fail;
+    if (ext4_truncate(&fs, "/selftest/b.txt", 1000) != 0)
+        goto fail;
+    if (ext4_create(&fs, "/selftest/tmp.txt", 0644) != 0)
+        goto fail;
+    if (ext4_unlink(&fs, "/selftest/tmp.txt") != 0)
+        goto fail;
+    if (ext4_lookup(&fs, "/selftest/tmp.txt", &ino) == 0)
+        goto fail;
+    if (ext4_umount(&fs) != 0) {
+        kprintf("storage: writable unmount failed\n");
+        return 0;
+    }
+    if (ext4_mount(&fs, g_root_part, 0) != 0) {
+        kprintf("storage: read-only remount failed\n");
+        return 0;
+    }
+    memset(check, 0, sizeof(check));
+    if (ext4_read_file(&fs, "/selftest/b.txt", check, sizeof(check), &size) != 0)
+        goto fail_ro;
+    if (size != 1000)
+        goto fail_ro;
+    for (i = 0; i < 1000; i++) {
+        if (check[i] != (u8)((i * 7u + 3u) & 0xFFu))
+            goto fail_ro;
+    }
+    if (ext4_lookup(&fs, "/selftest", &ino) != 0)
+        goto fail_ro;
+    if (ext4_umount(&fs) != 0)
+        goto fail_ro;
+    kprintf("CRUGOS: writable storage ok\n");
+    return 1;
+fail_ro:
+    kprintf("storage: read-only verification failed\n");
+    ext4_umount(&fs);
+    return 0;
+fail:
+    kprintf("storage: writable test failed\n");
+    ext4_umount(&fs);
+    return 0;
+}
+
 int storage_selftest(void)
 {
     char list[256];
@@ -91,7 +175,7 @@ int storage_selftest(void)
         return 0;
     if (strstr(list, "hello.txt") == 0)
         return 0;
-    return 1;
+    return storage_rw_test();
 }
 
 int storage_present(void)

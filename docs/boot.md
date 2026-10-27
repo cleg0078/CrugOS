@@ -19,7 +19,7 @@ OVMF (UEFI firmware)
        - physical allocator, page tables + W^X
        - GDT/TSS, %gs per-CPU data, IDT and exceptions
        - LAPIC + TSC/LAPIC timer
-       - kernel heap, virtio-blk + GPT + ext4, storage self-test
+       - kernel heap, virtio-blk + GPT + writable ext4, storage self-test
        - scheduler, handles and MsgPort IPC
        - syscall dispatcher behind int 0x80
        - self-tests, boot report, deterministic exit
@@ -86,16 +86,17 @@ post-snapshot allocations cannot push it over capacity.
    stay disabled until the execution model exists.
 7. `heap_init`: slab caches and large-allocation headers. `CRUGOS: heap ready`.
 8. `storage_init`: `block_init`, legacy virtio-blk, GPT, the `crugroot`
-   partition and a read-only ext4 mount. `CRUGOS: block ready`,
-   `CRUGOS: gpt ready`, `CRUGOS: ext4 ready`, `CRUGOS: storage ready`.
+   partition and a read-only ext4 mount used for the boot file check.
+   `CRUGOS: block ready`, `CRUGOS: gpt ready`, `CRUGOS: ext4 ready`,
+   `CRUGOS: storage ready`.
 9. `sched_init`: per-class run queues, boot thread id 0 and the idle thread.
    `CRUGOS: sched ready`.
 10. `process_init`: the kernel process and its handle table.
     `CRUGOS: syscall ready`.
 11. `sti`, then `selftest_run`: allocator, mappings, W^X audit, `int3`, timer,
-    heap, block/GPT/ext4/storage, handles, scheduler, message ports and
-    syscalls.
-12. `report_boot`, `CRUGOS: phase 3 boot ok`, `arch_exit_qemu(0x10)`.
+    heap, block/GPT/ext4/storage (including the read-write round trip),
+    handles, scheduler, message ports and syscalls.
+12. `report_boot`, `CRUGOS: phase 3b boot ok`, `arch_exit_qemu(0x10)`.
 
 Storage is still brought up with interrupts disabled: the virtio driver polls
 its used ring between `heap_init` and `sched_init`.
@@ -181,8 +182,17 @@ The boot disk is a legacy PCI virtio-blk device (`vda`). `storage_init()`
 parses the GPT, prefers the partition named `crugroot`, creates a `vda1`
 partition view and mounts it read-only as ext4. It then reads `/hello.txt` into
 a static buffer and the self-test re-checks the mount, the directory listing and
-the file contents. The complete stack, supported ext4 subset and known limits
-are documented in [storage.md](storage.md).
+the file contents.
+
+The same self-test then remounts the partition read-write and exercises the
+write path: it removes stale `/selftest` entries, creates `/selftest` and
+`a.txt`, writes and `fsync`s a 5000-byte pattern, renames the file to `b.txt`,
+truncates it to 1000 bytes, creates and unlinks `tmp.txt`, unmounts cleanly
+(marking the filesystem clean and flushing the virtio cache), and finally
+remounts read-only to verify that `/selftest/b.txt` still holds the first 1000
+bytes of the pattern. The host gate then extracts the partition and requires
+`e2fsck -fn` to pass. The complete stack, supported ext4 subset, write path and
+known limits are documented in [storage.md](storage.md).
 
 ## Exit protocol
 
@@ -206,8 +216,9 @@ CRUGOS: ext4 ready
 CRUGOS: storage ready
 CRUGOS: sched ready
 CRUGOS: syscall ready
+CRUGOS: writable storage ok
 CRUGOS: selftest ok
-CRUGOS: phase 3 boot ok
+CRUGOS: phase 3b boot ok
 ```
 
 `kernel/core/report.c` prints the machine description between them: kernel
@@ -231,8 +242,8 @@ init, newlines are also mirrored to the GOP text console, which uses an embedded
   but AP startup, IOAPIC and external interrupts are phase 5 work.
 - Empty slab pages are not returned to the PMM, and page-table pages created
   while splitting huge pages are not reclaimed.
-- Storage is read-only: no journal replay, no write path, one legacy
-  virtio-blk disk, polled one-sector requests, no RAID1/10 and no
-  `crypt.device` yet.
+- Storage is writable but has no journal replay: one legacy virtio-blk disk,
+  polled one-sector requests, a single extent-tree level, no metadata
+  checksums, no RAID1/10 and no `crypt.device` yet.
 - `SMEP`/`SMAP` are enabled only when the CPU reports them; `qemu64` does not.
 - No shutdown/reset path; QEMU's debug port is the exit mechanism.
