@@ -7,6 +7,7 @@ set -euo pipefail
 : "${SERIAL_LOG:?SERIAL_LOG is required}"
 : "${DEBUG_LOG:?DEBUG_LOG is required}"
 : "${EXIT_CODE_FILE:?EXIT_CODE_FILE is required}"
+DISK_IMG=${DISK_IMG:-}
 
 QEMU=${QEMU:-qemu-system-x86_64}
 OVMF_CODE=${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}
@@ -45,7 +46,17 @@ if [[ -n "$QEMU_CPU" ]]; then
     CPU_ARGS=(-cpu "$QEMU_CPU")
 fi
 
-echo "run-qemu: booting $ESP_DIR (${MEMORY_MB} MiB, ${SMP} vCPU, cpu ${QEMU_CPU:-default}, timeout ${TIMEOUT_SEC}s)"
+DISK_ARGS=()
+if [[ -n "$DISK_IMG" ]]; then
+    if [[ ! -r "$DISK_IMG" ]]; then
+        echo "run-qemu: missing disk image $DISK_IMG" >&2
+        exit 1
+    fi
+    DISK_ARGS=(-drive "file=$DISK_IMG,if=none,id=disk0,format=raw" \
+               -device "virtio-blk-pci,drive=disk0,disable-modern=on")
+fi
+
+echo "run-qemu: booting $ESP_DIR (${MEMORY_MB} MiB, ${SMP} vCPU, cpu ${QEMU_CPU:-default}, disk ${DISK_IMG:-none}, timeout ${TIMEOUT_SEC}s)"
 set +e
 TMPDIR="$TMPDIR" timeout --foreground "$TIMEOUT_SEC" "$QEMU" \
     -machine q35 \
@@ -55,6 +66,7 @@ TMPDIR="$TMPDIR" timeout --foreground "$TIMEOUT_SEC" "$QEMU" \
     -drive if=pflash,format=raw,unit=0,readonly=on,file="$OVMF_CODE" \
     -drive if=pflash,format=raw,unit=1,file="$VARS_COPY" \
     -drive file=fat:rw:"$ESP_DIR",format=raw,media=disk \
+    "${DISK_ARGS[@]}" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -display none \
     -serial "file:$SERIAL_LOG" \

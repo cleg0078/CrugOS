@@ -59,11 +59,12 @@ void report_boot(const boot_info *bi, const boot_timings *t)
             heap_total_bytes(), heap_used_bytes(), heap_slab_pages(),
             heap_large_pages());
     kprintf("sched  : switches=%llu\n", sched_switches());
-    kprintf("boot   : pmm=%llu us cpu=%llu us vm=%llu us traps=%llu us timer=%llu us heap=%llu us sched=%llu us syscall=%llu us total=%llu us\n",
+    kprintf("boot   : pmm=%llu us cpu=%llu us vm=%llu us traps=%llu us timer=%llu us heap=%llu us storage=%llu us sched=%llu us syscall=%llu us total=%llu us\n",
             stage_us(t->start, t->pmm), stage_us(t->pmm, t->cpu),
             stage_us(t->cpu, t->vm), stage_us(t->vm, t->traps),
             stage_us(t->traps, t->timer), stage_us(t->timer, t->heap),
-            stage_us(t->heap, t->sched), stage_us(t->sched, t->syscall),
+            stage_us(t->heap, t->storage), stage_us(t->storage, t->sched),
+            stage_us(t->sched, t->syscall),
             stage_us(t->start, t->syscall));
     kprintf("timer  : %llu Hz (%s), ticks=%llu, mono=%llu ns\n",
             timer_tsc_hz(), timer_source(), timer_ticks(), timer_monotonic_ns());

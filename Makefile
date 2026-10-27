@@ -45,7 +45,7 @@ ifeq ($(ARCH),x86_64)
 LOADER_LD_ARCH := i386pep
 LOADER_EFI_NAME := BOOTX64.EFI
 else
-$(error unsupported ARCH '$(ARCH)': only x86_64 is implemented in phase 0)
+$(error unsupported ARCH '$(ARCH)': only x86_64 is implemented)
 endif
 
 BUILD := $(BUILD_ROOT)/$(ARCH)
@@ -57,6 +57,8 @@ ESP := $(BUILD)/esp
 SERIAL_LOG := $(BUILD)/serial.log
 DEBUG_LOG := $(BUILD)/debug.log
 QEMU_EXIT := $(BUILD)/exit-code.txt
+DISK_IMG ?= $(BUILD)/disk.img
+DISK_SIZE_MB ?= 16
 
 ifeq ($(MODE),debug)
 MODE_FLAGS := -Og -g3
@@ -82,7 +84,8 @@ KERNEL_LDFLAGS := -nostdlib -static -no-pie -Wl,--build-id=none \
 
 KERNEL_SOURCES := $(wildcard kernel/arch/$(ARCH)/*.c) $(wildcard kernel/arch/$(ARCH)/*.S) \
                   $(wildcard kernel/core/*.c) $(wildcard kernel/lib/*.c) \
-                  $(wildcard kernel/mm/*.c)
+                  $(wildcard kernel/mm/*.c) $(wildcard kernel/block/*.c) \
+                  $(wildcard kernel/fs/*.c) $(wildcard drivers/*/*.c)
 KERNEL_OBJECTS := $(patsubst %,$(OBJ)/%.o,$(basename $(KERNEL_SOURCES)))
 KERNEL_DEPS := $(KERNEL_OBJECTS:.o=.d)
 
@@ -90,7 +93,7 @@ LOADER_SOURCES := $(wildcard boot/efi/*.c)
 LOADER_OBJECTS := $(patsubst %,$(OBJ)/%.o,$(basename $(LOADER_SOURCES)))
 LOADER_DEPS := $(LOADER_OBJECTS:.o=.d)
 
-.PHONY: all kernel loader esp run test test-compat size check-efi repro test-host \
+.PHONY: all kernel loader esp disk run test test-compat size check-efi repro test-host \
         preflight version clean distclean help
 
 all: esp
@@ -128,17 +131,28 @@ $(OBJ)/kernel/%.o: kernel/%.S
 	$(Q)$(CC) $(KERNEL_FLAGS) -c $< -o $@
 	@echo "  AS    $<"
 
+$(OBJ)/drivers/%.o: drivers/%.c
+	@mkdir -p $(dir $@)
+	$(Q)$(CC) $(KERNEL_FLAGS) -c $< -o $@
+	@echo "  CC    $<"
+
 $(OBJ)/boot/%.o: boot/%.c
 	@mkdir -p $(dir $@)
 	$(Q)$(CC) $(LOADER_FLAGS) -c $< -o $@
 	@echo "  CC    $<"
 
-run: esp
+disk: $(DISK_IMG)
+
+$(DISK_IMG): scripts/mkdisk.sh
+	$(Q)scripts/mkdisk.sh $(DISK_IMG) $(DISK_SIZE_MB)
+	@echo "  DISK  $@"
+
+run: esp disk
 	@mkdir -p $(BUILD)/tmp
 	$(Q)TMPDIR=$(abspath $(BUILD)/tmp) ESP_DIR=$(abspath $(ESP)) \
 		SERIAL_LOG=$(abspath $(SERIAL_LOG)) DEBUG_LOG=$(abspath $(DEBUG_LOG)) \
 		EXIT_CODE_FILE=$(abspath $(QEMU_EXIT)) QEMU_CPU="$(QEMU_CPU)" \
-		scripts/run-qemu.sh
+		DISK_IMG=$(abspath $(DISK_IMG)) scripts/run-qemu.sh
 
 test: run
 	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)"

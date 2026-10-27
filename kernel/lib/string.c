@@ -88,3 +88,32 @@ int strncmp(const char *a, const char *b, usize n)
     }
     return (int)(unsigned char)*a - (int)(unsigned char)*b;
 }
+
+char *strncpy(char *dst, const char *src, usize n)
+{
+    char *d = dst;
+
+    while (n && *src) {
+        *d++ = *src++;
+        n--;
+    }
+    while (n--) {
+        *d++ = 0;
+    }
+    return dst;
+}
+
+char *strstr(const char *haystack, const char *needle)
+{
+    usize n;
+
+    if (!*needle)
+        return (char *)haystack;
+    n = strlen(needle);
+    while (*haystack) {
+        if (*haystack == *needle && strncmp(haystack, needle, n) == 0)
+            return (char *)haystack;
+        haystack++;
+    }
+    return 0;
+}

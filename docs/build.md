@@ -1,8 +1,9 @@
 # Building CrugOS
 
-This document describes the phase 2 build system: how the kernel and the UEFI
-loader are compiled and linked, which invariants the link must preserve, and how
-to diagnose the failure modes that are specific to this toolchain.
+This document describes the phase 3 build system: how the kernel, the UEFI
+loader and the test disk image are built, which invariants the link must
+preserve, and how to diagnose the failure modes that are specific to this
+toolchain.
 
 ## Requirements
 
@@ -13,6 +14,7 @@ to diagnose the failure modes that are specific to this toolchain.
 | `qemu-system-x86_64` | boot test | 10.x, TCG works without `/dev/kvm` |
 | OVMF | UEFI firmware | `/usr/share/OVMF/OVMF_CODE_4M.fd` + `OVMF_VARS_4M.fd` |
 | `python3` | boot/PE checks | standard library only |
+| `sgdisk`, `mke2fs`, `debugfs`, `dd`, `truncate` | test disk | only for `make disk`; `mke2fs`/`debugfs` come from e2fsprogs |
 
 Run `make preflight` to check all of the above.
 
@@ -24,6 +26,7 @@ make run         # boot the ESP tree under QEMU + OVMF
 make test        # boot and verify serial markers, guest version, AVX2 + exit status
 make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
 make test-host   # host unit tests for string/printf/ELF/bitmap/VM math/handles
+make disk        # build the GPT/ext4 test disk at build/<arch>/disk.img
 make size        # kernel size budget (<1 MiB stretch, <2 MiB hard)
 make check-efi   # PE32+ structure checks on the loader
 make repro       # two independent builds must be byte-identical
@@ -47,6 +50,8 @@ Useful variables:
 | `REQUIRE_AVX2` | `1` | `0` builds a kernel that boots without AVX2 |
 | `EXPECT_AVX2` | `yes` | what `make test` requires the guest to report |
 | `BUILD_ROOT` | `build` | output root; `test-compat` uses `build/compat` |
+| `DISK_IMG` | `build/<arch>/disk.img` | raw disk image attached as `vda` |
+| `DISK_SIZE_MB` | `16` | size of the generated test disk |
 
 ## Version stamping
 
@@ -126,8 +131,25 @@ OVMF 4M needs a substantial amount of RAM before it will boot from QEMU's
 | 512 | reliable; used by all gates |
 
 This is a firmware limit, not a kernel limit: the kernel load image is about
-200 KiB. The specification's 16 MiB headless target needs a leaner boot path and
+230 KiB. The specification's 16 MiB headless target needs a leaner boot path and
 is tracked in [roadmap.md](roadmap.md).
+
+## Test disk
+
+`make disk` runs [scripts/mkdisk.sh](../scripts/mkdisk.sh) and produces a GPT
+image with one type-`8300` partition named `crugroot` and an ext4 filesystem
+containing `/hello.txt`. It requires `sgdisk`, `mke2fs`, `debugfs`, `dd` and
+`truncate`. The image is attached as a legacy virtio-blk device:
+
+```
+-drive file=<disk.img>,if=none,id=disk0,format=raw
+-device virtio-blk-pci,drive=disk0,disable-modern=on
+```
+
+`make run` and `make test` depend on `disk`, so the first boot builds the image.
+The kernel mounts it read-only; there is no write path and no journal. The
+supported ext4 subset, on-disk layout and failure modes are documented in
+[storage.md](storage.md).
 
 ## Reproducibility
 
@@ -156,5 +178,10 @@ randomisation that leaks into the output will fail this target.
   `NX` clear.
 - **No boot at low `MEMORY_MB`**: see the firmware memory floor above; use
   `MEMORY_MB=512`.
+- **`virtio : queue setup failed`**: the disk was attached as a modern-only
+  device or without `disable-modern=on`; use the QEMU flags above.
+- **`storage: ext4 mount failed`**: the image has an unsupported feature or is
+  not clean. Extract the partition with `dd` and inspect it with
+  `dumpe2fs -h`; `make disk` regenerates a known-good image.
 - **QEMU exits before OVMF starts**: verify the firmware paths and that
   `OVMF_VARS` is writable (the run script copies it into `build/`).
