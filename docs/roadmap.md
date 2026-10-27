@@ -13,7 +13,8 @@ RAID10 mirror pairs and boots with one member missing per pair; phase 3B-6
 rebuilds a blank replacement member at boot; phase 3B-7 boots the same
 GPT/ext4/RAID stack from an AHCI/SATA disk; phase 3B-8 adds ext4/JBD2
 checksums; phase 3B-9 encrypts the root with AES-256-XTS and an Argon2id
-derived key.
+derived key; phase 3B-10 unlocks that volume with a masked passphrase typed on
+the serial console.
 Every later phase keeps the same BootInfo contract, so the loader does not
 change for memory management, storage, SMP or drivers.
 
@@ -245,9 +246,34 @@ change for memory management, storage, SMP or drivers.
   recovery keyslot, wrong passphrase, tampered MAC and AES-NI. See
   [crypto.md](crypto.md).
 
+## Phase 3B-10 - console unlock (done)
+
+- `crypt.device` can now be unlocked from the console: when the loader command
+  line has no `crypt.pass=`, `storage_prompt_unlock()` prints
+  `CRUGOS: crypt passphrase required` and reads a masked line from COM1,
+  echoing only `*`.
+- The line editor (`kernel/lib/lineedit.c`, `include/crug/lineedit.h`) handles
+  CR/LF, backspace, Ctrl-C and overflow past
+  `CRUG_CRYPT_MAX_PASSWORD`; it is pinned by host tests, so
+  `make test-host` now covers 809 checks.
+- Three attempts are allowed, each bounded by `crypt.prompt_timeout=`
+  (1..3600 seconds, 60 s per attempt by default); a wrong line prints
+  `CRUGOS: passphrase rejected (N attempt(s) left)`, and giving up prints
+  `CRUGOS: crypt locked (too many attempts)` or
+  `CRUGOS: crypt locked (no passphrase)` for an empty, cancelled or timed-out
+  prompt. Every line buffer is zeroed and the secret is never logged.
+- `scripts/run-crypt-prompt.py` drives QEMU's serial port over TCP
+  (`SERIAL_TCP`), answers one prompt per attempt and tees the console into the
+  normal serial log; three gates cover a correct typed passphrase, three
+  rejections and an unanswered timeout.
+- All 26 gates pass at `v0.14.0`; an encrypted boot stays well under a second
+  with software AES under TCG.
+
 ## Phase 3B - remaining storage work
 
 - Journal wrapping, revoke records and orphan-file recovery.
+- Framebuffer/GOP console input and a USB HID keyboard, so the passphrase
+  prompt does not depend on a serial line.
 - USB storage drivers, hotplug and more than four NVMe/AHCI controllers.
 - RAID online rebuild, hot spare, scrub, a write-intent bitmap and persisted
   failure tracking (rebuild is boot-time and synchronous today).

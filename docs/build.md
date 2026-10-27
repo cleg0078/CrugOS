@@ -1,6 +1,6 @@
 # Building CrugOS
 
-This document describes the phase 3B-9 build system: how the kernel, the UEFI
+This document describes the phase 3B-10 build system: how the kernel, the UEFI
 loader, the host crypto tool and the test disk images are built, which
 invariants the link must preserve, and how to diagnose the failure modes that
 are specific to this toolchain.
@@ -41,8 +41,11 @@ make test-crypt-recovery  # unlock the recovery keyslot instead of slot 0
 make test-crypt-wrongkey  # a wrong passphrase must fail closed (exit 35)
 make test-crypt-tamper  # a corrupted keyslot MAC must be rejected
 make test-crypt-ni  # the same encrypted boot with AES-NI enabled
+make test-crypt-prompt  # type the passphrase on QEMU's serial console and boot
+make test-crypt-prompt-wrong  # three wrong console passphrases must lock the volume
+make test-crypt-prompt-timeout  # an unanswered prompt must fail closed
 make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
-make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots
+make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor
 make disk        # build the GPT/ext4 test disk at build/<arch>/disk.img
 make raid-disks  # build the two GPT/ext4 RAID1 member disks
 make raid10-disks  # build the four GPT/ext4 RAID10 member disks
@@ -80,7 +83,7 @@ options` prints the complete resolved set (including paths derived from
 | `EXPECT_NVME` | `no` | what `make test` requires for NVMe (`yes` needs `nvme0n1`) |
 | `EXPECT_AHCI` | `no` | what `make test` requires for AHCI/SATA (`yes` needs an `sd?` root) |
 | `EXPECT_REBUILD` | `no` | number of RAID members the boot must rebuild; `no` also rejects an unexpected rebuild |
-| `EXPECT_CRYPT` | `no` | encrypted-root expectation: `no`, `yes` or `wrong` (unlock must fail) |
+| `EXPECT_CRYPT` | `no` | encrypted-root expectation: `no`, `yes`, `wrong` (unlock must fail) or `locked` (the console prompt timed out) |
 | `EXPECT_AES` | `any` | AES implementation the boot must report: `software`, `aes-ni` or `any` |
 | `CRASH_IMG` | `$(BUILD)/crash.img` | crash-gate image (journal commit, no checkpoint) |
 | `CRASH_REPLAY_IMG` | `$(BUILD)/crash-replay.img` | copy the kernel replays on the second crash-gate boot |
@@ -103,9 +106,13 @@ options` prints the complete resolved set (including paths derived from
 | `AHCI_IMG` | `build/<arch>/ahci.img` | image attached as a SATA disk on `ide.1` |
 | `CRYPT_IMG` | `build/<arch>/crypt.img` | encrypted-root image attached as `vda` |
 | `CRYPT_TAMPER_IMG` | `build/<arch>/crypt-tamper.img` | copy of `CRYPT_IMG` with one MAC byte flipped |
-| `CRYPT_PASS` | `crugos-test` | passphrase written to the ESP `crugos/cmdline.txt` and used by `mkcrypt` |
+| `CRYPT_PASS` | `crugos-test` | passphrase used by `mkcrypt`; when non-empty it is also written to the ESP `crugos/cmdline.txt` (empty forces the console prompt) |
 | `CRYPT_RECOVERY_PASS` | `crugos-recovery` | recovery-slot passphrase sealed by `mkcrypt` |
 | `CRYPT_M` | `4096` | Argon2id memory cost (KiB) for the test volume |
+| `CRYPT_PROMPT_TIMEOUT_SEC` | `2` | per-attempt console prompt timeout used by the timeout gate |
+| `CRYPT_PROMPT_WRONG_PASS` | `wrong-password` | passphrase typed three times by the wrong-passphrase gate |
+| `CMDLINE_EXTRA` | empty | extra tokens appended to the ESP `crugos/cmdline.txt`, e.g. `crypt.prompt_timeout=2` |
+| `SERIAL_TCP` | empty | when set, QEMU exposes the serial console as `tcp:<value>` instead of a log file |
 | `MCRYPT` | `build/<arch>/mkcrypt` | host crypt tool (format/extract) |
 | `HOST_CC` | `cc` | host compiler for `mkcrypt` and `tests/host` |
 | `EXTRA_DISKS` | empty | space-separated images attached after `DISK_IMG` |
@@ -251,6 +258,22 @@ decrypts the partition before `e2fsck -fn` and the file checks.
 `make test-crypt-tamper` flips byte 1052776 (the MAC of keyslot 0) with
 `scripts/tamper.py` and expects the same fail-closed result. See
 [crypto.md](crypto.md) for the header layout, key hierarchy and limits.
+
+The prompt gates run without a `crypt.pass=` token, so the kernel has to ask
+the console. [scripts/run-crypt-prompt.py](../scripts/run-crypt-prompt.py)
+reserves a free loopback port and starts
+`make run SERIAL_TCP=127.0.0.1:<port>`; [scripts/run-qemu.sh](../scripts/run-qemu.sh)
+then replaces its file-backed serial argument with
+`-serial tcp:<addr>,server=on,wait=on`, so QEMU waits for the driver before
+booting. The driver tees every byte into the normal serial log, counts
+`passphrase:` prompts and types one answer per prompt. `make test-crypt-prompt`
+sends `CRYPT_PASS` once and then checks the disk with `mkcrypt extract`;
+`make test-crypt-prompt-wrong` sends `CRYPT_PROMPT_WRONG_PASS` three times and
+expects `crypt locked (too many attempts)`; `make test-crypt-prompt-timeout`
+appends `crypt.prompt_timeout=$(CRYPT_PROMPT_TIMEOUT_SEC)` (2 s by default) to
+the command line, sends nothing, and expects `crypt locked (no passphrase)`.
+Both failing gates require exit status 35, and every prompt gate fails if the
+passphrase text appears in the serial log.
 
 The supported ext4 subset, write path, checksum layout, journal format and
 failure modes are documented in [storage.md](storage.md) and
@@ -402,9 +425,24 @@ randomisation that leaks into the output will fail this target.
   `needs_recovery`, incompat bit 0x4).
 - **`CRUGOS: crypt unlock failed` on `make test-crypt`**: the passphrase in the
   ESP `crugos/cmdline.txt` differs from the one sealed into the image. The
-  makefile writes `crypt.pass=$(CRYPT_PASS)` when it builds the ESP; rebuild
-  with the same `CRYPT_PASS` used by `crypt-disk`. A missing file prints
-  `crypt locked (no password)` instead.
+  makefile writes `crypt.pass=$(CRYPT_PASS)` when it builds the ESP and the
+  variable is non-empty; rebuild with the same `CRYPT_PASS` used by
+  `crypt-disk`. An empty `CRYPT_PASS` removes the file and the kernel prompts
+  on the serial console instead.
+- **No prompt in `make test-crypt-prompt`**: a `crypt.pass=` token is still on
+  the ESP. Run with `CRYPT_PASS=` (the gate does) or delete
+  `build/<arch>/esp/crugos/cmdline.txt`.
+- **The prompt times out before an answer arrives**: `crypt.prompt_timeout`
+  defaults to 60 s per attempt; the timeout gate lowers it to
+  `CRYPT_PROMPT_TIMEOUT_SEC` (2 s). Raise that variable when debugging by hand.
+- **`prompt: serial socket did not open`**: `make run` failed before QEMU started
+  listening, or another process holds the port. The driver prints the full
+  `make` command; run it manually to see the QEMU error. Do not pass
+  `-serial` through `QEMU_EXTRA` while `SERIAL_TCP` is set: the run script
+  owns that argument.
+- **A passphrase appears in the serial log**: this must never happen. The boot
+  prints only the `*` mask and the driver asserts the typed secret is absent;
+  the prompt gates fail otherwise.
 - **Tamper gate boots successfully**: the flipped byte must land in the
   partition, not in the image's GPT area. The gate uses offset
   `1052776 = 2048*512 + 0x1000 + 0x68` (keyslot 0 MAC); `scripts/tamper.py`

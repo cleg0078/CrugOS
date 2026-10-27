@@ -34,3 +34,12 @@ void serial_write(const char *s)
         serial_putc(*s++);
     }
 }
+
+/* Polling receive: the boot passphrase prompt runs before interrupts and the
+   scheduler, so there is no input queue to drain. */
+int serial_try_getc(void)
+{
+    if ((inb(COM1 + 5) & 0x01) == 0)
+        return -1;
+    return (int)inb(COM1 + 0);
+}

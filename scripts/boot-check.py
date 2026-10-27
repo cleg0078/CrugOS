@@ -29,7 +29,7 @@ REQUIRED_MARKERS = (
     "CRUGOS: selftest ok",
     "CRUGOS: nvme ready",
     "CRUGOS: ahci ready",
-    "CRUGOS: phase 3b9 boot ok",
+    "CRUGOS: phase 3b10 boot ok",
 )
 # A rejected unlock stops before scheduling, storage mounting and self-tests.
 WRONG_CRYPT_MARKERS = (
@@ -42,6 +42,19 @@ WRONG_CRYPT_MARKERS = (
     "CRUGOS: block ready",
     "CRUGOS: gpt ready",
     "CRUGOS: crypt unlock failed",
+    "CRUGOS: no root filesystem",
+)
+# An interactive prompt that got no usable passphrase stops the same way.
+LOCKED_CRYPT_MARKERS = (
+    "CRUGOS: hello",
+    "CRUGOS: pmm ready",
+    "CRUGOS: vm ready",
+    "CRUGOS: cpu ready",
+    "CRUGOS: timer ready",
+    "CRUGOS: heap ready",
+    "CRUGOS: block ready",
+    "CRUGOS: gpt ready",
+    "CRUGOS: crypt locked (no passphrase)",
     "CRUGOS: no root filesystem",
 )
 VERSION_PATTERN = re.compile(r"CRUGOS: version (\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?)")
@@ -88,7 +101,7 @@ def main() -> int:
     if "CRUGOS PANIC" in text or "CRUGOS loader: FAIL" in text:
         return fail("panic or loader failure detected", text)
 
-    if expect_crypt not in ("no", "yes", "wrong"):
+    if expect_crypt not in ("no", "yes", "wrong", "locked"):
         return fail(f"invalid EXPECT_CRYPT {expect_crypt!r}", text)
     if expect_aes not in ("any", "software", "aes-ni"):
         return fail(f"invalid EXPECT_AES {expect_aes!r}", text)
@@ -97,6 +110,9 @@ def main() -> int:
     if expect_crypt == "wrong":
         # The boot is expected to stop before a root filesystem exists.
         required = list(WRONG_CRYPT_MARKERS)
+    elif expect_crypt == "locked":
+        # A timed-out or cancelled prompt fails closed before mounting.
+        required = list(LOCKED_CRYPT_MARKERS)
     elif expect_crypt == "yes":
         required.append("CRUGOS: crypt ready")
     for marker in required:
@@ -173,7 +189,8 @@ def main() -> int:
     except ValueError:
         return fail(f"invalid exit code {raw_exit!r}", text)
 
-    expected_exit = ENCRYPT_FAIL_EXIT if expect_crypt == "wrong" else SUCCESS_EXIT
+    expected_exit = (ENCRYPT_FAIL_EXIT if expect_crypt in ("wrong", "locked")
+                     else SUCCESS_EXIT)
     if status != expected_exit:
         return fail(f"guest exit status {status} != expected {expected_exit}", text)
 

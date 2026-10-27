@@ -16,7 +16,10 @@ mounted. Phase 3B-7 adds a polled AHCI/SATA driver, so the same stack can boot
 from a SATA disk as well. Phase 3B-8 adds ext4 metadata checksums and JBD2
 journal checksums with multi-descriptor transactions. Phase 3B-9 adds
 `crypt.device`, an AES-256-XTS volume unlocked with an Argon2id-derived key, so
-the same ext4/JBD2 stack can run on an encrypted partition.
+the same ext4/JBD2 stack can run on an encrypted partition. Phase 3B-10 unlocks
+that volume with a masked passphrase typed on the serial console (three attempts
+with a per-attempt timeout), while `crypt.pass=` on the loader command line
+remains for automation.
 
 ```
 virtio-blk-pci (legacy I/O BAR)  NVMe PCIe (class 01/08/02)  AHCI/SATA (class 01/06/01)
@@ -41,6 +44,9 @@ CRUGOS: nvme ready (<n> device(s))
 CRUGOS: ahci ready (<n> device(s))
 CRUGOS: block ready (<n> device(s))
 CRUGOS: gpt ready
+CRUGOS: crypt passphrase required
+CRUGOS: type the passphrase on the serial console (3 attempt(s))
+passphrase: ***********             # masked, never logged
 CRUGOS: crypt ready (<n> sectors, keyslot <i>, Argon2id m=<m> KiB t=<t> p=<p>)
 CRUGOS: crypt aes: software           # or: aes-ni
 CRUGOS: root device crypt0            # encrypted root only
@@ -59,7 +65,15 @@ CRUGOS: journal selftest ok (<n> blocks recovered)
 
 The `crypt` lines appear only when a `crugcrypt` partition is the root; a
 rejected passphrase prints `CRUGOS: crypt unlock failed` (with a reason) and
-then `CRUGOS: no root filesystem` before the deterministic failure exit.
+then `CRUGOS: no root filesystem` before the deterministic failure exit. When
+there is no `crypt.pass=` token the kernel asks on the serial console instead,
+printing one `passphrase:` prompt per attempt, three attempts bounded by
+`crypt.prompt_timeout=` (1..3600 s, 60 s per attempt by default) and only the
+`*` mask. A rejected line prints `CRUGOS: passphrase rejected (N attempt(s)
+left)`; three rejections print `CRUGOS: crypt locked (too many attempts)`, and
+an empty answer, Ctrl-C, overflow or timeout prints `CRUGOS: crypt locked (no
+passphrase)`. Both lock paths end in `CRUGOS: no root filesystem`. The secret
+is never echoed and every line buffer is zeroed afterwards.
 
 A missing virtio/NVMe/AHCI device, an unusable GPT, a bad RAID metadata record
 or an ext4 mount failure panics (`storage: ...`) because the phase 3 boot gate expects a
@@ -217,11 +231,24 @@ alignment loop and limits.
 `kernel/block/crypt.c` wraps one partition as `crypt0`. The 16 KiB header
 holds the algorithm identifiers, Argon2id parameters, a 32-byte salt, the
 volume id and eight 256-byte keyslots; the data area begins at sector 32 of the
-partition. `storage_parse_cmdline()` has already taken `crypt.pass=` from the
-loader command line, so `crypt_unlock()` derives 96 bytes with Argon2id (a
-64-byte XTS key-encryption key and a 32-byte MAC key), verifies the keyslot MAC
-with a constant-time compare, unwraps the 64-byte master key and registers the
-device. Reads decrypt each 512-byte sector in place with the data-relative LBA
+partition.
+
+`storage_parse_cmdline()` takes `crypt.pass=` when the loader command line has
+one and wipes the command-line page afterwards. With no token the boot falls
+back to the console: `storage_prompt_unlock()` prints
+`CRUGOS: crypt passphrase required`, then `passphrase: `, and reads a masked
+line with the serial poller and the shared line editor
+(`kernel/lib/lineedit.c`), echoing `*` per accepted byte. It allows three
+attempts, each bounded by `crypt.prompt_timeout=` (1..3600 s, 60 s by default),
+prints `CRUGOS: passphrase rejected (N attempt(s) left)` for a wrong line and
+`CRUGOS: crypt locked (too many attempts)` - or `CRUGOS: crypt locked (no
+passphrase)` for an empty answer, Ctrl-C, overflow or timeout - when it gives
+up, zeroing every line buffer.
+
+Either path hands the passphrase to `crypt_unlock()`, which derives 96 bytes
+with Argon2id (a 64-byte XTS key-encryption key and a 32-byte MAC key),
+verifies the keyslot MAC with a constant-time compare, unwraps the 64-byte
+master key and registers the device. Reads decrypt each 512-byte sector in place with the data-relative LBA
 as the XTS tweak; writes encrypt through a 16 KiB bounce buffer. AES-NI is used
 when the CPU advertises it, otherwise the software tables. `storage_lock()`
 wipes the passphrase, the volume keys and the bounce buffer and marks the
@@ -431,6 +458,18 @@ image, and runs `check-disk.py --crypt-tool build/x86_64/mkcrypt
 healthy boot with `QEMU_CPU=qemu64,+aes,+avx,+avx2` and requires
 `CRUGOS: crypt aes: aes-ni`.
 
+The three prompt gates deliberately leave `CRYPT_PASS` empty, so the ESP
+carries no `crypt.pass=` token and the kernel must ask. `make test-crypt-prompt`
+uses [scripts/run-crypt-prompt.py](../scripts/run-crypt-prompt.py) to reserve a
+loopback port, run QEMU with `SERIAL_TCP` (`-serial tcp:...,server=on,wait=on`),
+type the passphrase once at the prompt and then check the decrypted image with
+`mkcrypt extract`. `make test-crypt-prompt-wrong` types
+`CRYPT_PROMPT_WRONG_PASS` three times and expects
+`CRUGOS: crypt locked (too many attempts)`; `make test-crypt-prompt-timeout`
+appends `crypt.prompt_timeout=$(CRYPT_PROMPT_TIMEOUT_SEC)` (2 s) and sends
+nothing, expecting `CRUGOS: crypt locked (no passphrase)`. Both failing gates
+exit 35, and all three fail if the passphrase text shows up in the serial log.
+
 `make raid-disks` builds two 16 MiB GPT disks with `scripts/mkraid.sh`:
 each has a `crugraid` partition of type `fd00` at LBA 2048..26623, the same
 ext4 image is written to both data regions, and `scripts/raid-meta.py` stamps
@@ -494,12 +533,21 @@ scripts/check-raid.py build/x86_64/raid-a.img build/x86_64/raid-b.img
   four-member RAID10 test showing `2/4` is expected for the degraded gate.
 - `CRUGOS: crypt unlock failed` with a `crypt` parenthetical: the 16 KiB
   header is not valid, the passphrase does not match any active keyslot, or a
-  keyslot MAC failed. Check that `crypt.pass=` in the ESP command line matches
-  the passphrase `mkdisk.sh`/`mkcrypt format` sealed; `make test-crypt-wrongkey`
-  and `make test-crypt-tamper` expect this failure.
-- `CRUGOS: crypt locked (no password)`: the loader found no `crugos/cmdline.txt`
-  or it has no `crypt.pass=` token. The ESP is rebuilt by the `test-crypt`
-  targets; for `make run` write the file yourself.
+  keyslot MAC failed. Check that the `crypt.pass=` token in the ESP command
+  line - or the line typed at the console prompt - matches the passphrase
+  `mkdisk.sh`/`mkcrypt format` sealed; `make test-crypt-wrongkey` and
+  `make test-crypt-tamper` expect this failure.
+- `CRUGOS: crypt locked (no passphrase)`: no `crypt.pass=` token was found and
+  the console prompt got no usable line - EOF, Ctrl-C, a line at the 256-byte
+  limit, or the `crypt.prompt_timeout=` deadline. In a non-interactive run
+  (serial log only) nothing can answer the prompt, so supply the token or use
+  a prompt gate; the `test-crypt` targets put it on the ESP.
+- `CRUGOS: passphrase rejected (N attempt(s) left)`: the typed line did not
+  match any active keyslot. Two more attempts follow; after the third the boot
+  locks.
+- `CRUGOS: crypt locked (too many attempts)`: all three console attempts were
+  rejected, so the volume stays locked and the boot exits 35. Check the
+  passphrase sealed by `make crypt-disk`.
 - `CRUGOS: crypt ready` but the ext4 mount fails: the decrypted data is not the
   filesystem image that was formatted, or the image was regenerated without
   re-encrypting it. Run `make crypt-disk` and `make test-crypt` together.
@@ -556,8 +604,9 @@ scripts/check-raid.py build/x86_64/raid-a.img build/x86_64/raid-b.img
   synchronous, only for fully blank metadata; there is no online rebuild, hot
   spare, scrub, write-intent bitmap or generation bump.
 - Encryption is one `crypt.device` over one partition: AES-256-XTS with no
-  per-sector authentication (header/keyslot MACs only), passphrase from the
-  loader command line, no TPM/keyfile slot, no rekey or slot-management tool,
+  per-sector authentication (header/keyslot MACs only), passphrase typed on the
+  serial console or supplied through the loader command line, no framebuffer or
+  USB-keyboard input, no TPM/keyfile slot, no rekey or slot-management tool,
   no discard propagation, and RAID below encryption is not implemented. The
   passphrase, keys and bounce buffer are wiped by `storage_lock()` and the boot
   report redacts the command line. No redundant ESP yet. These remain phase 3B

@@ -21,6 +21,7 @@ void test_blake2b_functions(void);
 void test_aes_functions(void);
 void test_argon2_functions(void);
 void test_crypt_functions(void);
+void test_lineedit_functions(void);
 
 int main(void)
 {
@@ -36,6 +37,7 @@ int main(void)
     RUN(test_aes_functions);
     RUN(test_argon2_functions);
     RUN(test_crypt_functions);
+    RUN(test_lineedit_functions);
     printf("%d checks, %d failure(s)\n", tests_run, tests_failed);
     return tests_failed == 0 ? 0 : 1;
 }

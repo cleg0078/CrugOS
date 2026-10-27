@@ -10,6 +10,8 @@
 #include <crug/raid.h>
 #include <crug/string.h>
 #include <crug/kernel.h>
+#include <crug/lineedit.h>
+#include <crug/timer.h>
 #include "ext4_internal.h"
 
 #define STORAGE_MAX_DISKS 8u
@@ -26,10 +28,16 @@ static const u8 crypt_type_guid[16] = {
 };
 
 #define CRYPT_CMDLINE_MAX 4096u
+#define CRYPT_PROMPT_ATTEMPTS 3u
+#define CRYPT_PROMPT_TIMEOUT_MS 60000u
+#define CRYPT_PROMPT_TIMEOUT_MIN_SEC 1u
+#define CRYPT_PROMPT_TIMEOUT_MAX_SEC 3600u
+#define CRYPT_PROMPT_POLL_US 1000u
 
 static char g_crypt_pass[CRUG_CRYPT_MAX_PASSWORD + 1];
 static u32 g_crypt_pass_len;
 static struct block_device *g_crypt_dev;
+static u32 g_crypt_prompt_timeout_ms = CRYPT_PROMPT_TIMEOUT_MS;
 
 /* Volunteer zeroization: memset can be elided, a volatile store cannot. */
 static void storage_wipe(void *ptr, usize len)
@@ -217,18 +225,53 @@ static int cmdline_space(char c)
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
 
-/* The loader copies \crugos\cmdline.txt into the boot_info page. Only the
-   crypt.pass= token is consumed for now: there is no interactive console yet. */
+static int token_prefix(const char *tok, u64 len, const char *key, u64 key_len)
+{
+    u64 i;
+
+    if (len <= key_len)
+        return 0;
+    for (i = 0; i < key_len; i++) {
+        if (tok[i] != key[i])
+            return 0;
+    }
+    return 1;
+}
+
+/* Small decimal parser; rejects empty/overflowing values. */
+static u32 cmdline_u32(const char *s, u64 len)
+{
+    u64 value = 0;
+    u64 i;
+
+    if (len == 0)
+        return 0;
+    for (i = 0; i < len; i++) {
+        if (s[i] < '0' || s[i] > '9')
+            return 0;
+        value = value * 10 + (u64)(s[i] - '0');
+        if (value > 1000000u)
+            return 0;
+    }
+    return (u32)value;
+}
+
+/* The loader copies \crugos\cmdline.txt into the boot_info page. The file may
+   carry the passphrase (crypt.pass=, test/automation path) and the prompt
+   timeout in whole seconds (crypt.prompt_timeout=, non-secret). */
 static void storage_parse_cmdline(const boot_info *bi)
 {
-    static const char key[] = "crypt.pass=";
-    const usize key_len = sizeof(key) - 1;
+    static const char pass_key[] = "crypt.pass=";
+    static const char timeout_key[] = "crypt.prompt_timeout=";
+    const usize pass_len = sizeof(pass_key) - 1;
+    const usize timeout_len = sizeof(timeout_key) - 1;
     const char *cmd;
     u64 limit;
     u64 i = 0;
 
     g_crypt_pass_len = 0;
     g_crypt_pass[0] = 0;
+    g_crypt_prompt_timeout_ms = CRYPT_PROMPT_TIMEOUT_MS;
     if (bi == 0 || bi->magic != BOOTINFO_MAGIC || bi->command_line == 0)
         return;
     cmd = bi->command_line;
@@ -238,7 +281,6 @@ static void storage_parse_cmdline(const boot_info *bi)
     while (i < limit) {
         u64 start;
         u64 len;
-        u64 n;
 
         while (i < limit && cmdline_space(cmd[i]))
             i++;
@@ -246,24 +288,106 @@ static void storage_parse_cmdline(const boot_info *bi)
         while (i < limit && !cmdline_space(cmd[i]))
             i++;
         len = i - start;
-        if (len <= key_len)
-            continue;
-        n = 0;
-        while (n < key_len && cmd[start + n] == key[n])
-            n++;
-        if (n != key_len)
-            continue;
-        n = len - key_len;
-        if (n > CRUG_CRYPT_MAX_PASSWORD)
-            n = CRUG_CRYPT_MAX_PASSWORD;
-        memcpy(g_crypt_pass, cmd + start + key_len, (usize)n);
-        g_crypt_pass[n] = 0;
-        g_crypt_pass_len = (u32)n;
+        if (token_prefix(cmd + start, len, pass_key, pass_len)) {
+            u64 n = len - pass_len;
+
+            if (n > CRUG_CRYPT_MAX_PASSWORD)
+                n = CRUG_CRYPT_MAX_PASSWORD;
+            memcpy(g_crypt_pass, cmd + start + pass_len, (usize)n);
+            g_crypt_pass[n] = 0;
+            g_crypt_pass_len = (u32)n;
+        } else if (token_prefix(cmd + start, len, timeout_key, timeout_len)) {
+            u32 sec = cmdline_u32(cmd + start + timeout_len,
+                                  len - timeout_len);
+
+            if (sec < CRYPT_PROMPT_TIMEOUT_MIN_SEC)
+                sec = CRYPT_PROMPT_TIMEOUT_MIN_SEC;
+            if (sec > CRYPT_PROMPT_TIMEOUT_MAX_SEC)
+                sec = CRYPT_PROMPT_TIMEOUT_MAX_SEC;
+            g_crypt_prompt_timeout_ms = sec * 1000u;
+        }
     }
     /* The loader page is still mapped: drop the plaintext token right away. */
     storage_wipe((void *)(uintptr)cmd, (usize)limit);
 }
 
+/* Read one masked passphrase line from COM1. Returns 0 on Enter, -1 on
+   timeout, cancel, overflow or EOF. The caller owns wiping the buffer. */
+static int storage_prompt_line(char *buf, u32 cap)
+{
+    struct lineedit le;
+    u64 deadline;
+
+    kprintf("passphrase: ");
+    lineedit_init(&le, buf, cap);
+    deadline = timer_monotonic_ns() +
+               (u64)g_crypt_prompt_timeout_ms * 1000000ull;
+    for (;;) {
+        enum lineedit_status status;
+        u32 before;
+        int c;
+
+        c = serial_try_getc();
+        if (c < 0) {
+            if (timer_monotonic_ns() >= deadline) {
+                kprintf("\n");
+                return -1;
+            }
+            timer_busy_wait_us(CRYPT_PROMPT_POLL_US);
+            continue;
+        }
+        before = le.len;
+        status = lineedit_feed(&le, (char)c);
+        if (status == LINEEDIT_CANCEL) {
+            kprintf("\n");
+            return -1;
+        }
+        if (status == LINEEDIT_DONE) {
+            kprintf("\n");
+            return le.overflow ? -1 : 0;
+        }
+        if (le.len > before)
+            kprintf("*");
+        else if (le.len < before)
+            kprintf("\b \b");
+    }
+}
+
+/* Interactive unlock: up to CRYPT_PROMPT_ATTEMPTS masked prompts. The echo is
+   mask-only, so the passphrase never reaches the serial log. */
+static struct block_device *storage_prompt_unlock(struct block_device *part_bd)
+{
+    u32 attempt;
+
+    kprintf("CRUGOS: crypt passphrase required\n");
+    kprintf("CRUGOS: type the passphrase on the serial console (%u attempt(s))\n",
+            CRYPT_PROMPT_ATTEMPTS);
+    for (attempt = 1; attempt <= CRYPT_PROMPT_ATTEMPTS; attempt++) {
+        char pass[CRUG_CRYPT_MAX_PASSWORD + 1];
+        struct block_device *unlocked;
+
+        if (storage_prompt_line(pass, sizeof(pass)) != 0) {
+            storage_wipe(pass, sizeof(pass));
+            kprintf("CRUGOS: crypt locked (no passphrase)\n");
+            return 0;
+        }
+        if (pass[0] == 0) {
+            storage_wipe(pass, sizeof(pass));
+            kprintf("CRUGOS: crypt locked (empty passphrase)\n");
+            return 0;
+        }
+        unlocked = crypt_unlock(part_bd, 0, (const u8 *)pass,
+                                strlen(pass));
+        storage_wipe(pass, sizeof(pass));
+        if (unlocked)
+            return unlocked;
+        if (attempt < CRYPT_PROMPT_ATTEMPTS)
+            kprintf("CRUGOS: passphrase rejected (%u attempt(s) left)\n",
+                    CRYPT_PROMPT_ATTEMPTS - attempt);
+    }
+    kprintf("CRUGOS: crypt locked (too many attempts)\n");
+    return 0;
+}
 static int storage_crypt_root(u32 disks)
 {
     u32 i, j;
@@ -293,13 +417,12 @@ static int storage_crypt_root(u32 disks)
                 return -1;
             kprintf("CRUGOS: gpt ready\n");
             if (g_crypt_pass_len == 0) {
-                kprintf("CRUGOS: crypt locked (no password)\n");
+                unlocked = storage_prompt_unlock(part_bd);
+            } else {
+                unlocked = crypt_unlock(part_bd, 0, (const u8 *)g_crypt_pass,
+                                        g_crypt_pass_len);
                 storage_wipe_passphrase();
-                return -1;
             }
-            unlocked = crypt_unlock(part_bd, 0, (const u8 *)g_crypt_pass,
-                                    g_crypt_pass_len);
-            storage_wipe_passphrase();
             if (!unlocked)
                 return -1;
             g_crypt_dev = unlocked;

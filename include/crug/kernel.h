@@ -17,6 +17,7 @@ void arch_exit_qemu(u8 code) CRUG_NORETURN;
 void serial_init(void);
 void serial_putc(char c);
 void serial_write(const char *s);
+int serial_try_getc(void); /* -1 when no byte is waiting */
 
 void console_init(void);
 void console_putc(char c);

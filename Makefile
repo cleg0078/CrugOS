@@ -20,6 +20,9 @@
 #   make test-crypt-wrongkey  reject a wrong password without mounting
 #   make test-crypt-tamper  reject a tampered keyslot MAC
 #   make test-crypt-ni  boot the encrypted root using AES-NI
+#   make test-crypt-prompt  type the passphrase on the serial console and boot
+#   make test-crypt-prompt-wrong  reject three wrong console passphrases
+#   make test-crypt-prompt-timeout  fail closed when the prompt times out
 #   make test-raid-degraded  boot RAID1 with one member missing
 #   make test-raid10-degraded  boot RAID10 with one member per pair
 #   make test-raid-repair  boot RAID1 with one blank member and rebuild it
@@ -71,6 +74,7 @@ TIMEOUT_SEC ?= 30
 QEMU_ACCEL ?=
 QEMU_DISPLAY ?= none
 QEMU_EXTRA ?=
+SERIAL_TCP ?=
 OVMF_CODE ?= /usr/share/OVMF/OVMF_CODE_4M.fd
 OVMF_VARS ?= /usr/share/OVMF/OVMF_VARS_4M.fd
 
@@ -117,7 +121,10 @@ CRYPT_IMG ?= $(BUILD)/crypt.img
 CRYPT_TAMPER_IMG ?= $(BUILD)/crypt-tamper.img
 CRYPT_PASS ?= crugos-test
 CRYPT_RECOVERY_PASS ?= crugos-recovery
+CRYPT_PROMPT_WRONG_PASS ?= wrong-password
 CRYPT_M ?= 4096
+CRYPT_PROMPT_TIMEOUT_SEC ?= 2
+CMDLINE_EXTRA ?=
 MCRYPT := $(BUILD)/mkcrypt
 NVME_SERIAL ?= CRUGNVME0
 EXTRA_DISKS ?=
@@ -164,6 +171,7 @@ HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
         test-raid test-raid-degraded test-raid10 test-raid10-degraded test-nvme test-ahci \
         test-raid-repair test-raid10-repair test-journal-csum test-journal-replay \
         test-crypt test-crypt-recovery test-crypt-wrongkey test-crypt-tamper test-crypt-ni \
+        test-crypt-prompt test-crypt-prompt-wrong test-crypt-prompt-timeout \
         crash-disk \
         check-disk size check-efi repro test-host preflight version options clean distclean help
 
@@ -178,7 +186,11 @@ esp: $(KERNEL) $(LOADER)
 	$(Q)cp $(LOADER) $(ESP)/EFI/BOOT/$(LOADER_EFI_NAME)
 	$(Q)cp $(KERNEL) $(ESP)/crugos/kernel.elf
 	$(Q)printf '%s\n' "$(CRUGOS_VERSION)" > $(ESP)/crugos/version
-	$(Q)printf 'crypt.pass=%s\n' "$(CRYPT_PASS)" > $(ESP)/crugos/cmdline.txt
+	$(Q)cmdline=""; \
+	if [ -n "$(CRYPT_PASS)" ]; then cmdline="crypt.pass=$(CRYPT_PASS)"; fi; \
+	if [ -n "$(CMDLINE_EXTRA)" ]; then cmdline="$$cmdline $(CMDLINE_EXTRA)"; fi; \
+	if [ -n "$$cmdline" ]; then printf '%s\n' "$$cmdline" > $(ESP)/crugos/cmdline.txt; \
+	else rm -f $(ESP)/crugos/cmdline.txt; fi
 	@echo "  ESP   $(ESP) ($(CRUGOS_VERSION))"
 
 $(KERNEL_OBJECTS): VERSION
@@ -278,6 +290,7 @@ run: esp
 		MEMORY_MB="$(MEMORY_MB)" SMP="$(SMP)" TIMEOUT_SEC="$(TIMEOUT_SEC)" \
 		QEMU_CPU="$(QEMU_CPU)" QEMU_ACCEL="$(QEMU_ACCEL)" \
 		QEMU_DISPLAY="$(QEMU_DISPLAY)" QEMU_EXTRA="$(QEMU_EXTRA)" \
+		SERIAL_TCP="$(SERIAL_TCP)" \
 		DISK_IMG=$(if $(DISK_IMG),$(abspath $(DISK_IMG)),) \
 		NVME_DISK=$(if $(NVME_DISK),$(abspath $(NVME_DISK)),) \
 		NVME_SERIAL="$(NVME_SERIAL)" EXTRA_DISKS="$(EXTRA_DISKS)" \
@@ -369,6 +382,29 @@ test-crypt-tamper: esp crypt-disk scripts/tamper.py
 test-crypt-ni:
 	$(Q)$(MAKE) test-crypt QEMU_CPU=qemu64,+aes,+avx,+avx2 EXPECT_AES=aes-ni
 
+test-crypt-prompt: esp crypt-disk
+	$(Q)$(PYTHON) scripts/run-crypt-prompt.py correct \
+		--password "$(CRYPT_PASS)" --disk $(CRYPT_IMG) \
+		--serial-log $(SERIAL_LOG) --exit-code $(QEMU_EXIT)
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION \
+		"$(EXPECT_AVX2)" no no no no yes "$(EXPECT_AES)"
+	$(Q)$(PYTHON) scripts/check-disk.py $(CRYPT_IMG) \
+		--crypt-tool $(abspath $(MCRYPT)) --crypt-password "$(CRYPT_PASS)"
+
+test-crypt-prompt-wrong: esp crypt-disk
+	$(Q)$(PYTHON) scripts/run-crypt-prompt.py wrong \
+		--wrong-password "$(CRYPT_PROMPT_WRONG_PASS)" --disk $(CRYPT_IMG) \
+		--serial-log $(SERIAL_LOG) --exit-code $(QEMU_EXIT)
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION \
+		"$(EXPECT_AVX2)" no no no no wrong any
+
+test-crypt-prompt-timeout: esp crypt-disk
+	$(Q)$(PYTHON) scripts/run-crypt-prompt.py timeout --disk $(CRYPT_IMG) \
+		--serial-log $(SERIAL_LOG) --exit-code $(QEMU_EXIT) \
+		--cmdline-extra "crypt.prompt_timeout=$(CRYPT_PROMPT_TIMEOUT_SEC)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION \
+		"$(EXPECT_AVX2)" no no no no locked any
+
 test-journal-csum: esp crash-disk
 	$(Q)$(MAKE) --no-print-directory run DISK_IMG=$(CRASH_IMG)
 	$(Q)$(PYTHON) scripts/check-journal.py $(SERIAL_LOG) $(QEMU_EXIT) $(CRASH_IMG)
@@ -451,7 +487,11 @@ options:
 	@printf '  %-16s %s\n' CRYPT_RECOVERY_PASS "$(CRYPT_RECOVERY_PASS)"
 	@printf '  %-16s %s\n' CRYPT_M "$(CRYPT_M)"
 	@printf '  %-16s %s\n' MCRYPT "$(MCRYPT)"
+	@printf '  %-16s %s\n' CRYPT_PROMPT_TIMEOUT_SEC "$(CRYPT_PROMPT_TIMEOUT_SEC)"
+	@printf '  %-16s %s\n' CRYPT_PROMPT_WRONG_PASS "$(CRYPT_PROMPT_WRONG_PASS)"
 	@printf '  %-16s %s\n' HOST_CC "$(HOST_CC)"
+	@printf '  %-16s %s\n' CMDLINE_EXTRA "$(CMDLINE_EXTRA)"
+	@printf '  %-16s %s\n' SERIAL_TCP "$(SERIAL_TCP)"
 	@printf '  %-16s %s\n' EXTRA_DISKS "$(EXTRA_DISKS)"
 	@printf '  %-16s %s\n' BUILD "$(BUILD)"
 	@printf '  %-16s %s\n' KERNEL "$(KERNEL)"

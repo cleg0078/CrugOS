@@ -145,11 +145,41 @@ is:
    returned `crypt0` device;
 3. otherwise assemble RAID1/RAID10 `md0` from `fd00` partitions and mount it.
 
-With no password the boot prints `CRUGOS: crypt locked (no password)`; a
-header, keyslot or MAC failure prints `CRUGOS: crypt unlock failed` (variants
-name the step) and storage init fails, so `main.c` prints
-`CRUGOS: no root filesystem` and exits with status 35 (a deterministic boot
-failure, not a panic). A successful unlock prints:
+When the cmdline carries `crypt.pass=` (the automation path), the boot
+unlocks non-interactively and never prompts. Without it the kernel asks for the
+passphrase on the serial console instead of failing immediately:
+
+```
+CRUGOS: crypt passphrase required
+CRUGOS: type the passphrase on the serial console (3 attempt(s))
+passphrase: ***********
+CRUGOS: crypt ready (24544 sectors, keyslot 0, Argon2id m=4096 KiB t=3 p=1)
+```
+
+`storage_prompt_unlock()` gives the operator up to three attempts. Each line is
+read from COM1 by `storage_prompt_line()` through the reusable line editor in
+`kernel/lib/lineedit.c`: Enter ends a line, backspace/0x7F edits it, Ctrl-C or
+Esc cancels, only bytes >= 0x20 are accepted (UTF-8 passphrases work) up to
+`CRUG_CRYPT_MAX_PASSWORD` = 256 bytes, and the echo is one `*` per accepted
+byte, so the secret never enters the serial log. A rejected line prints
+`CRUGOS: passphrase rejected (N attempt(s) left)`; after the third rejection
+the boot prints `CRUGOS: crypt locked (too many attempts)`. An empty line,
+Ctrl-C/Esc, an over-long line or a read timeout fails closed on the spot with
+`CRUGOS: crypt locked (no passphrase)`, and an interrupted attempt is wiped.
+The caller zeroes each line buffer immediately after use (on success, on a
+rejected attempt and on every early return), and
+`storage_wipe_passphrase()`/the loader-page wipe are unchanged.
+
+The per-attempt timeout defaults to 60 s and can be shortened or lengthened
+with the non-secret `crypt.prompt_timeout=<seconds>` token (clamped to 1..3600
+and reset to the default on every boot). The token is used only for the prompt
+timeout and never influences the KDF; it exists so automated gates can boot a
+timeout in seconds without a separate build. If no line arrives the boot prints
+`CRUGOS: crypt locked (no passphrase)` and storage init fails, so `main.c`
+prints `CRUGOS: no root filesystem` and exits with status 35 (a deterministic
+boot failure, not a panic). A header, keyslot or MAC failure prints
+`CRUGOS: crypt unlock failed` (variants name the step) and fails the same way.
+A successful unlock prints:
 
 ```
 gpt    : crypt root 'crugcrypt' LBA 2048..26623
@@ -193,6 +223,15 @@ lets `mkcrypt` seal it. The default test parameters are `CRYPT_M=4096`,
 extracts the partition, runs `mkcrypt extract`, and then performs the same
 `e2fsck -fn` and file checks on the plaintext image. `scripts/tamper.py`
 flips one byte at a chosen image offset for the tamper gate.
+`scripts/run-crypt-prompt.py MODE` drives the interactive path. It picks a
+loopback port, runs `make run SERIAL_TCP=127.0.0.1:PORT CRYPT_PASS=` (so the
+ESP has no `crypt.pass=` token), connects to QEMU's `-serial tcp:...` socket,
+tees every byte into `build/x86_64/serial.log`, counts `passphrase:` prompts
+and types the right number of answers: one correct passphrase, three wrong
+ones, or none for the timeout (with `crypt.prompt_timeout=2`). It then checks
+the prompt count, the fail-closed markers, the QEMU exit status (33 for the
+successful unlock, 35 otherwise) and asserts that the correct passphrase does
+not appear in the log in plaintext.
 
 ## Gates
 
@@ -203,8 +242,11 @@ flips one byte at a chosen image offset for the tamper gate.
 | `make test-crypt-wrongkey` | a wrong passphrase prints `crypt unlock failed` and `no root filesystem` and exits 35 |
 | `make test-crypt-tamper` | flipping the MAC byte of keyslot 0 is rejected (exit 35) |
 | `make test-crypt-ni` | the same boot with `QEMU_CPU=qemu64,+aes,+avx,+avx2` reports `crypt aes: aes-ni` |
+| `make test-crypt-prompt` | no `crypt.pass=` token; the passphrase is typed on the serial console, echoed as `*`, and the encrypted root still passes the disk gate |
+| `make test-crypt-prompt-wrong` | three typed wrong passphrases produce three prompts, `crypt locked (too many attempts)` and exit 35 |
+| `make test-crypt-prompt-timeout` | `crypt.prompt_timeout=2` with no input produces one prompt, `crypt locked (no passphrase)` and exit 35 |
 
-All five are part of the release gate suite. The tamper offset
+All eight are part of the release gate suite. The tamper offset
 `1052776 = 2048*512 + 0x1000 + 0x68` is absolute in the image: it targets the
 MAC field of keyslot 0 inside the partition.
 
@@ -217,11 +259,14 @@ MAC field of keyslot 0 inside the partition.
   parameters are a deliberate boot-time/security tradeoff; a production
   installer should offer a larger `m` (tens of MiB) and accept a slower
   unlock. AES-XTS itself is negligible beside the KDF.
-- The passphrase arrives through the loader cmdline file, which is a testing
-  convenience, not a production interface: firmware and anyone with ESP write
-  access can replace it, and the string exists in the ESP file. The kernel
-  wipes its in-memory copy and never logs it, but a Workbench-era installer
-  should prompt on the console and unlink the cmdline.
+- A human can type the passphrase on the serial console, masked and with three
+  attempts, so no secret has to be stored on disk. `crypt.pass=` in the loader
+  cmdline remains an automation/test convenience, not a production interface:
+  firmware and anyone with ESP write access can replace it, and the string
+  exists in the ESP file (the kernel still wipes its in-memory copy and never
+  logs it). The prompt is serial-only for now; framebuffer/GOP console input
+  and USB keyboards arrive with the input stack, so a headless server is the
+  current use case.
 - XTS is encryption, not authentication: an attacker can flip ciphertext
   sectors and the filesystem will see modified plaintext. The header and each
   keyslot are authenticated with a MAC, but there is no per-sector
@@ -247,5 +292,5 @@ MAC field of keyslot 0 inside the partition.
 - **crypt header/slot** host tests cover format/validate, seal/unseal, the
   recovery slot, wrong passwords, out-of-range slots, short scratch and
   tampering with the salt, `enc_master`, MAC, state and flags.
-- `make test-host` runs 754 checks, including the AES, XTS, Argon2id, BLAKE2b
-  and crypt-metadata vectors.
+- `make test-host` runs 809 checks, including the AES, XTS, Argon2id, BLAKE2b,
+  crypt-metadata and line-editor vectors.

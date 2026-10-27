@@ -8,12 +8,13 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 3B-9 encryption (`v0.13.0`)
+## Status: phase 3B-10 console unlock (`v0.14.0`)
 
-Phases 1-3B-9 keep the boot path under a kernel that owns memory, CPU state,
+Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
 striped RAID roots that can rebuild a replacement member, an AES-256-XTS
-encrypted root, and three storage transports:
+encrypted root that can be unlocked with a passphrase typed on the console,
+and three storage transports:
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -202,6 +203,26 @@ Phase 3B-9 adds encryption at the block layer:
   unlock, recovery keyslot, wrong passphrase, tampered MAC and AES-NI. See
   [crypto.md](docs/crypto.md).
 
+Phase 3B-10 makes the encrypted root usable without storing the secret:
+
+- when the ESP carries no `crypt.pass=` token, the kernel prints
+  `CRUGOS: crypt passphrase required` and then `passphrase: `, echoes one
+  `*` per accepted byte and gives the operator up to three attempts;
+- the reusable line editor in `kernel/lib/lineedit.c` handles Enter,
+  backspace, Ctrl-C/Esc cancel, UTF-8 passphrases and overflow, and is covered
+  by host tests; every accepted line is zeroed after the unlock attempt;
+- `crypt.prompt_timeout=<seconds>` (1..3600, default 60, per attempt) keeps a
+  headless machine from hanging; a rejected line prints
+  `passphrase rejected (N attempt(s) left)`, three of them print
+  `crypt locked (too many attempts)`, and the boot exits with status 35;
+- `scripts/run-crypt-prompt.py` connects to QEMU's `-serial tcp:` console
+  (`SERIAL_TCP`), types the answers and asserts that the passphrase never
+  appears in the serial log; `make test-crypt-prompt`,
+  `test-crypt-prompt-wrong` and `test-crypt-prompt-timeout` prove the
+  successful typed unlock, the three-attempt limit and the timeout;
+- `crypt.pass=` remains the non-interactive automation path and never
+  prompts. See [crypto.md](docs/crypto.md).
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -210,16 +231,17 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.13.0 (phase 3b9) -- Amiga-inspired microkernel bring-up
+CrugOS 0.14.0 (phase 3b10) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.13.0
-pmm    : 118342 pages (462 MiB), free 118341, bitmap 131072 B
+CRUGOS: version 0.14.0
+pmm    : 118339 pages (462 MiB), free 118338, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
-vm     : 4 GiB identity map, W^X kernel sections, guard=0x0000000000183000
+vm     : 4 GiB identity map, W^X kernel sections, guard=0x0000000000185000
 CRUGOS: vm ready
+cpu    : smep=no smap=no tsc_deadline=no
 CRUGOS: cpu ready
-timer  : 2687980163 Hz (pit), mode=lapic-periodic, 100 Hz tick
+timer  : 2687810622 Hz (pit), mode=lapic-periodic, 100 Hz tick
 CRUGOS: timer ready
 CRUGOS: heap ready
 virtio : blk vda, 32768 sectors, io=0x6000
@@ -231,31 +253,45 @@ CRUGOS: block ready (2 device(s))
 storage: no GPT on sda
 gpt    : crypt root 'crugcrypt' LBA 2048..26623
 CRUGOS: gpt ready
+CRUGOS: crypt passphrase required
+CRUGOS: type the passphrase on the serial console (3 attempt(s))
+passphrase: ***********
 CRUGOS: crypt ready (24544 sectors, keyslot 0, Argon2id m=4096 KiB t=3 p=1)
-CRUGOS: crypt aes: aes-ni
+CRUGOS: crypt aes: software
 CRUGOS: root device crypt0
 CRUGOS: ext4 ready
 CRUGOS: journal ready
 CRUGOS: ext4 /hello.txt: hello from ext4
 CRUGOS: storage ready
+sched  : per-class run queues ready, boot thread id 0, idle id 1
 CRUGOS: sched ready
 CRUGOS: syscall ready
+trap   : breakpoint handled at rip=0x0000000000100e2b
 CRUGOS: journal committed 1 block(s) in 1 descriptor(s)
 CRUGOS: journal selftest ok (1 blocks recovered)
 CRUGOS: writable storage ok
 CRUGOS: selftest ok
+kernel : 0x0000000000100000 size=576 KiB
+boot   : cpu=0 acpi_rsdp=0x1f77e000 fdt=0x0 initrd=0x0
+memory : 35 regions, usable 473356 KiB (462 MiB)
+pmm    : total=118339 free=118299 bitmap=131072 B
+fb     : 1024x768 stride=1024 format=BGRX8888 base=0x80000000
+cmdline: (none)
+entropy: 7a175a450b874f0e
 wx     : audit ok, identity map 0..4 GiB, guard unmapped
 heap   : total=77824 B used=26000 B slab_pages=12 large_pages=7
-cmdline: 23 bytes (redacted)
-boot   : pmm=27798 us cpu=422 us vm=628 us traps=318 us timer=65311 us heap=60 us storage=289150 us sched=303 us syscall=103 us total=384098 us
-CRUGOS: phase 3b9 boot ok
+sched  : switches=112
+boot   : pmm=27272 us cpu=428 us vm=651 us traps=356 us timer=65352 us heap=72 us storage=230495 us sched=339 us syscall=112 us total=325081 us
+timer  : 2687810622 Hz (pit), ticks=46, mono=755123708 ns
+CRUGOS: phase 3b10 boot ok
 ```
 
-This excerpt is the `make test-crypt-ni` boot, so it shows the AES-NI path;
-plain `make test-crypt` boots the same image and prints `crypt aes: software`.
-Argon2id with `m=4096 KiB, t=3` dominates the ~290 ms storage stage under TCG,
-so an encrypted boot takes about 380-430 ms while the unencrypted gates take
-about 190 ms. The
+This excerpt is the `make test-crypt-prompt` boot: the passphrase was typed
+on QEMU's serial console (`SERIAL_TCP`), which is why the log shows the masked
+prompt and `cmdline: (none)`. `make test-crypt-ni` boots the same volume and
+prints `crypt aes: aes-ni`. Argon2id with `m=4096 KiB, t=3` dominates the
+~230 ms storage stage under TCG, so an encrypted boot takes about 325-430 ms
+while the unencrypted gates take about 190 ms. The
 `storage: no GPT on sda` line is expected: `sda` is the firmware's ESP disk,
 and the test volume is the virtio disk `vda`.
 
@@ -283,6 +319,9 @@ make test-crypt-recovery  # unlock the second (recovery) keyslot
 make test-crypt-wrongkey  # a wrong passphrase must fail closed
 make test-crypt-tamper  # a corrupted keyslot MAC must be rejected
 make test-crypt-ni  # the same encrypted boot with AES-NI
+make test-crypt-prompt  # type the passphrase on the serial console
+make test-crypt-prompt-wrong  # three wrong lines must lock the volume
+make test-crypt-prompt-timeout  # an unanswered prompt must fail closed
 make run         # boot and keep the serial log for inspection
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
 make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots)
@@ -308,8 +347,9 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `QEMU_DISPLAY`, `QEMU_EXTRA`, `OVMF_CODE`, `OVMF_VARS`, `REQUIRE_AVX2`,
 `EXPECT_AVX2`, `EXPECT_RAID`, `EXPECT_NVME`, `EXPECT_REBUILD`, `EXPECT_AHCI`,
 `EXPECT_CRYPT`, `EXPECT_AES`, `NVME_IMG`, `AHCI_IMG`, `CRYPT_IMG`,
-`CRYPT_TAMPER_IMG`, `CRYPT_PASS`, `CRYPT_RECOVERY_PASS`, `CRYPT_M`, `MCRYPT`,
-`HOST_CC` and `MODE`; see [docs/build.md](docs/build.md).
+`CRYPT_TAMPER_IMG`, `CRYPT_PASS`, `CRYPT_RECOVERY_PASS`, `CRYPT_M`,
+`CRYPT_PROMPT_TIMEOUT_SEC`, `CRYPT_PROMPT_WRONG_PASS`, `CMDLINE_EXTRA`,
+`SERIAL_TCP`, `MCRYPT`, `HOST_CC` and `MODE`; see [docs/build.md](docs/build.md).
 
 ## Repository layout
 
@@ -319,13 +359,13 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `include/crug/` | shared kernel/loader headers (types, BootInfo, I/O, string, heap, threads, IPC, syscalls) |
 | `kernel/arch/x86_64/` | boot code, linker script, port I/O, serial, framebuffer, CPU/IDT/APIC/timer, context switch |
 | `kernel/core/` | kernel entry, console, printf, panic, self-tests, scheduler, handles, MsgPort, syscall dispatcher, boot report |
-| `kernel/lib/` | freestanding string, formatting and bitmap routines |
+| `kernel/lib/` | freestanding string, formatting, bitmap and console line-editor routines |
 | `kernel/mm/` | physical allocator, W^X page tables, kernel heap |
 | `kernel/block/` | block-device registry, partitions, bounds checks, RAID1/RAID10, boot-time rebuild and the AES-256-XTS `crypt.device` |
-| `kernel/fs/` | GPT, writable checksummed ext4, checksummed JBD2 journal and the storage boot policy |
+| `kernel/fs/` | GPT, writable checksummed ext4, checksummed JBD2 journal and the storage boot policy (including the console passphrase prompt) |
 | `kernel/crypto/` | AES, XTS, AES-NI, BLAKE2b and Argon2id (shared with the host tools) |
 | `drivers/` | PCI, legacy virtio-blk, NVMe and AHCI/SATA block device drivers |
-| `scripts/` | QEMU runner, disk/RAID1/RAID10/crypt image builders, boot/PE/disk/RAID/journal/crypt checks, tamper helper, size and reproducibility gates |
+| `scripts/` | QEMU runner, disk/RAID1/RAID10/crypt image builders, boot/PE/disk/RAID/journal/crypt checks, the serial prompt driver, tamper helper, size and reproducibility gates |
 | `tests/host/` | host unit tests for freestanding code |
 | `tools/` | host-side development tools (`gen-font.py`, `mkcrypt.c`, `gen-crc32c.py`) |
 | `docs/` | [build](docs/build.md), [boot](docs/boot.md), [storage](docs/storage.md), [checksums](docs/checksums.md), [crypto](docs/crypto.md), [NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
@@ -344,7 +384,7 @@ compatibility rules.
 
 `include/crug/bootinfo.h` defines `boot_info`: magic `0x43524731`, version 1,
 the kernel extent, the normalized memory map, framebuffer mode, ACPI RSDP,
-optional FDT/initrd, boot CPU id, a 64-byte entropy seed, the loader's TSC and the optional command line used for `crypt.pass=` during bring-up.
+optional FDT/initrd, boot CPU id, a 64-byte entropy seed, the loader's TSC, the optional command line (the `crypt.pass=` automation token) and, when that token is absent, an interactive serial passphrase prompt.
 See [docs/boot.md](docs/boot.md) for the full handoff ABI and exit protocol.
 
 ## Toolchain notes
@@ -365,7 +405,7 @@ See [docs/boot.md](docs/boot.md) for the full handoff ABI and exit protocol.
 
 ## Roadmap
 
-Phases 0, 1, 2, 3A and 3B-1 through 3B-9 are done. Phase 3A covered the block
+Phases 0, 1, 2, 3A and 3B-1 through 3B-10 are done. Phase 3A covered the block
 layer, legacy virtio-blk, GPT and read-only EXT4; phase 3B-1 added the writable
 EXT4 path and an on-disk consistency gate; phase 3B-2 added JBD2 journal replay
 and ordered metadata journaling; phase 3B-3 added a RAID1 root with healthy and
@@ -375,10 +415,11 @@ boot-time rebuild of a blank RAID1/RAID10 member; phase 3B-7 added a polled
 AHCI/SATA driver and a SATA-root boot gate; phase 3B-8 added ext4 metadata and
 JBD2 journal checksums plus multi-descriptor transactions; phase 3B-9 added an
 AES-256-XTS encrypted root with Argon2id keyslots, a recovery passphrase,
-loader-supplied passphrase handling and key zeroization. Remaining phase 3B
-work is online RAID rebuild, hot spare, scrub and a write-intent bitmap, RAID
-below encryption, a redundant ESP, TPM/keyfile keyslots and USB
-storage/hotplug. Later phases cover USB/audio/graphics, Workbench userspace,
+loader-supplied passphrase handling and key zeroization; phase 3B-10 added the
+masked console passphrase prompt with retries and a per-attempt timeout.
+Remaining phase 3B work is online RAID rebuild, hot spare, scrub and a
+write-intent bitmap, RAID below encryption, a redundant ESP, TPM/keyfile
+keyslots, framebuffer/USB keyboard input and USB storage/hotplug. Later phases cover USB/audio/graphics, Workbench userspace,
 SMP/IOMMU and virtualisation. See
 [docs/roadmap.md](docs/roadmap.md) for the full sequence and the known
 specification gaps (Crug syntax, cross-architecture compilers and the OVMF
