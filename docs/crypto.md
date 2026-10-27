@@ -147,17 +147,19 @@ is:
 
 When the cmdline carries `crypt.pass=` (the automation path), the boot
 unlocks non-interactively and never prompts. Without it the kernel asks for the
-passphrase on the serial console instead of failing immediately:
+passphrase on the console instead of failing immediately:
 
 ```
 CRUGOS: crypt passphrase required
-CRUGOS: type the passphrase on the serial console (3 attempt(s))
+CRUGOS: type the passphrase on the console (serial or keyboard) (3 attempt(s))
 passphrase: ***********
 CRUGOS: crypt ready (24544 sectors, keyslot 0, Argon2id m=4096 KiB t=3 p=1)
 ```
 
 `storage_prompt_unlock()` gives the operator up to three attempts. Each line is
-read from COM1 by `storage_prompt_line()` through the reusable line editor in
+read by `storage_prompt_line()` through `console_try_getc()` - COM1 first, then
+the polled i8042 keyboard through `input.device` (phase 4A, see
+[input.md](input.md)) - and the reusable line editor in
 `kernel/lib/lineedit.c`: Enter ends a line, backspace/0x7F edits it, Ctrl-C or
 Esc cancels, only bytes >= 0x20 are accepted (UTF-8 passphrases work) up to
 `CRUG_CRYPT_MAX_PASSWORD` = 256 bytes, and the echo is one `*` per accepted
@@ -223,7 +225,14 @@ lets `mkcrypt` seal it. The default test parameters are `CRYPT_M=4096`,
 extracts the partition, runs `mkcrypt extract`, and then performs the same
 `e2fsck -fn` and file checks on the plaintext image. `scripts/tamper.py`
 flips one byte at a chosen image offset for the tamper gate.
-`scripts/run-crypt-prompt.py MODE` drives the interactive path. It picks a
+`scripts/run-crypt-keyboard.py MODE` drives the same prompt without touching the
+serial input path: it reserves a QMP socket (`QEMU_EXTRA=-qmp
+unix:<sock>,server=on,wait=off`), waits for `passphrase: ` in the log and then
+sends one QMP `send-key` event per character (40 ms hold and 40 ms gap) followed
+by `ret`, either once (`correct`) or once per prompt (`wrong`). The serial line
+stays a write-only log file, so `console_try_getc()` falls through to the
+keyboard. Both modes assert that the passphrase never appears in the log.
+`scripts/run-crypt-prompt.py MODE` drives the serial variant instead. It picks a
 loopback port, runs `make run SERIAL_TCP=127.0.0.1:PORT CRYPT_PASS=` (so the
 ESP has no `crypt.pass=` token), connects to QEMU's `-serial tcp:...` socket,
 tees every byte into `build/x86_64/serial.log`, counts `passphrase:` prompts
@@ -243,10 +252,12 @@ not appear in the log in plaintext.
 | `make test-crypt-tamper` | flipping the MAC byte of keyslot 0 is rejected (exit 35) |
 | `make test-crypt-ni` | the same boot with `QEMU_CPU=qemu64,+aes,+avx,+avx2` reports `crypt aes: aes-ni` |
 | `make test-crypt-prompt` | no `crypt.pass=` token; the passphrase is typed on the serial console, echoed as `*`, and the encrypted root still passes the disk gate |
+| `make test-crypt-keyboard` | the same boot, but the passphrase is typed on the PS/2 keyboard through QMP `send-key`; the decrypted image passes `e2fsck` |
+| `make test-crypt-keyboard-wrong` | three wrong keyboard passphrases produce three prompts, `crypt locked (too many attempts)` and exit 35 |
 | `make test-crypt-prompt-wrong` | three typed wrong passphrases produce three prompts, `crypt locked (too many attempts)` and exit 35 |
 | `make test-crypt-prompt-timeout` | `crypt.prompt_timeout=2` with no input produces one prompt, `crypt locked (no passphrase)` and exit 35 |
 
-All eight are part of the release gate suite. The tamper offset
+All ten are part of the release gate suite. The tamper offset
 `1052776 = 2048*512 + 0x1000 + 0x68` is absolute in the image: it targets the
 MAC field of keyslot 0 inside the partition.
 
@@ -259,14 +270,14 @@ MAC field of keyslot 0 inside the partition.
   parameters are a deliberate boot-time/security tradeoff; a production
   installer should offer a larger `m` (tens of MiB) and accept a slower
   unlock. AES-XTS itself is negligible beside the KDF.
-- A human can type the passphrase on the serial console, masked and with three
-  attempts, so no secret has to be stored on disk. `crypt.pass=` in the loader
-  cmdline remains an automation/test convenience, not a production interface:
-  firmware and anyone with ESP write access can replace it, and the string
-  exists in the ESP file (the kernel still wipes its in-memory copy and never
-  logs it). The prompt is serial-only for now; framebuffer/GOP console input
-  and USB keyboards arrive with the input stack, so a headless server is the
-  current use case.
+- A human can type the passphrase on the console - serial line or PS/2 keyboard
+  - masked and with three attempts, so no secret has to be stored on disk.
+  `crypt.pass=` in the loader cmdline remains an automation/test convenience,
+  not a production interface: firmware and anyone with ESP write access can
+  replace it, and the string exists in the ESP file (the kernel still wipes its
+  in-memory copy and never logs it). Input is still polled and US-layout only:
+  there is no framebuffer/GOP console input, no USB HID keyboard and no
+  virtual-terminal switching yet.
 - XTS is encryption, not authentication: an attacker can flip ciphertext
   sectors and the filesystem will see modified plaintext. The header and each
   keyslot are authenticated with a MAC, but there is no per-sector

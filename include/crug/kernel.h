@@ -22,6 +22,7 @@ int serial_try_getc(void); /* -1 when no byte is waiting */
 void console_init(void);
 void console_putc(char c);
 void console_write(const char *s);
+int console_try_getc(void); /* serial first, then polled keyboard; -1 if idle */
 
 void fb_init(const framebuffer_info *fb);
 int fb_ready(void);

@@ -17,6 +17,7 @@ REQUIRED_MARKERS = (
     "CRUGOS: cpu ready",
     "CRUGOS: timer ready",
     "CRUGOS: heap ready",
+    "CRUGOS: input ready",
     "CRUGOS: sched ready",
     "CRUGOS: syscall ready",
     "CRUGOS: block ready",
@@ -29,7 +30,7 @@ REQUIRED_MARKERS = (
     "CRUGOS: selftest ok",
     "CRUGOS: nvme ready",
     "CRUGOS: ahci ready",
-    "CRUGOS: phase 3b10 boot ok",
+    "CRUGOS: phase 4a boot ok",
 )
 # A rejected unlock stops before scheduling, storage mounting and self-tests.
 WRONG_CRYPT_MARKERS = (
@@ -39,6 +40,7 @@ WRONG_CRYPT_MARKERS = (
     "CRUGOS: cpu ready",
     "CRUGOS: timer ready",
     "CRUGOS: heap ready",
+    "CRUGOS: input ready",
     "CRUGOS: block ready",
     "CRUGOS: gpt ready",
     "CRUGOS: crypt unlock failed",
@@ -52,6 +54,7 @@ LOCKED_CRYPT_MARKERS = (
     "CRUGOS: cpu ready",
     "CRUGOS: timer ready",
     "CRUGOS: heap ready",
+    "CRUGOS: input ready",
     "CRUGOS: block ready",
     "CRUGOS: gpt ready",
     "CRUGOS: crypt locked (no passphrase)",

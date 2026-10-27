@@ -17,9 +17,11 @@ from a SATA disk as well. Phase 3B-8 adds ext4 metadata checksums and JBD2
 journal checksums with multi-descriptor transactions. Phase 3B-9 adds
 `crypt.device`, an AES-256-XTS volume unlocked with an Argon2id-derived key, so
 the same ext4/JBD2 stack can run on an encrypted partition. Phase 3B-10 unlocks
-that volume with a masked passphrase typed on the serial console (three attempts
-with a per-attempt timeout), while `crypt.pass=` on the loader command line
-remains for automation.
+that volume with a masked passphrase typed on the console (three attempts with a
+per-attempt timeout), while `crypt.pass=` on the loader command line remains for
+automation. Phase 4A adds `input.device`: a polled PS/2 keyboard whose bytes are
+merged with the serial line behind `console_try_getc()`, so the same prompt also
+accepts a real keyboard. See [input.md](input.md).
 
 ```
 virtio-blk-pci (legacy I/O BAR)  NVMe PCIe (class 01/08/02)  AHCI/SATA (class 01/06/01)
@@ -45,7 +47,7 @@ CRUGOS: ahci ready (<n> device(s))
 CRUGOS: block ready (<n> device(s))
 CRUGOS: gpt ready
 CRUGOS: crypt passphrase required
-CRUGOS: type the passphrase on the serial console (3 attempt(s))
+CRUGOS: type the passphrase on the console (serial or keyboard) (3 attempt(s))
 passphrase: ***********             # masked, never logged
 CRUGOS: crypt ready (<n> sectors, keyslot <i>, Argon2id m=<m> KiB t=<t> p=<p>)
 CRUGOS: crypt aes: software           # or: aes-ni
@@ -66,8 +68,9 @@ CRUGOS: journal selftest ok (<n> blocks recovered)
 The `crypt` lines appear only when a `crugcrypt` partition is the root; a
 rejected passphrase prints `CRUGOS: crypt unlock failed` (with a reason) and
 then `CRUGOS: no root filesystem` before the deterministic failure exit. When
-there is no `crypt.pass=` token the kernel asks on the serial console instead,
-printing one `passphrase:` prompt per attempt, three attempts bounded by
+there is no `crypt.pass=` token the kernel asks on the console instead (serial
+line first, then the PS/2 keyboard), printing one `passphrase:` prompt per
+attempt, three attempts bounded by
 `crypt.prompt_timeout=` (1..3600 s, 60 s per attempt by default) and only the
 `*` mask. A rejected line prints `CRUGOS: passphrase rejected (N attempt(s)
 left)`; three rejections print `CRUGOS: crypt locked (too many attempts)`, and
@@ -237,7 +240,8 @@ partition.
 one and wipes the command-line page afterwards. With no token the boot falls
 back to the console: `storage_prompt_unlock()` prints
 `CRUGOS: crypt passphrase required`, then `passphrase: `, and reads a masked
-line with the serial poller and the shared line editor
+line through `console_try_getc()` (serial line first, then the polled i8042
+keyboard via `input_try_getc()`) and the shared line editor
 (`kernel/lib/lineedit.c`), echoing `*` per accepted byte. It allows three
 attempts, each bounded by `crypt.prompt_timeout=` (1..3600 s, 60 s by default),
 prints `CRUGOS: passphrase rejected (N attempt(s) left)` for a wrong line and
@@ -605,8 +609,9 @@ scripts/check-raid.py build/x86_64/raid-a.img build/x86_64/raid-b.img
   spare, scrub, write-intent bitmap or generation bump.
 - Encryption is one `crypt.device` over one partition: AES-256-XTS with no
   per-sector authentication (header/keyslot MACs only), passphrase typed on the
-  serial console or supplied through the loader command line, no framebuffer or
-  USB-keyboard input, no TPM/keyfile slot, no rekey or slot-management tool,
+  serial line or the PS/2 keyboard (or supplied through the loader command
+  line), no framebuffer/GOP input, no USB HID keyboard and no virtual
+  terminals, no TPM/keyfile slot, no rekey or slot-management tool,
   no discard propagation, and RAID below encryption is not implemented. The
   passphrase, keys and bounce buffer are wiped by `storage_lock()` and the boot
   report redacts the command line. No redundant ESP yet. These remain phase 3B

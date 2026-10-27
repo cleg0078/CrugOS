@@ -1,6 +1,6 @@
 # Building CrugOS
 
-This document describes the phase 3B-10 build system: how the kernel, the UEFI
+This document describes the phase 4A build system: how the kernel, the UEFI
 loader, the host crypto tool and the test disk images are built, which
 invariants the link must preserve, and how to diagnose the failure modes that
 are specific to this toolchain.
@@ -44,8 +44,10 @@ make test-crypt-ni  # the same encrypted boot with AES-NI enabled
 make test-crypt-prompt  # type the passphrase on QEMU's serial console and boot
 make test-crypt-prompt-wrong  # three wrong console passphrases must lock the volume
 make test-crypt-prompt-timeout  # an unanswered prompt must fail closed
+make test-crypt-keyboard  # type the passphrase on the PS/2 keyboard and boot
+make test-crypt-keyboard-wrong  # three wrong keyboard passphrases must lock the volume
 make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
-make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor
+make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes
 make disk        # build the GPT/ext4 test disk at build/<arch>/disk.img
 make raid-disks  # build the two GPT/ext4 RAID1 member disks
 make raid10-disks  # build the four GPT/ext4 RAID10 member disks
@@ -112,7 +114,7 @@ options` prints the complete resolved set (including paths derived from
 | `CRYPT_PROMPT_TIMEOUT_SEC` | `2` | per-attempt console prompt timeout used by the timeout gate |
 | `CRYPT_PROMPT_WRONG_PASS` | `wrong-password` | passphrase typed three times by the wrong-passphrase gate |
 | `CMDLINE_EXTRA` | empty | extra tokens appended to the ESP `crugos/cmdline.txt`, e.g. `crypt.prompt_timeout=2` |
-| `SERIAL_TCP` | empty | when set, QEMU exposes the serial console as `tcp:<value>` instead of a log file |
+| `SERIAL_TCP` | empty | when set, QEMU exposes the serial console as `tcp:<value>` instead of a log file (used by the console-prompt gates; the keyboard gates instead pass a `-qmp unix:<sock>` argument through `QEMU_EXTRA`) |
 | `MCRYPT` | `build/<arch>/mkcrypt` | host crypt tool (format/extract) |
 | `HOST_CC` | `cc` | host compiler for `mkcrypt` and `tests/host` |
 | `EXTRA_DISKS` | empty | space-separated images attached after `DISK_IMG` |
@@ -274,6 +276,19 @@ appends `crypt.prompt_timeout=$(CRYPT_PROMPT_TIMEOUT_SEC)` (2 s by default) to
 the command line, sends nothing, and expects `crypt locked (no passphrase)`.
 Both failing gates require exit status 35, and every prompt gate fails if the
 passphrase text appears in the serial log.
+
+The keyboard gates keep the serial line write-only (no `SERIAL_TCP`) and inject
+keystrokes through QEMU's QMP monitor instead:
+[scripts/run-crypt-keyboard.py](../scripts/run-crypt-keyboard.py) starts
+`make run QEMU_EXTRA=-qmp unix:<sock>,server=on,wait=off`, waits for the serial
+log to contain `passphrase: `, then sends one QMP `send-key` event per character
+(`{"type": "qcode", "data": "<key name>"}`, 40 ms hold and 40 ms gap) and
+finally `ret`. `make test-crypt-keyboard` types `CRYPT_PASS` and then checks the
+decrypted image; `make test-crypt-keyboard-wrong` types
+`CRYPT_PROMPT_WRONG_PASS` once per prompt, requires three prompts,
+`crypt locked (too many attempts)` and exit status 35, and asserts that the
+secret never appears in the serial log. The path needs the guest to print
+`CRUGOS: input ready (serial + keyboard)`; see [input.md](input.md).
 
 The supported ext4 subset, write path, checksum layout, journal format and
 failure modes are documented in [storage.md](storage.md) and
@@ -443,6 +458,20 @@ randomisation that leaks into the output will fail this target.
 - **A passphrase appears in the serial log**: this must never happen. The boot
   prints only the `*` mask and the driver asserts the typed secret is absent;
   the prompt gates fail otherwise.
+- **`CRUGOS: input ready (serial only)`**: `keyboard_init` did not find an i8042
+  controller (the status port read `0xFF`) or it did not accept the
+  configuration byte. The gates rely on the q35 PS/2 keyboard; without it only
+  the serial line can type the passphrase.
+- **Keyboard gate: `QMP error: CommandNotFound` for `sendkey`**: the QMP command
+  is `send-key` and its `keys` argument is an array of KeyValue objects, not a
+  string. See `scripts/run-crypt-keyboard.py`.
+- **Keyboard gate waits forever at the prompt**: the serial line must stay
+  write-only, otherwise `serial_try_getc()` consumes the input path first. Do not
+  set `SERIAL_TCP` for these gates and pass `CRYPT_PASS=` so no `crypt.pass=`
+  token is written to the ESP.
+- **Keyboard gate types into nothing**: QEMU's `-display none` still owns a PS/2
+  keyboard on q35, but the QMP socket must be up before the prompt appears; the
+  driver waits for both the socket and the `passphrase: ` marker.
 - **Tamper gate boots successfully**: the flipped byte must land in the
   partition, not in the image's GPT area. The gate uses offset
   `1052776 = 2048*512 + 0x1000 + 0x68` (keyslot 0 MAC); `scripts/tamper.py`

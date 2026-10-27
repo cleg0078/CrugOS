@@ -92,7 +92,11 @@ post-snapshot allocations cannot push it over capacity.
 6. `timer_init`: TSC frequency, TSC-deadline or LAPIC periodic. Interrupts
    stay disabled until the execution model exists.
 7. `heap_init`: slab caches and large-allocation headers. `CRUGOS: heap ready`.
-8. `storage_init`: `block_init`, the legacy virtio-blk devices, then the
+8. `input_init` and `keyboard_init`: reset `input.device`, then program the
+   i8042 controller (translation on, IRQ1/IRQ12 masked) and enable scanning.
+   The boot prints `CRUGOS: input ready (serial + keyboard)`, or
+   `(serial only)` when no i8042 keyboard answered.
+9. `storage_init`: `block_init`, the legacy virtio-blk devices, then the
    NVMe driver (PCI class 01/08/02, admin/I/O queues, namespace 1) and the AHCI
    driver (PCI class 01/06/01, port bring-up, IDENTIFY, `sd` names), and the GPT
    of every block device. `storage_parse_cmdline` first extracts `crypt.pass=`
@@ -123,23 +127,24 @@ post-snapshot allocations cannot push it over capacity.
    `CRUGOS: virtio ready`, `CRUGOS: nvme ready`, `CRUGOS: ahci ready`,
    `CRUGOS: block ready`,
    `CRUGOS: gpt ready`, `CRUGOS: crypt passphrase required` and the
-   interactive `passphrase:` prompt when the console is used, `CRUGOS: raid
+   interactive `passphrase:` prompt when the console is used (serial line or
+   PS/2 keyboard), `CRUGOS: raid
    ready`,
    `CRUGOS: raid rebuilt (<n> member(s))` when a spare was rebuilt, the
    `raid   : level ...` geometry line and
    `CRUGOS: raid healthy`/`raid degraded` when RAID is used, then
    `CRUGOS: root device <partition>` for the selected root partition, then
    `CRUGOS: ext4 ready`, `CRUGOS: journal ready`, `CRUGOS: storage ready`.
-9. `sched_init`: per-class run queues, boot thread id 0 and the idle thread.
+10. `sched_init`: per-class run queues, boot thread id 0 and the idle thread.
    `CRUGOS: sched ready`.
-10. `process_init`: the kernel process and its handle table.
+11. `process_init`: the kernel process and its handle table.
     `CRUGOS: syscall ready`.
-11. `sti`, then `selftest_run`: allocator, mappings, W^X audit, `int3`, timer,
+12. `sti`, then `selftest_run`: allocator, mappings, W^X audit, `int3`, timer,
     heap, block/GPT/ext4/storage (including the read-write round trip, checksum
     verification and a journal replay test), handles, scheduler, message ports
     and syscalls.
-12. `report_boot`, `storage_lock` (wipes the passphrase, the volume keys and
-    the bounce buffer), `CRUGOS: phase 3b10 boot ok`, `arch_exit_qemu(0x10)`.
+13. `report_boot`, `storage_lock` (wipes the passphrase, the volume keys and
+    the bounce buffer), `CRUGOS: phase 4a boot ok`, `arch_exit_qemu(0x10)`.
 
 Storage is still brought up with interrupts disabled: the virtio driver polls
 its used ring, the NVMe driver polls completion queues and the AHCI driver polls
@@ -291,6 +296,7 @@ CRUGOS: vm ready
 CRUGOS: cpu ready
 CRUGOS: timer ready
 CRUGOS: heap ready
+CRUGOS: input ready (serial + keyboard)   # or: (serial only)
 CRUGOS: virtio ready
 CRUGOS: nvme ready
 CRUGOS: ahci ready
@@ -299,7 +305,7 @@ CRUGOS: gpt ready
 CRUGOS: crypt ready (24544 sectors, keyslot 0, Argon2id m=4096 KiB t=3 p=1)
 CRUGOS: crypt aes: software        # or: aes-ni
 CRUGOS: crypt passphrase required   # no crypt.pass= token: console unlock
-CRUGOS: type the passphrase on the serial console (3 attempt(s))
+CRUGOS: type the passphrase on the console (serial or keyboard) (3 attempt(s))
 passphrase: ***********             # one * per accepted byte, never echoed
 CRUGOS: passphrase rejected (2 attempt(s) left)
 CRUGOS: crypt locked (too many attempts)
@@ -319,14 +325,16 @@ CRUGOS: syscall ready
 CRUGOS: writable storage ok
 CRUGOS: journal selftest ok
 CRUGOS: selftest ok
-CRUGOS: phase 3b10 boot ok
+CRUGOS: phase 4a boot ok
 ```
 
 `raid ready` and `raid healthy`/`raid degraded` appear only on the RAID
 root path, and the `crypt` lines only on the encrypted path; the single-disk
 `crugroot` path goes straight from `gpt ready` to `ext4 ready`. The console
 prompt lines appear only when the loader carried no `crypt.pass=` token; the
-serial log contains the mask and the markers, never the passphrase. A failed
+passphrase can come from the serial line or from the PS/2 keyboard that
+`input.device` decodes (see [input.md](input.md)), and the serial log contains
+the mask and the markers, never the passphrase. A failed
 unlock prints `CRUGOS: crypt unlock failed` (or a `crypt locked` variant) and
 then `CRUGOS: no root filesystem`, and the kernel exits with status 35 (a
 deterministic boot failure, not a panic).
@@ -341,6 +349,10 @@ per-stage microsecond timings and the timer source/frequency.
 Before `console_init` only the 16550 UART at `0x3F8` (115200 8N1) is used. After
 init, newlines are also mirrored to the GOP text console, which uses an embedded
 8x16 font generated from a host PSF by `tools/gen-font.py`.
+
+Input has one entry point, `console_try_getc()` in `kernel/core/console.c`: it
+drains the serial line first and only then polls the i8042 keyboard and reads
+`input.device`'s byte queue. See [input.md](input.md) for the scancode decoder.
 
 ## Known phase 3 limitations
 
@@ -367,8 +379,9 @@ init, newlines are also mirrored to the GOP text console, which uses an embedded
 - Encryption is a single `crypt.device` over one partition: AES-256-XTS has no
   per-sector authentication, there is no TPM or keyfile slot, no rekey tool, and
   RAID below encryption is not implemented yet. The passphrase can be typed on
-  the serial console (masked, three attempts, per-attempt timeout), but there is
-  no framebuffer/GOP console input and no USB keyboard support yet; the
+  the serial console or on a PS/2 keyboard (masked, three attempts, per-attempt
+  timeout), but there is no framebuffer/GOP console input, no USB HID keyboard
+  and no virtual-terminal switching yet; the
   `crypt.pass=` loader token remains the non-interactive path and is
   ESP-visible. The header and keyslots are MAC-protected, the passphrase, keys
   and bounce buffer are wiped by `storage_lock()` before the final marker, and

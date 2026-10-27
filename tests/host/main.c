@@ -22,6 +22,7 @@ void test_aes_functions(void);
 void test_argon2_functions(void);
 void test_crypt_functions(void);
 void test_lineedit_functions(void);
+void test_input_functions(void);
 
 int main(void)
 {
@@ -38,6 +39,7 @@ int main(void)
     RUN(test_argon2_functions);
     RUN(test_crypt_functions);
     RUN(test_lineedit_functions);
+    RUN(test_input_functions);
     printf("%d checks, %d failure(s)\n", tests_run, tests_failed);
     return tests_failed == 0 ? 0 : 1;
 }

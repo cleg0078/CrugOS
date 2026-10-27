@@ -23,6 +23,8 @@
 #   make test-crypt-prompt  type the passphrase on the serial console and boot
 #   make test-crypt-prompt-wrong  reject three wrong console passphrases
 #   make test-crypt-prompt-timeout  fail closed when the prompt times out
+#   make test-crypt-keyboard  type the passphrase on the PS/2 keyboard
+#   make test-crypt-keyboard-wrong  reject three wrong keyboard passphrases
 #   make test-raid-degraded  boot RAID1 with one member missing
 #   make test-raid10-degraded  boot RAID10 with one member per pair
 #   make test-raid-repair  boot RAID1 with one blank member and rebuild it
@@ -154,7 +156,8 @@ KERNEL_LDFLAGS := -nostdlib -static -no-pie -Wl,--build-id=none \
 KERNEL_SOURCES := $(wildcard kernel/arch/$(ARCH)/*.c) $(wildcard kernel/arch/$(ARCH)/*.S) \
                   $(wildcard kernel/core/*.c) $(wildcard kernel/lib/*.c) \
                   $(wildcard kernel/mm/*.c) $(wildcard kernel/block/*.c) \
-                  $(wildcard kernel/fs/*.c) $(wildcard drivers/*/*.c) \
+                  $(wildcard kernel/fs/*.c) $(wildcard kernel/input/*.c) \
+                  $(wildcard drivers/*/*.c) \
                   $(wildcard kernel/crypto/*.c) $(wildcard kernel/crypto/*.S)
 KERNEL_OBJECTS := $(patsubst %,$(OBJ)/%.o,$(basename $(KERNEL_SOURCES)))
 KERNEL_DEPS := $(KERNEL_OBJECTS:.o=.d)
@@ -172,6 +175,7 @@ HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
         test-raid-repair test-raid10-repair test-journal-csum test-journal-replay \
         test-crypt test-crypt-recovery test-crypt-wrongkey test-crypt-tamper test-crypt-ni \
         test-crypt-prompt test-crypt-prompt-wrong test-crypt-prompt-timeout \
+        test-crypt-keyboard test-crypt-keyboard-wrong \
         crash-disk \
         check-disk size check-efi repro test-host preflight version options clean distclean help
 
@@ -404,6 +408,22 @@ test-crypt-prompt-timeout: esp crypt-disk
 		--cmdline-extra "crypt.prompt_timeout=$(CRYPT_PROMPT_TIMEOUT_SEC)"
 	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION \
 		"$(EXPECT_AVX2)" no no no no locked any
+
+test-crypt-keyboard: esp crypt-disk scripts/run-crypt-keyboard.py
+	$(Q)$(PYTHON) scripts/run-crypt-keyboard.py correct \
+		--password "$(CRYPT_PASS)" --disk $(CRYPT_IMG) \
+		--serial-log $(SERIAL_LOG) --exit-code $(QEMU_EXIT)
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION \
+		"$(EXPECT_AVX2)" no no no no yes "$(EXPECT_AES)"
+	$(Q)$(PYTHON) scripts/check-disk.py $(CRYPT_IMG) \
+		--crypt-tool $(abspath $(MCRYPT)) --crypt-password "$(CRYPT_PASS)"
+
+test-crypt-keyboard-wrong: esp crypt-disk scripts/run-crypt-keyboard.py
+	$(Q)$(PYTHON) scripts/run-crypt-keyboard.py wrong \
+		--wrong-password "$(CRYPT_PROMPT_WRONG_PASS)" --disk $(CRYPT_IMG) \
+		--serial-log $(SERIAL_LOG) --exit-code $(QEMU_EXIT)
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION \
+		"$(EXPECT_AVX2)" no no no no wrong any
 
 test-journal-csum: esp crash-disk
 	$(Q)$(MAKE) --no-print-directory run DISK_IMG=$(CRASH_IMG)

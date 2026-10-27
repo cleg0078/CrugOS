@@ -1,11 +1,11 @@
 # Versioning
 
 CrugOS uses [Semantic Versioning 2.0.0](https://semver.org/) with annotated
-`vMAJOR.MINOR.PATCH` Git tags. The current release is `v0.14.0` (phase 3B-10:
-a masked passphrase prompt on the serial console with a shared line editor,
-three bounded attempts, a configurable per-attempt timeout and three console
-gates, on top of the phase 3B-9 AES-256-XTS `crypt.device` with Argon2id
-keyslots, a checksummed crash-consistent filesystem over virtio-blk, NVMe, AHCI
+`vMAJOR.MINOR.PATCH` Git tags. The current release is `v0.15.0` (phase 4A: a
+polled PS/2 keyboard whose set-1 scancodes are decoded by `input.device` and
+merged with the serial line behind `console_try_getc()`, so the phase 3B-10
+passphrase prompt also accepts a real keyboard, on top of the phase 3B-9
+AES-256-XTS `crypt.device` with Argon2id keyslots, a checksummed crash-consistent filesystem over virtio-blk, NVMe, AHCI
 and RAID1/RAID10 roots, and loader/token passphrase handling with redaction and
 key zeroization).
 
@@ -60,6 +60,7 @@ make test-journal-csum test-journal-replay  # JBD2 crash/replay gates
 make test-crypt test-crypt-recovery test-crypt-wrongkey  # encrypted root
 make test-crypt-tamper test-crypt-ni  # MAC tamper and AES-NI gates
 make test-crypt-prompt test-crypt-prompt-wrong test-crypt-prompt-timeout  # console unlock
+make test-crypt-keyboard test-crypt-keyboard-wrong  # PS/2 keyboard unlock
 make size check-efi test-host repro
 make check-disk                  # e2fsck + persisted files on the test disk
 git add -A && git commit -m "release: vX.Y.Z"
@@ -84,4 +85,5 @@ git push origin main vX.Y.Z
 | `v0.11.0` | 2026-10-27 | phase 3B-7: polled AHCI/SATA driver (class 01/06/01, port bring-up, 48-bit LBA IDENTIFY, DMA EXT commands, 8 KiB bounce), SATA-only root boot and `make test-ahci`; BootInfo stays v1 and the kernel ABI is unchanged |
 | `v0.12.0` | 2026-10-27 | phase 3B-8: ext4 `metadata_csum` (superblock, group descriptors, bitmaps, inodes, directory/extent tails), JBD2 checksum v3 journals (tags, superblock, descriptor tail, commit block), multi-descriptor transactions, boot-time journal replay from a crash image, and `make test-journal-csum` / `make test-journal-replay`; BootInfo stays v1 and the kernel ABI is unchanged |
 | `v0.13.0` | 2026-10-27 | phase 3B-9: `crypt.device` (GPT type `8f1c7d2e-...`, 16 KiB header, eight keyslots, AES-256-XTS data area with data-relative tweaks), Argon2id (RFC 9106) key derivation, 64-byte master key wrapped per slot with a keyed BLAKE2b-256 MAC and a recovery passphrase, AES-NI/software dispatch pinned to IEEE 1619 vector 10, loader `\crugos\cmdline.txt` with `crypt.pass=` plus redaction and key zeroization, `mkcrypt` host tool, `mkdisk.sh crypt` mode, and five encrypted-root gates; BootInfo stays v1 and the kernel ABI is unchanged |
+| `v0.15.0` | 2026-10-27 | phase 4A: `input.device` (set-1 scancode decoder, Shift/Ctrl/Alt/Caps state, US layout, control-code mapping, 64-byte queue), polled i8042 keyboard driver, `console_try_getc()` merging serial and keyboard input, `CRUGOS: input ready (serial + keyboard)` marker and console prompt wording, QMP `send-key` driver (`run-crypt-keyboard.py`) behind two new keyboard gates and 903 host checks; BootInfo stays v1 and the kernel ABI is unchanged |
 | `v0.14.0` | 2026-10-27 | phase 3B-10: masked serial-console passphrase prompt when the ESP carries no `crypt.pass=`, shared line editor (`kernel/lib/lineedit.c`) with CR/LF, backspace, Ctrl-C and overflow handling, three attempts bounded by `crypt.prompt_timeout=`, fail-closed `crypt locked` markers, `SERIAL_TCP` serial capture and the `run-crypt-prompt.py` driver behind three new gates (correct, wrong, timeout); BootInfo stays v1 and the kernel ABI is unchanged |

@@ -311,8 +311,9 @@ static void storage_parse_cmdline(const boot_info *bi)
     storage_wipe((void *)(uintptr)cmd, (usize)limit);
 }
 
-/* Read one masked passphrase line from COM1. Returns 0 on Enter, -1 on
-   timeout, cancel, overflow or EOF. The caller owns wiping the buffer. */
+/* Read one masked passphrase line from the console (serial or PS/2
+   keyboard). Returns 0 on Enter, -1 on timeout, cancel, overflow or EOF.
+   The caller owns wiping the buffer. */
 static int storage_prompt_line(char *buf, u32 cap)
 {
     struct lineedit le;
@@ -327,7 +328,7 @@ static int storage_prompt_line(char *buf, u32 cap)
         u32 before;
         int c;
 
-        c = serial_try_getc();
+        c = console_try_getc();
         if (c < 0) {
             if (timer_monotonic_ns() >= deadline) {
                 kprintf("\n");
@@ -360,7 +361,7 @@ static struct block_device *storage_prompt_unlock(struct block_device *part_bd)
     u32 attempt;
 
     kprintf("CRUGOS: crypt passphrase required\n");
-    kprintf("CRUGOS: type the passphrase on the serial console (%u attempt(s))\n",
+    kprintf("CRUGOS: type the passphrase on the console (serial or keyboard) (%u attempt(s))\n",
             CRYPT_PROMPT_ATTEMPTS);
     for (attempt = 1; attempt <= CRYPT_PROMPT_ATTEMPTS; attempt++) {
         char pass[CRUG_CRYPT_MAX_PASSWORD + 1];

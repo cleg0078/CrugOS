@@ -14,7 +14,8 @@ rebuilds a blank replacement member at boot; phase 3B-7 boots the same
 GPT/ext4/RAID stack from an AHCI/SATA disk; phase 3B-8 adds ext4/JBD2
 checksums; phase 3B-9 encrypts the root with AES-256-XTS and an Argon2id
 derived key; phase 3B-10 unlocks that volume with a masked passphrase typed on
-the serial console.
+the serial console; phase 4A adds a polled PS/2 keyboard whose scancodes feed
+`input.device` and a merged console read path.
 Every later phase keeps the same BootInfo contract, so the loader does not
 change for memory management, storage, SMP or drivers.
 
@@ -269,11 +270,34 @@ change for memory management, storage, SMP or drivers.
 - All 26 gates pass at `v0.14.0`; an encrypted boot stays well under a second
   with software AES under TCG.
 
+## Phase 4A - console input (done)
+
+- `kernel/input/input.c` implements `input.device`: a set-1 scancode decoder with
+  make/break extraction, the `0xE0` prefix, Shift/Ctrl/Alt/Caps state, a US
+  layout table, named keys (Enter, Tab, Backspace, Esc, space), a Ctrl mapping
+  to control codes, and a 64-byte byte queue drained by `input_try_getc()`.
+- `kernel/arch/x86_64/keyboard.c` programs the i8042 (translation on, IRQ1 and
+  IRQ12 masked, scanning enabled) and polls the output buffer from
+  `keyboard_poll()`; a missing controller is reported instead of being fatal.
+- `console_try_getc()` merges the inputs: the serial line is drained first, then
+  the keyboard is polled and `input.device` is read, so the crypt passphrase
+  prompt accepts a real keyboard with no change to the prompt logic.
+- The boot prints `CRUGOS: input ready (serial + keyboard)` (or
+  `(serial only)`) and the prompt wording is now
+  `CRUGOS: type the passphrase on the console (serial or keyboard) (3 attempt(s))`.
+- `scripts/run-crypt-keyboard.py` injects keystrokes over QEMU's QMP monitor
+  (`send-key`, one KeyValue event per character) while the serial line stays a
+  write-only log, so the keyboard path is the only input. Two gates cover a
+  correct typed passphrase and three wrong ones; `make test-host` covers 903
+  checks including the scancode decoder. See [input.md](input.md).
+- All 27 gates pass at `v0.15.0`.
+
 ## Phase 3B - remaining storage work
 
 - Journal wrapping, revoke records and orphan-file recovery.
-- Framebuffer/GOP console input and a USB HID keyboard, so the passphrase
-  prompt does not depend on a serial line.
+- Framebuffer/GOP console input (the serial line or the PS/2 keyboard can type
+  the passphrase today) and a USB HID keyboard through xHCI, plus virtual
+  terminals with Ctrl+Alt+Fn switching.
 - USB storage drivers, hotplug and more than four NVMe/AHCI controllers.
 - RAID online rebuild, hot spare, scrub, a write-intent bitmap and persisted
   failure tracking (rebuild is boot-time and synchronous today).
@@ -284,7 +308,7 @@ change for memory management, storage, SMP or drivers.
 
 ## Phase 4 - devices and userspace
 
-- xHCI USB, HID, UAC2 audio.
+- xHCI USB, HID, UAC2 audio (phase 4A delivered the PS/2 console input step).
 - Software framebuffer -> VirtIO-GPU -> vendor GPU drivers.
 - Workbench userspace, `.app` bundles, `.crpkg` packages, capability model.
 - POSIX-like layer: 64-bit UID/GID, ACLs, process groups, signals.

@@ -8,7 +8,8 @@ BIN := $(BUILD)/unit-tests
 
 SOURCES := main.c test_string.c test_printf.c test_elf.c test_bitmap.c test_vm_math.c test_handle.c \
            test_crc32c.c test_blake2b.c test_aes.c test_argon2.c test_crypt.c \
-           test_lineedit.c \
+           test_lineedit.c test_input.c \
+           ../../kernel/input/input.c \
            ../../kernel/lib/string.c ../../kernel/lib/printf.c ../../kernel/lib/bitmap.c \
            ../../kernel/lib/crc32c.c ../../kernel/lib/lineedit.c \
            ../../kernel/crypto/blake2b.c \
