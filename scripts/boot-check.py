@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Verify a CrugOS boot: serial markers, guest version, AVX2 policy and exit code.
+"""Verify a CrugOS boot: serial markers, guest version, AVX2 policy, RAID mode and exit code.
 
-usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE [VERSION_FILE [EXPECT_AVX2]]
+usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE [VERSION_FILE [EXPECT_AVX2 [EXPECT_RAID]]]
 """
 
 import re
@@ -25,7 +25,7 @@ REQUIRED_MARKERS = (
     "CRUGOS: writable storage ok",
     "CRUGOS: journal selftest ok",
     "CRUGOS: selftest ok",
-    "CRUGOS: phase 3b2 boot ok",
+    "CRUGOS: phase 3b3 boot ok",
 )
 VERSION_PATTERN = re.compile(r"CRUGOS: version (\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?)")
 SUCCESS_EXIT = 33  # isa-debug-exit: port 0xf4 value 0x10 -> (0x10 << 1) | 1
@@ -41,8 +41,8 @@ def fail(message: str, log: str) -> int:
 
 
 def main() -> int:
-    if len(sys.argv) not in (3, 4, 5):
-        print("usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE [VERSION_FILE [EXPECT_AVX2]]",
+    if len(sys.argv) not in (3, 4, 5, 6):
+        print("usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE [VERSION_FILE [EXPECT_AVX2 [EXPECT_RAID]]]",
               file=sys.stderr)
         return 2
 
@@ -50,6 +50,7 @@ def main() -> int:
     exit_path = Path(sys.argv[2])
     version_path = Path(sys.argv[3]) if len(sys.argv) >= 4 else None
     expect_avx2 = sys.argv[4] if len(sys.argv) >= 5 else "yes"
+    expect_raid = sys.argv[5] if len(sys.argv) >= 6 else "no"
 
     if not serial_path.exists():
         return fail(f"missing serial log {serial_path}", "")
@@ -83,6 +84,15 @@ def main() -> int:
     if expect_avx2 == "no" and "avx2=no" not in text:
         return fail("compatibility build expected avx2=no", text)
 
+    if expect_raid not in ("no", "healthy", "degraded"):
+        return fail(f"invalid EXPECT_RAID {expect_raid!r}", text)
+    if expect_raid != "no":
+        if "CRUGOS: raid ready" not in text:
+            return fail("expected a RAID root but the guest did not assemble one", text)
+        marker = "CRUGOS: raid " + expect_raid
+        if marker not in text:
+            return fail(f"missing serial marker: {marker!r}", text)
+
     raw_exit = exit_path.read_text().strip()
     try:
         status = int(raw_exit)
@@ -94,7 +104,7 @@ def main() -> int:
 
     boot_report = [line for line in text.splitlines() if line.startswith("boot:")]
     print("ok: boot markers found, version", guest_version,
-          "avx2", expect_avx2, "QEMU exit status", status)
+          "avx2", expect_avx2, "raid", expect_raid, "QEMU exit status", status)
     for line in boot_report:
         print("  " + line)
     return 0

@@ -1,8 +1,8 @@
 # Versioning
 
 CrugOS uses [Semantic Versioning 2.0.0](https://semver.org/) with annotated
-`vMAJOR.MINOR.PATCH` Git tags. The current release is `v0.6.0` (phase 3B-2:
-JBD2 journal replay and ordered metadata journaling).
+`vMAJOR.MINOR.PATCH` Git tags. The current release is `v0.7.0` (phase 3B-3:
+RAID1 root with healthy and degraded boots).
 
 ## Source of truth
 
@@ -46,6 +46,7 @@ patch.
 ```
 vi VERSION                       # pick the new SemVer
 make distclean && make test      # clean build, boot gate, guest version check
+make test-raid test-raid-degraded # RAID1 healthy and degraded gates
 make size check-efi test-host repro
 make check-disk                  # e2fsck + persisted files on the test disk
 git add -A && git commit -m "release: vX.Y.Z"
@@ -63,3 +64,4 @@ git push origin main vX.Y.Z
 | `v0.4.0` | 2026-10-27 | phase 3A: block layer, legacy virtio-blk, GPT, read-only ext4, generated test disk; BootInfo stays v1 and the kernel ABI is unchanged |
 | `v0.5.0` | 2026-10-27 | phase 3B-1: writable ext4 (create/mkdir/write/truncate/unlink/rmdir/rename/fsync), virtio flush, boot write self-test and `e2fsck` disk gate; BootInfo stays v1 and the kernel ABI is unchanged |
 | `v0.6.0` | 2026-10-27 | phase 3B-2: JBD2 journal replay, ordered metadata journaling, dirty-journal mount recovery and a replay self-test; BootInfo stays v1 and the kernel ABI is unchanged |
+| `v0.7.0` | 2026-10-27 | phase 3B-3: multiple virtio-blk devices, checksummed RAID1 metadata, `md0` assembly, healthy/degraded root boot and host RAID gates; BootInfo stays v1 and the kernel ABI is unchanged |

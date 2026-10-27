@@ -1,7 +1,7 @@
 # Building CrugOS
 
-This document describes the phase 3B-2 build system: how the kernel, the UEFI
-loader and the test disk image are built, which invariants the link must
+This document describes the phase 3B-3 build system: how the kernel, the UEFI
+loader and the test disk images are built, which invariants the link must
 preserve, and how to diagnose the failure modes that are specific to this
 toolchain.
 
@@ -14,7 +14,7 @@ toolchain.
 | `qemu-system-x86_64` | boot test | 10.x, TCG works without `/dev/kvm` |
 | OVMF | UEFI firmware | `/usr/share/OVMF/OVMF_CODE_4M.fd` + `OVMF_VARS_4M.fd` |
 | `python3` | boot/PE checks | standard library only |
-| `sgdisk`, `mke2fs`, `debugfs`, `e2fsck`, `dd`, `truncate` | test disk | only for `make disk` / `make check-disk`; e2fsprogs |
+| `sgdisk`, `mke2fs`, `debugfs`, `e2fsck`, `dd`, `truncate` | test disks | only for `make disk`, `make raid-disks` and their checks; e2fsprogs |
 
 Run `make preflight` to check all of the above.
 
@@ -24,9 +24,12 @@ Run `make preflight` to check all of the above.
 make             # kernel.elf, BOOTX64.EFI and the ESP tree
 make run         # boot the ESP tree under QEMU + OVMF
 make test        # boot, verify markers/version/AVX2, then e2fsck the disk
+make test-raid   # boot a two-member RAID1 root and check both members
+make test-raid-degraded  # boot RAID1 with one member missing
 make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
 make test-host   # host unit tests for string/printf/ELF/bitmap/VM math/handles
 make disk        # build the GPT/ext4 test disk at build/<arch>/disk.img
+make raid-disks  # build the two GPT/ext4 RAID1 member disks
 make check-disk  # e2fsck and persisted-file checks on the current disk
 make size        # kernel size budget (<1 MiB stretch, <2 MiB hard)
 make check-efi   # PE32+ structure checks on the loader
@@ -53,6 +56,8 @@ Useful variables:
 | `BUILD_ROOT` | `build` | output root; `test-compat` uses `build/compat` |
 | `DISK_IMG` | `build/<arch>/disk.img` | raw disk image attached as `vda` |
 | `DISK_SIZE_MB` | `16` | size of the generated test disk |
+| `RAID_DISK_A/B` | `build/<arch>/raid-a.img`, `raid-b.img` | RAID1 members attached as `vda`/`vdb` |
+| `EXTRA_DISKS` | empty | space-separated images attached after `DISK_IMG` |
 
 ## Version stamping
 
@@ -62,7 +67,9 @@ report the same number. Direct compiler invocations fall back to `0.0.0-dev`
 via `include/crug/version.h`. The ESP tree also gets `crugos/version` as a
 plain text file. `make test` compares the kernel's `CRUGOS: version` line with
 `VERSION`; a mismatch fails the boot gate. Release procedure and tag rules are
-in [versioning.md](versioning.md).
+in [versioning.md](versioning.md). Because the version is a compile-time
+define, every kernel and loader object also depends on `VERSION`; changing it
+forces a full recompile rather than only a relink.
 
 ## Kernel link
 
@@ -149,8 +156,8 @@ before using the filesystem. It requires `sgdisk`, `mke2fs`, `debugfs`,
 -device virtio-blk-pci,drive=disk0,disable-modern=on
 ```
 
-`make run` and `make test` depend on `disk`, so the first boot builds the image.
-The kernel mounts it read-only during `storage_init`, then the boot self-test
+`make run` builds the image if it is missing; `make test` always regenerates it
+first. The kernel mounts it read-only during `storage_init`, then the boot self-test
 remounts it read-write, creates and mutates files under `/selftest`, unmounts
 cleanly and remounts read-only to verify the persisted data. It also queues a
 dirty journal block, unmounts without clearing the journal, remounts
@@ -160,6 +167,18 @@ extracts the partition and requires `e2fsck -fn` to be clean (a leftover dirty
 journal fails this gate). `make check-disk` runs only that disk check on the
 existing image. The supported ext4 subset, write path, journal format and
 failure modes are documented in [storage.md](storage.md).
+
+`make raid-disks` runs [scripts/mkraid.sh](../scripts/mkraid.sh) and
+[scripts/raid-meta.py](../scripts/raid-meta.py) to build two 16 MiB GPT disks
+with one type-`fd00` `crugraid` partition each, identical ext4 data and
+checksummed RAID1 metadata in the last two sectors. `make test-raid` boots
+with both images and requires a healthy array; `make test-raid-degraded` boots
+with only `RAID_DISK_A` and requires a degraded boot.
+[scripts/check-raid.py](../scripts/check-raid.py) validates both metadata
+copies and geometry, extracts the data region, runs `e2fsck -fn`, checks the
+persisted files, and after a healthy run compares the two data regions byte for
+byte. The metadata format, assembly rules and limits are in
+[raid.md](raid.md).
 
 ## Reproducibility
 
@@ -190,6 +209,15 @@ randomisation that leaks into the output will fail this target.
   `MEMORY_MB=512`.
 - **`virtio : queue setup failed`**: the disk was attached as a modern-only
   device or without `disable-modern=on`; use the QEMU flags above.
+- **`raid   : metadata invalid`**: a member's last two sectors are missing or
+  disagree on magic, CRC, geometry, UUID, generation or slot. Regenerate with
+  `make raid-disks`; inspect with `scripts/check-raid.py`.
+- **Healthy test boots degraded**: only one virtio device appeared. Check the
+  serial `block ready (N device(s))` line and QEMU's extra `-drive` pairs;
+  the test script passes `EXTRA_DISKS`.
+- **`make test-raid` fails e2fsck but the array booted**: the two members
+  diverged. `check-raid.py` reports a data-region mismatch; this indicates a
+  mirror write path bug, not a filesystem bug.
 - **`storage: writable test failed`**: the in-kernel write path failed. The
   serial log names the step; `make check-disk` shows whether the on-disk state
   or the file contents are wrong. A bitmap-offset bug shows up as
@@ -210,3 +238,7 @@ randomisation that leaks into the output will fail this target.
   big-endian; inspect bytes 24..31 at the journal inode's first block.
 - **QEMU exits before OVMF starts**: verify the firmware paths and that
   `OVMF_VARS` is writable (the run script copies it into `build/`).
+- **Guest still reports the old version after a bump**: ensure `VERSION` is a
+  prerequisite of the object files, not just of the link. The makefile has
+  `$(KERNEL_OBJECTS): VERSION` and `$(LOADER_OBJECTS): VERSION` for this
+  reason; a stale build tree otherwise keeps the old string.

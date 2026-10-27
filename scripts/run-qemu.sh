@@ -8,6 +8,7 @@ set -euo pipefail
 : "${DEBUG_LOG:?DEBUG_LOG is required}"
 : "${EXIT_CODE_FILE:?EXIT_CODE_FILE is required}"
 DISK_IMG=${DISK_IMG:-}
+EXTRA_DISKS=${EXTRA_DISKS:-}
 
 QEMU=${QEMU:-qemu-system-x86_64}
 OVMF_CODE=${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}
@@ -56,7 +57,18 @@ if [[ -n "$DISK_IMG" ]]; then
                -device "virtio-blk-pci,drive=disk0,disable-modern=on")
 fi
 
-echo "run-qemu: booting $ESP_DIR (${MEMORY_MB} MiB, ${SMP} vCPU, cpu ${QEMU_CPU:-default}, disk ${DISK_IMG:-none}, timeout ${TIMEOUT_SEC}s)"
+index=1
+for extra in $EXTRA_DISKS; do
+    if [[ ! -r "$extra" ]]; then
+        echo "run-qemu: missing extra disk image $extra" >&2
+        exit 1
+    fi
+    DISK_ARGS+=(-drive "file=$extra,if=none,id=disk$index,format=raw" \
+                -device "virtio-blk-pci,drive=disk$index,disable-modern=on")
+    index=$((index + 1))
+done
+
+echo "run-qemu: booting $ESP_DIR (${MEMORY_MB} MiB, ${SMP} vCPU, cpu ${QEMU_CPU:-default}, disk ${DISK_IMG:-none}, extra ${EXTRA_DISKS:-none}, timeout ${TIMEOUT_SEC}s)"
 set +e
 TMPDIR="$TMPDIR" timeout --foreground "$TIMEOUT_SEC" "$QEMU" \
     -machine q35 \

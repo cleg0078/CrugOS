@@ -40,9 +40,11 @@ void pci_write16(u8 bus, u8 dev, u8 fn, u16 off, u16 value)
     pci_write32(bus, dev, fn, off, old);
 }
 
-int pci_find(u16 vendor, u16 device, u8 *bus, u8 *dev, u8 *fn)
+static int pci_find_common(u16 vendor, u16 device, int want_index, u8 *bus,
+                           u8 *dev, u8 *fn)
 {
     u32 b, d, f;
+    int seen = 0;
 
     for (b = 0; b < 256; b++) {
         for (d = 0; d < 32; d++) {
@@ -56,6 +58,8 @@ int pci_find(u16 vendor, u16 device, u8 *bus, u8 *dev, u8 *fn)
                 v = pci_read16((u8)b, (u8)d, (u8)f, 0x00);
                 if (v == vendor &&
                     pci_read16((u8)b, (u8)d, (u8)f, 0x02) == device) {
+                    if (seen++ != want_index)
+                        continue;
                     if (bus) *bus = (u8)b;
                     if (dev) *dev = (u8)d;
                     if (fn) *fn = (u8)f;
@@ -65,6 +69,18 @@ int pci_find(u16 vendor, u16 device, u8 *bus, u8 *dev, u8 *fn)
         }
     }
     return 0;
+}
+
+int pci_find(u16 vendor, u16 device, u8 *bus, u8 *dev, u8 *fn)
+{
+    return pci_find_common(vendor, device, 0, bus, dev, fn);
+}
+
+int pci_find_nth(u16 vendor, u16 device, int index, u8 *bus, u8 *dev, u8 *fn)
+{
+    if (index < 0)
+        return 0;
+    return pci_find_common(vendor, device, index, bus, dev, fn);
 }
 
 void pci_enable(u8 bus, u8 dev, u8 fn, u16 bits)

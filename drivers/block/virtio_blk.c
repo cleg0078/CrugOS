@@ -9,6 +9,7 @@
 #include <crug/kernel.h>
 
 #define VIRTQ_MAX 256u
+#define VIRTIO_BLK_MAX 8
 
 #define VIRTQ_DESC_F_NEXT  1u
 #define VIRTQ_DESC_F_WRITE 2u
@@ -63,10 +64,10 @@ struct virtio_blk {
     u16 last_used;
     u32 features;
     int has_flush;
+    int ready;
 };
 
-static struct virtio_blk g_vblk;
-static int g_vblk_ready;
+static struct virtio_blk g_vblk[VIRTIO_BLK_MAX];
 
 static void virtio_status(u16 io, u8 status)
 {
@@ -189,7 +190,7 @@ static int virtio_blk_flush(struct block_device *bd)
 {
     struct virtio_blk *v = (struct virtio_blk *)bd->priv;
 
-    if (!g_vblk_ready || !v->has_flush)
+    if (!v->ready || !v->has_flush)
         return 0;
     return virtio_submit_flush(v);
 }
@@ -200,7 +201,7 @@ static int virtio_blk_read(struct block_device *bd, u64 lba, u32 count, void *bu
     u8 *out = (u8 *)buf;
     u32 i;
 
-    if (!g_vblk_ready)
+    if (!v->ready)
         return -1;
     for (i = 0; i < count; i++) {
         if (virtio_submit(v, 0, lba + i) != 0)
@@ -217,7 +218,7 @@ static int virtio_blk_write(struct block_device *bd, u64 lba, u32 count,
     const u8 *in = (const u8 *)buf;
     u32 i;
 
-    if (!g_vblk_ready)
+    if (!v->ready)
         return -1;
     for (i = 0; i < count; i++) {
         memcpy(v->req->data, in + (u64)i * CRUG_SECTOR_SIZE, CRUG_SECTOR_SIZE);
@@ -227,24 +228,13 @@ static int virtio_blk_write(struct block_device *bd, u64 lba, u32 count,
     return 0;
 }
 
-int virtio_blk_init(void)
+static int virtio_blk_setup(struct virtio_blk *v, u16 io, u32 index)
 {
-    u8 bus, dev, fn;
-    u32 bar;
-    u16 io;
     u64 capacity;
     u8 status;
 
-    if (!pci_find(VIRTIO_PCI_VENDOR, VIRTIO_PCI_DEVICE_BLOCK, &bus, &dev, &fn))
-        return 0;
-    bar = pci_bar(bus, dev, fn, 0);
-    if (!(bar & PCI_BAR_IO))
-        return -1;
-    io = (u16)(bar & ~0x3u);
-    pci_enable(bus, dev, fn, PCI_COMMAND_IO | PCI_COMMAND_MASTER);
-
-    memset(&g_vblk, 0, sizeof(g_vblk));
-    g_vblk.io = io;
+    memset(v, 0, sizeof(*v));
+    v->io = io;
     virtio_status(io, 0);
     virtio_status(io, VIRTIO_STATUS_ACKNOWLEDGE);
     virtio_status(io, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
@@ -254,8 +244,8 @@ int virtio_blk_init(void)
 
         if (host_features & (1u << VIRTIO_BLK_F_FLUSH))
             guest_features |= (1u << VIRTIO_BLK_F_FLUSH);
-        g_vblk.features = guest_features;
-        g_vblk.has_flush = guest_features != 0;
+        v->features = guest_features;
+        v->has_flush = guest_features != 0;
         outl((u16)(io + 0x04), guest_features);
     }
     virtio_status(io, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER |
@@ -265,13 +255,13 @@ int virtio_blk_init(void)
         virtio_status(io, VIRTIO_STATUS_FAILED);
         return -1;
     }
-    if (virtio_queue_init(&g_vblk) != 0) {
+    if (virtio_queue_init(v) != 0) {
         kprintf("virtio : queue setup failed\n");
         virtio_status(io, VIRTIO_STATUS_FAILED);
         return -1;
     }
-    g_vblk.req = (struct virtio_blk_req *)kzalloc(sizeof(struct virtio_blk_req));
-    if (!g_vblk.req) {
+    v->req = (struct virtio_blk_req *)kzalloc(sizeof(struct virtio_blk_req));
+    if (!v->req) {
         virtio_status(io, VIRTIO_STATUS_FAILED);
         return -1;
     }
@@ -282,26 +272,59 @@ int virtio_blk_init(void)
         virtio_status(io, VIRTIO_STATUS_FAILED);
         return -1;
     }
-    g_vblk.bd.sectors = capacity;
-    g_vblk.bd.sector_size = CRUG_SECTOR_SIZE;
-    g_vblk.bd.read = virtio_blk_read;
-    g_vblk.bd.write = virtio_blk_write;
-    g_vblk.bd.flush = virtio_blk_flush;
-    g_vblk.bd.priv = &g_vblk;
-    strncpy(g_vblk.bd.name, "vda", BLOCK_NAME_MAX - 1);
-    g_vblk_ready = 1;
+    v->bd.sectors = capacity;
+    v->bd.sector_size = CRUG_SECTOR_SIZE;
+    v->bd.read = virtio_blk_read;
+    v->bd.write = virtio_blk_write;
+    v->bd.flush = virtio_blk_flush;
+    v->bd.priv = v;
+    v->bd.name[0] = 'v';
+    v->bd.name[1] = 'd';
+    v->bd.name[2] = (char)('a' + index);
+    v->bd.name[3] = 0;
+    v->ready = 1;
     virtio_status(io, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER |
                       VIRTIO_STATUS_FEATURES_OK | VIRTIO_STATUS_DRIVER_OK);
     status = virtio_get_status(io);
     if (status & VIRTIO_STATUS_FAILED) {
         kprintf("virtio : driver failed\n");
-        g_vblk_ready = 0;
+        v->ready = 0;
         return -1;
     }
-    if (block_register(&g_vblk.bd) != 0) {
-        g_vblk_ready = 0;
+    if (block_register(&v->bd) != 0) {
+        v->ready = 0;
         return -1;
     }
-    kprintf("virtio : blk vda, %llu sectors, io=0x%x\n", capacity, io);
-    return 1;
+    kprintf("virtio : blk %s, %llu sectors, io=0x%x\n", v->bd.name,
+            (unsigned long long)capacity, io);
+    return 0;
+}
+
+int virtio_blk_init(void)
+{
+    u32 i;
+    u32 count = 0;
+
+    for (i = 0; i < VIRTIO_BLK_MAX; i++) {
+        u8 bus, dev, fn;
+        u32 bar;
+        u16 io;
+
+        if (!pci_find_nth(VIRTIO_PCI_VENDOR, VIRTIO_PCI_DEVICE_BLOCK, (int)i,
+                          &bus, &dev, &fn))
+            break;
+        bar = pci_bar(bus, dev, fn, 0);
+        if (!(bar & PCI_BAR_IO)) {
+            kprintf("virtio : device %u has no I/O BAR\n", i);
+            continue;
+        }
+        io = (u16)(bar & ~0x3u);
+        pci_enable(bus, dev, fn, PCI_COMMAND_IO | PCI_COMMAND_MASTER);
+        if (virtio_blk_setup(&g_vblk[count], io, count) != 0) {
+            kprintf("virtio : setup failed for device %u\n", i);
+            continue;
+        }
+        count++;
+    }
+    return (int)count;
 }

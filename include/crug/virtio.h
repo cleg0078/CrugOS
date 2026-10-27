@@ -17,4 +17,5 @@
 
 #define VIRTIO_BLK_F_FLUSH 9u
 
+/* Probe every legacy virtio-blk PCI function; returns the number registered. */
 int virtio_blk_init(void);

@@ -5,14 +5,16 @@ through a PCI virtio-blk device during boot. Phase 3B-1 adds a write path and
 verifies it by creating, rewriting, renaming, truncating and deleting files in a
 scratch directory, then checking the resulting filesystem with e2fsck on the host.
 Phase 3B-2 adds JBD2 journal replay and ordered metadata journaling, and proves
-recovery at mount time. RAID, encryption and metadata checksums are later
-phases.
+recovery at mount time. Phase 3B-3 mirrors the root filesystem across two
+virtual disks in a RAID1 array and can boot from a single remaining member.
+Encryption and metadata checksums are later phases.
 
 ```
 virtio-blk-pci (legacy I/O BAR)
   -> drivers/block/virtio_blk.c    block_device "vda" + flush
   -> kernel/block/block.c          registry, partitions, bounds checks, flush
   -> kernel/fs/gpt.c               GPT header + entries, CRC32
+  -> kernel/block/raid.c           optional RAID1 array "md0"
   -> kernel/fs/ext4.c              mount, lookup, read/write, create, rename
   -> kernel/fs/storage.c           boot policy and read/write self-test
 ```
@@ -24,8 +26,10 @@ interrupts are still disabled, and returns 1 on success. The boot order and
 markers are:
 
 ```
-CRUGOS: block ready (<device>, <sectors> sectors)
+CRUGOS: block ready (<n> device(s))
 CRUGOS: gpt ready
+CRUGOS: raid ready                    # RAID root only
+CRUGOS: raid healthy (<n>/<n> members) # or: CRUGOS: raid degraded (<n>/<n> members)
 CRUGOS: ext4 ready
 CRUGOS: ext4 /hello.txt: hello from ext4
 CRUGOS: journal ready
@@ -35,28 +39,31 @@ CRUGOS: writable storage ok
 CRUGOS: journal selftest ok (<n> blocks recovered)
 ```
 
-A missing virtio device, an unusable GPT or an ext4 mount failure panics
-(`storage: ...`) because the phase 3 boot gate expects a root filesystem. The
-read/write self-test also panics if any write-path operation fails, so a broken
-write path cannot silently boot. The init step time is reported as `storage=`
-in the `boot   :` timing line.
+A missing virtio device, an unusable GPT, a bad RAID metadata record or an ext4
+mount failure panics (`storage: ...`) because the phase 3 boot gate expects a
+root filesystem. The read/write self-test also panics if any write-path
+operation fails, so a broken write path cannot silently boot. The init step time
+is reported as `storage=` in the `boot   :` timing line.
 
 ## Block layer
 
 `include/crug/block.h` defines a `block_device`: a 16-byte name, a sector
 count, a 512-byte sector size, read/write/flush callbacks, a private pointer and
-a registry link. Devices register with `block_register()`; the first device is
-the boot disk and is named `vda`. `block_read()` and `block_write()` reject
+a registry link. Devices register with `block_register()`; legacy virtio disks
+are named `vda`..`vdh`, and an assembled RAID array is `md0`.
+`block_read()` and `block_write()` reject
 out-of-range requests, `block_partition()` creates an offset view that reuses
 the parent device, and `block_flush()` forwards a cache flush to the backing
 device when it has one.
 
 ## PCI and legacy virtio-blk
 
-`drivers/pci/pci.c` uses the legacy 0xCF8/0xCFC configuration mechanism and
-scans bus 0 for vendor `0x1AF4`, device `0x1001` (legacy virtio block). The
-driver maps I/O BAR0, enables I/O and bus-master access and runs the legacy
-virtio 0.9.5 register layout:
+`drivers/pci/pci.c` uses the legacy 0xCF8/0xCFC configuration mechanism. It
+enumerates buses 0..255, every device and every function, looking for the nth
+function with vendor `0x1AF4`, device `0x1001` (legacy virtio block).
+`virtio_blk_init()` probes up to eight of them and registers each as
+`vda`..`vdh`. Each device maps I/O BAR0, enables I/O and bus-master access
+and runs the legacy virtio 0.9.5 register layout:
 
 | Offset | Register |
 | --- | --- |
@@ -70,8 +77,8 @@ virtio 0.9.5 register layout:
 | `0x14` | capacity low |
 | `0x18` | capacity high |
 
-One split virtqueue of 2..256 entries is placed in three contiguous PMM
-pages (descriptors, available ring, used ring). A request uses three
+Each device gets one split virtqueue of 2..256 entries placed in three
+contiguous PMM pages (descriptors, available ring, used ring). A request uses three
 descriptors: the 16-byte block header, one 512-byte data sector and the
 status byte. I/O is synchronous and polled with a 500 ms
 `timer_monotonic_ns()` deadline; there are no interrupts, no MSI-X and no
@@ -80,12 +87,15 @@ and implements `VIRTIO_BLK_T_FLUSH`; all other guest features stay disabled.
 `block_read(..., count)` and `block_write(..., count)` issue one request per
 sector, which is slow but simple and keeps the ring state trivial.
 
-The QEMU device is attached with `disable-modern=on` so it exposes the legacy
-interface the driver implements:
+QEMU devices are attached with `disable-modern=on` so they expose the legacy
+interface the driver implements. Additional disks become `vdb`, `vdc`, and so
+on:
 
 ```
 -drive file=<disk.img>,if=none,id=disk0,format=raw
 -device virtio-blk-pci,drive=disk0,disable-modern=on
+-drive file=<raid-b.img>,if=none,id=disk1,format=raw
+-device virtio-blk-pci,drive=disk1,disable-modern=on
 ```
 
 ## GPT
@@ -94,10 +104,22 @@ interface the driver implements:
 validates the `EFI PART` header, its CRC32 (poly `0xEDB88320`) and the entry
 array CRC. Entries are 128..4096 bytes, at most 128 are scanned and at most
 `GPT_MAX_PARTITIONS` (16) are kept. UTF-16 partition names are converted to
-ASCII by dropping the high byte. The kernel does not require a specific type
-GUID; `storage_init()` prefers a partition named `crugroot` and otherwise
-uses the first entry. Partition bounds are checked again when the offset view
-is created.
+ASCII by dropping the high byte. `storage_init()` has two root policies: it
+prefers a partition named exactly `crugroot`, and otherwise assembles a RAID1
+array from partitions whose type GUID is the Linux RAID type
+`A19D880F-05FC-4D3B-A006-743F0F84911E`. Partition bounds are checked again
+when an offset view is created.
+
+## RAID1
+
+When no `crugroot` partition exists, every `fd00` partition becomes a member
+of one RAID1 array. Each member carries a checksummed 512-byte metadata record
+in its last two sectors; `raid_assemble()` validates geometry, UUID,
+generation and slots, then registers `md0` with `member_sectors - 2` usable
+sectors. Reads take the first healthy member, writes and flushes go to all
+healthy members, and a failed member is dropped for the rest of the boot.
+Missing members boot degraded instead of failing. The full metadata layout,
+assembly rules, host tools and limits are documented in [raid.md](raid.md).
 
 ## ext4 mount and read path
 
@@ -217,7 +239,7 @@ dirty data block, unmounts *without* clearing the journal, remounts read-write
 and verifies that `journal_open()` recovered the block. The host `e2fsck`
 gate then confirms the resulting filesystem is clean.
 
-## Test disk
+## Test disks
 
 `make disk` builds `build/x86_64/disk.img` with `scripts/mkdisk.sh` (16 MiB
 by default, `DISK_SIZE_MB` overrides):
@@ -238,13 +260,24 @@ partition, runs `e2fsck -fn`, verifies `/hello.txt`, and verifies that the
 journal was checkpointed and cleared: a leftover dirty journal makes
 `e2fsck` fail the gate.
 
-To inspect the partition on the host:
+`make raid-disks` builds two 16 MiB GPT disks with `scripts/mkraid.sh`:
+each has a `crugraid` partition of type `fd00` at LBA 2048..26623, the same
+ext4 image is written to both data regions, and `scripts/raid-meta.py` stamps
+slots 0 and 1 with a shared array UUID and generation. `make test-raid` boots
+with both disks and expects a healthy array; `make test-raid-degraded` boots
+with only the first disk and expects a degraded array. `scripts/check-raid.py`
+validates both metadata copies, runs `e2fsck -fn` on the data region and
+checks the persisted files.
+
+To inspect the disks on the host:
 
 ```
 sgdisk -p build/x86_64/disk.img
 dd if=build/x86_64/disk.img of=/tmp/part.img bs=512 skip=2048 count=24576
 debugfs -R 'cat /hello.txt' /tmp/part.img
 e2fsck -fn /tmp/part.img
+sgdisk -p build/x86_64/raid-a.img
+scripts/check-raid.py build/x86_64/raid-a.img build/x86_64/raid-b.img
 ```
 
 ## Failure modes
@@ -258,6 +291,13 @@ e2fsck -fn /tmp/part.img
   extracted partition shows the feature flags.
 - `storage: /hello.txt not found`: the image was built without the test file;
   run `make disk` to regenerate it.
+- `raid   : metadata invalid`: a member's last two sectors do not hold a
+  matching `CRA1` record, or the CRC, geometry, UUID or generation disagree.
+  Run `scripts/check-raid.py` on the images.
+- `CRUGOS: raid degraded` on a two-disk test: one virtio device did not appear
+  or its metadata was rejected; the serial log lists the devices found.
+- `storage: no usable GPT partition` with `fd00` disks: the partition type or
+  name is wrong, or `mkraid.sh` was not run.
 - `storage: writable test failed`: the read/write self-test failed; the serial
   log contains the individual step that returned the error. Run
   `scripts/check-disk.py` on the image to see whether e2fsck or the file
@@ -273,7 +313,7 @@ e2fsck -fn /tmp/part.img
 
 ## Known limits
 
-- One legacy virtio-blk disk; no AHCI, NVMe, USB storage or hotplug.
+- Up to eight legacy virtio-blk disks; no AHCI, NVMe, USB storage or hotplug.
 - Polled, one-sector-at-a-time I/O with no request merging, no interrupts and
   no DMA address translation (identity map only).
 - GPT only: no MBR boot disks, no backup-table repair and no partition
@@ -285,5 +325,7 @@ e2fsck -fn /tmp/part.img
 - The write path handles at most one extent-tree level and does not replace an
   existing rename target; hard links, symlinks, ownership and extended
   attributes are not implemented.
-- No RAID1/RAID10, no `crypt.device`, no AES-256-XTS or Argon2id, and no
-  redundant ESP yet. These remain phase 3B work.
+- RAID1 only, one array (`md0`): no RAID10, no chunking, no rebuild, no
+  hot spare, no scrub, no dirty bitmap and no metadata updates by the kernel.
+  No `crypt.device`, no AES-256-XTS or Argon2id, and no redundant ESP yet.
+  These remain phase 3B work.

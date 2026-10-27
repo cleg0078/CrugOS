@@ -7,6 +7,8 @@
 #   make test-compat  boot a compatibility build (no AVX2 required)
 #   make disk       build the GPT/ext4 test disk
 #   make check-disk run e2fsck and file checks on the test disk
+#   make test-raid  boot RAID1 (two members) and verify member disks
+#   make test-raid-degraded  boot RAID1 with one member missing
 #   make size       enforce the kernel size budget
 #   make check-efi  validate the loader as a PE32+ EFI application
 #   make repro      verify the build is bit-for-bit reproducible
@@ -61,6 +63,9 @@ DEBUG_LOG := $(BUILD)/debug.log
 QEMU_EXIT := $(BUILD)/exit-code.txt
 DISK_IMG ?= $(BUILD)/disk.img
 DISK_SIZE_MB ?= 16
+RAID_DISK_A ?= $(BUILD)/raid-a.img
+RAID_DISK_B ?= $(BUILD)/raid-b.img
+EXTRA_DISKS ?=
 
 ifeq ($(MODE),debug)
 MODE_FLAGS := -Og -g3
@@ -95,8 +100,8 @@ LOADER_SOURCES := $(wildcard boot/efi/*.c)
 LOADER_OBJECTS := $(patsubst %,$(OBJ)/%.o,$(basename $(LOADER_SOURCES)))
 LOADER_DEPS := $(LOADER_OBJECTS:.o=.d)
 
-.PHONY: all kernel loader esp disk run test test-compat check-disk size check-efi repro test-host \
-        preflight version clean distclean help
+.PHONY: all kernel loader esp disk raid-disks run test test-compat test-raid test-raid-degraded \
+        check-disk size check-efi repro test-host preflight version clean distclean help
 
 all: esp
 
@@ -111,12 +116,15 @@ esp: $(KERNEL) $(LOADER)
 	$(Q)printf '%s\n' "$(CRUGOS_VERSION)" > $(ESP)/crugos/version
 	@echo "  ESP   $(ESP) ($(CRUGOS_VERSION))"
 
-$(KERNEL): $(KERNEL_OBJECTS) kernel/arch/$(ARCH)/linker.ld
+$(KERNEL_OBJECTS): VERSION
+$(LOADER_OBJECTS): VERSION
+
+$(KERNEL): $(KERNEL_OBJECTS) kernel/arch/$(ARCH)/linker.ld VERSION
 	@mkdir -p $(dir $@)
 	$(Q)$(CC) $(KERNEL_FLAGS) $(KERNEL_LDFLAGS) -o $@ $(KERNEL_OBJECTS)
 	@echo "  LD    $@"
 
-$(LOADER): $(LOADER_OBJECTS)
+$(LOADER): $(LOADER_OBJECTS) VERSION
 	@mkdir -p $(dir $@)
 	$(Q)$(LD) -m $(LOADER_LD_ARCH) --subsystem 10 -e efi_main \
 		--image-base 0x10000000 --disable-reloc-section --no-insert-timestamp \
@@ -143,18 +151,22 @@ $(OBJ)/boot/%.o: boot/%.c
 	$(Q)$(CC) $(LOADER_FLAGS) -c $< -o $@
 	@echo "  CC    $<"
 
-disk: $(DISK_IMG)
-
-$(DISK_IMG): scripts/mkdisk.sh
+disk:
 	$(Q)scripts/mkdisk.sh $(DISK_IMG) $(DISK_SIZE_MB)
-	@echo "  DISK  $@"
+	@echo "  DISK  $(DISK_IMG)"
 
-run: esp disk
+raid-disks: scripts/mkraid.sh scripts/raid-meta.py
+	$(Q)scripts/mkraid.sh $(RAID_DISK_A) $(RAID_DISK_B)
+	@echo "  RAID  $(RAID_DISK_A) $(RAID_DISK_B)"
+
+run: esp
+	@test -f $(DISK_IMG) || $(MAKE) --no-print-directory disk
 	@mkdir -p $(BUILD)/tmp
 	$(Q)TMPDIR=$(abspath $(BUILD)/tmp) ESP_DIR=$(abspath $(ESP)) \
 		SERIAL_LOG=$(abspath $(SERIAL_LOG)) DEBUG_LOG=$(abspath $(DEBUG_LOG)) \
 		EXIT_CODE_FILE=$(abspath $(QEMU_EXIT)) QEMU_CPU="$(QEMU_CPU)" \
-		DISK_IMG=$(abspath $(DISK_IMG)) scripts/run-qemu.sh
+		DISK_IMG=$(abspath $(DISK_IMG)) EXTRA_DISKS="$(EXTRA_DISKS)" \
+		scripts/run-qemu.sh
 
 test:
 	$(Q)rm -f $(DISK_IMG)
@@ -165,7 +177,18 @@ test:
 test-compat:
 	$(Q)$(MAKE) test BUILD_ROOT=build/compat REQUIRE_AVX2=0 QEMU_CPU=qemu64 EXPECT_AVX2=no
 
-check-disk: disk
+test-raid: esp raid-disks
+	$(Q)$(MAKE) --no-print-directory run DISK_IMG=$(RAID_DISK_A) EXTRA_DISKS=$(RAID_DISK_B)
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" healthy
+	$(Q)$(PYTHON) scripts/check-raid.py $(RAID_DISK_A) $(RAID_DISK_B)
+
+test-raid-degraded: esp raid-disks
+	$(Q)$(MAKE) --no-print-directory run DISK_IMG=$(RAID_DISK_A)
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" degraded
+	$(Q)$(PYTHON) scripts/check-raid.py $(RAID_DISK_A)
+
+check-disk:
+	@test -f $(DISK_IMG) || $(MAKE) --no-print-directory disk
 	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 
 size: $(KERNEL)
@@ -196,6 +219,6 @@ distclean: clean
 	@echo "  RM    build"
 
 help:
-	@sed -n '2,16p' Makefile | sed 's/^# \{0,1\}//'
+	@sed -n '2,19p' Makefile | sed 's/^# \{0,1\}//'
 
 -include $(KERNEL_DEPS) $(LOADER_DEPS)

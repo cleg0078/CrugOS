@@ -4,9 +4,17 @@
 #include <crug/gpt.h>
 #include <crug/ext4.h>
 #include <crug/journal.h>
+#include <crug/raid.h>
 #include <crug/string.h>
 #include <crug/kernel.h>
 #include "ext4_internal.h"
+
+#define STORAGE_MAX_DISKS 8u
+
+static const u8 raid_type_guid[16] = {
+    0x0F, 0x88, 0x9D, 0xA1, 0xFC, 0x05, 0x3B, 0x4D,
+    0xA0, 0x06, 0x74, 0x3F, 0x0F, 0x84, 0x91, 0x1E
+};
 
 static struct ext4_fs g_root_fs;
 static struct block_device *g_root_part;
@@ -14,48 +22,29 @@ static int g_present;
 static char g_hello[256];
 static u64 g_hello_size;
 
-int storage_init(void)
-{
-    struct block_device *vda;
-    struct gpt_table table;
-    struct gpt_partition *part;
-    u64 sectors;
-    u32 i;
-    int ret;
+static struct gpt_table g_tables[STORAGE_MAX_DISKS];
+static u8 g_parsed[STORAGE_MAX_DISKS];
+static struct block_device *g_disks[STORAGE_MAX_DISKS];
 
-    block_init();
-    ret = virtio_blk_init();
-    if (ret < 0)
-        return -1;
-    vda = block_find("vda");
-    if (!vda) {
-        kprintf("storage: no virtio block device\n");
-        return -1;
+static u32 storage_collect_disks(void)
+{
+    struct block_device *bd;
+    u32 count = 0;
+
+    for (bd = block_first(); bd && count < STORAGE_MAX_DISKS; bd = bd->next) {
+        if (bd->name[0] != 'v' || bd->name[1] != 'd' || bd->name[2] == 0 ||
+            bd->name[3] != 0)
+            continue;
+        g_disks[count++] = bd;
     }
-    kprintf("CRUGOS: block ready (%s, %llu sectors)\n", vda->name,
-            (unsigned long long)vda->sectors);
-    if (gpt_parse(vda, &table) != 1 || table.count == 0) {
-        kprintf("storage: no usable GPT partition\n");
+    return count;
+}
+
+static int storage_mount_root(struct block_device *part)
+{
+    if (!part)
         return -1;
-    }
-    part = &table.partitions[0];
-    for (i = 0; i < table.count; i++) {
-        if (strcmp(table.partitions[i].name, "crugroot") == 0) {
-            part = &table.partitions[i];
-            break;
-        }
-    }
-    kprintf("gpt    : %u partition(s), root '%s' LBA %llu..%llu\n",
-            table.count, part->name,
-            (unsigned long long)part->first_lba,
-            (unsigned long long)part->last_lba);
-    if (part->last_lba < part->first_lba)
-        return -1;
-    sectors = part->last_lba - part->first_lba + 1;
-    g_root_part = block_partition(vda, part->first_lba, sectors, "vda1");
-    if (!g_root_part)
-        return -1;
-    kprintf("CRUGOS: gpt ready\n");
+    g_root_part = part;
     if (ext4_mount(&g_root_fs, g_root_part, 0) != 0) {
         kprintf("storage: ext4 mount failed\n");
         return -1;
@@ -78,6 +67,125 @@ int storage_init(void)
     g_present = 1;
     kprintf("CRUGOS: storage ready\n");
     return 1;
+}
+
+static int storage_direct_root(u32 disks)
+{
+    u32 i, j;
+    char pname[BLOCK_NAME_MAX];
+
+    for (i = 0; i < disks; i++) {
+        if (!g_parsed[i])
+            continue;
+        for (j = 0; j < g_tables[i].count; j++) {
+            struct gpt_partition *part = &g_tables[i].partitions[j];
+            u64 sectors;
+
+            if (strcmp(part->name, "crugroot") != 0)
+                continue;
+            if (part->last_lba < part->first_lba)
+                continue;
+            kprintf("gpt    : %u partition(s), root '%s' LBA %llu..%llu\n",
+                    g_tables[i].count, part->name,
+                    (unsigned long long)part->first_lba,
+                    (unsigned long long)part->last_lba);
+            sectors = part->last_lba - part->first_lba + 1;
+            ksnprintf(pname, sizeof(pname), "%s%u", g_disks[i]->name, j + 1);
+            g_root_part = block_partition(g_disks[i], part->first_lba, sectors,
+                                          pname);
+            if (!g_root_part)
+                return -1;
+            kprintf("CRUGOS: gpt ready\n");
+            return storage_mount_root(g_root_part);
+        }
+    }
+    return 0;
+}
+
+static int storage_raid_root(u32 disks)
+{
+    struct block_device *members[RAID_MAX_MEMBERS];
+    u32 count = 0;
+    u32 present = 0;
+    int degraded = 0;
+    u32 i, j;
+    char pname[BLOCK_NAME_MAX];
+    struct block_device *array;
+
+    for (i = 0; i < disks && count < RAID_MAX_MEMBERS; i++) {
+        if (!g_parsed[i])
+            continue;
+        for (j = 0; j < g_tables[i].count && count < RAID_MAX_MEMBERS; j++) {
+            struct gpt_partition *part = &g_tables[i].partitions[j];
+            u64 sectors;
+
+            if (memcmp(part->type_guid, raid_type_guid, 16) != 0)
+                continue;
+            if (part->last_lba < part->first_lba)
+                continue;
+            sectors = part->last_lba - part->first_lba + 1;
+            ksnprintf(pname, sizeof(pname), "%s%u", g_disks[i]->name, j + 1);
+            members[count] = block_partition(g_disks[i], part->first_lba,
+                                            sectors, pname);
+            if (!members[count])
+                return -1;
+            count++;
+        }
+    }
+    if (count == 0) {
+        kprintf("storage: no usable GPT partition\n");
+        return -1;
+    }
+    kprintf("CRUGOS: gpt ready\n");
+    if (raid_assemble(members, count, "md0", &present, &degraded) != 0) {
+        kprintf("storage: raid assembly failed\n");
+        return -1;
+    }
+    array = block_find("md0");
+    if (!array)
+        return -1;
+    kprintf("CRUGOS: raid ready\n");
+    if (degraded || raid_is_degraded(array)) {
+        kprintf("CRUGOS: raid degraded (%u/%u members)\n", present,
+                raid_member_count(array));
+    } else {
+        kprintf("CRUGOS: raid healthy (%u/%u members)\n", present, present);
+    }
+    return storage_mount_root(array);
+}
+
+int storage_init(void)
+{
+    int devices;
+    u32 disks;
+    u32 i;
+    int ret;
+
+    block_init();
+    devices = virtio_blk_init();
+    if (devices <= 0) {
+        kprintf("storage: no virtio block device\n");
+        return -1;
+    }
+    disks = storage_collect_disks();
+    if (disks == 0) {
+        kprintf("storage: no block device\n");
+        return -1;
+    }
+    kprintf("CRUGOS: block ready (%u device(s))\n", disks);
+    for (i = 0; i < disks; i++) {
+        if (gpt_parse(g_disks[i], &g_tables[i]) == 1) {
+            g_parsed[i] = 1;
+        } else {
+            kprintf("storage: no GPT on %s\n", g_disks[i]->name);
+        }
+    }
+    ret = storage_direct_root(disks);
+    if (ret < 0)
+        return -1;
+    if (ret > 0)
+        return 1;
+    return storage_raid_root(disks);
 }
 
 static int storage_cleanup(struct ext4_fs *fs)

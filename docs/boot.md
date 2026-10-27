@@ -85,11 +85,14 @@ post-snapshot allocations cannot push it over capacity.
 6. `timer_init`: TSC frequency, TSC-deadline or LAPIC periodic. Interrupts
    stay disabled until the execution model exists.
 7. `heap_init`: slab caches and large-allocation headers. `CRUGOS: heap ready`.
-8. `storage_init`: `block_init`, legacy virtio-blk, GPT, the `crugroot`
-   partition and a read-only ext4 mount used for the boot file check. A
-   journaled filesystem is opened through JBD2 and replayed at mount time if
+8. `storage_init`: `block_init`, all legacy virtio-blk functions, and the
+   GPT of every `vd?` disk. A partition named `crugroot` is mounted directly;
+   otherwise `fd00` partitions are assembled into RAID1 `md0` and mounted.
+   A journaled filesystem is opened through JBD2 and replayed at mount time if
    necessary. `CRUGOS: block ready`, `CRUGOS: gpt ready`,
-   `CRUGOS: ext4 ready`, `CRUGOS: journal ready`, `CRUGOS: storage ready`.
+   `CRUGOS: raid ready` and `CRUGOS: raid healthy`/`raid degraded` when
+   RAID is used, then `CRUGOS: ext4 ready`, `CRUGOS: journal ready`,
+   `CRUGOS: storage ready`.
 9. `sched_init`: per-class run queues, boot thread id 0 and the idle thread.
    `CRUGOS: sched ready`.
 10. `process_init`: the kernel process and its handle table.
@@ -97,7 +100,7 @@ post-snapshot allocations cannot push it over capacity.
 11. `sti`, then `selftest_run`: allocator, mappings, W^X audit, `int3`, timer,
     heap, block/GPT/ext4/storage (including the read-write round trip and a
     journal replay test), handles, scheduler, message ports and syscalls.
-12. `report_boot`, `CRUGOS: phase 3b2 boot ok`, `arch_exit_qemu(0x10)`.
+12. `report_boot`, `CRUGOS: phase 3b3 boot ok`, `arch_exit_qemu(0x10)`.
 
 Storage is still brought up with interrupts disabled: the virtio driver polls
 its used ring between `heap_init` and `sched_init`.
@@ -179,13 +182,17 @@ mode yet: the self-test invokes the same gate from ring 0.
 
 ## Storage
 
-The boot disk is a legacy PCI virtio-blk device (`vda`). `storage_init()`
-parses the GPT, prefers the partition named `crugroot`, creates a `vda1`
-partition view and mounts it read-only as ext4. It then reads `/hello.txt` into
-a static buffer and the self-test re-checks the mount, the directory listing and
-the file contents.
+The boot disks are legacy PCI virtio-blk devices (`vda`..`vdh`).
+`storage_init()` parses every disk's GPT and prefers a partition named
+`crugroot`, mounted directly as ext4. If there is none, it collects the
+partitions whose type is Linux RAID (`fd00`), validates their 512-byte metadata
+records and assembles RAID1 `md0`, then mounts that. A missing member is
+allowed and prints `CRUGOS: raid degraded`; a healthy pair prints
+`CRUGOS: raid healthy (2/2 members)`. The root mount then reads
+`/hello.txt` into a static buffer and the self-test re-checks the mount, the
+directory listing and the file contents. See [raid.md](raid.md).
 
-The same self-test then remounts the partition read-write and exercises the
+The same self-test then remounts the root device read-write and exercises the
 write path: it removes stale `/selftest` entries, creates `/selftest` and
 `a.txt`, writes and `fsync`s a 5000-byte pattern, renames the file to `b.txt`,
 truncates it to 1000 bytes, creates and unlinks `tmp.txt`, unmounts cleanly
@@ -219,6 +226,8 @@ CRUGOS: timer ready
 CRUGOS: heap ready
 CRUGOS: block ready
 CRUGOS: gpt ready
+CRUGOS: raid ready
+CRUGOS: raid healthy            # or: CRUGOS: raid degraded
 CRUGOS: ext4 ready
 CRUGOS: journal ready
 CRUGOS: storage ready
@@ -227,8 +236,12 @@ CRUGOS: syscall ready
 CRUGOS: writable storage ok
 CRUGOS: journal selftest ok
 CRUGOS: selftest ok
-CRUGOS: phase 3b2 boot ok
+CRUGOS: phase 3b3 boot ok
 ```
+
+`raid ready` and `raid healthy`/`raid degraded` appear only on the RAID
+root path; the single-disk `crugroot` path goes straight from `gpt ready` to
+`ext4 ready`.
 
 `kernel/core/report.c` prints the machine description between them: kernel
 extent, firmware pointers, memory totals, allocator totals, framebuffer mode,
@@ -247,6 +260,9 @@ init, newlines are also mirrored to the GOP text console, which uses an embedded
   higher-half kernel and demand paging arrive with user-mode address spaces.
 - Execution is kernel-mode only. There is no user mode, no address-space switch
   and no `SYSCALL` MSR gateway yet; `int 0x80` reaches the same dispatcher.
+- RAID support is RAID1 only: one `md0` array, no RAID10, no online rebuild,
+  no hot spare and no write-intent bitmap. The kernel validates member metadata
+  but never creates or updates it.
 - Only the boot CPU runs. The LAPIC is enabled and `%gs` per-CPU data exists,
   but AP startup, IOAPIC and external interrupts are phase 5 work.
 - Empty slab pages are not returned to the PMM, and page-table pages created

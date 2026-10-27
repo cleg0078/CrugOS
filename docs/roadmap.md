@@ -6,7 +6,8 @@ phase 1 makes the kernel own physical memory, page tables, exceptions and
 timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
 IPC and syscalls); phase 3A adds a working block/GPT/ext4 read-only path to a
 real disk; phase 3B-1 makes that filesystem writable and gates it on
-`e2fsck`; phase 3B-2 adds JBD2 journal replay and ordered metadata journaling.
+`e2fsck`; phase 3B-2 adds JBD2 journal replay and ordered metadata journaling;
+phase 3B-3 mirrors the root across two disks and boots from a degraded array.
 Every later phase keeps the same BootInfo contract, so the loader does not
 change for memory management, storage, SMP or drivers.
 
@@ -102,12 +103,29 @@ change for memory management, storage, SMP or drivers.
 - Transaction shape is one descriptor (42 metadata blocks for 1 KiB blocks);
   larger operations fail rather than emit an unreplayable transaction.
 
+## Phase 3B-3 - RAID1 (done)
+
+- Multiple legacy virtio-blk devices (`vda`..`vdh`) probed through every PCI
+  function; each block device keeps its own virtqueue and flush support.
+- 512-byte checksummed RAID1 metadata in the last two sectors of each member:
+  magic `CRA1`, level, slot, member count, geometry, generation and UUIDs.
+- `raid_assemble()` validates members, tolerates missing ones and registers
+  `md0`; reads use the first healthy member, writes/flushes go to all healthy
+  members, and a failed member is dropped for the rest of the boot.
+- `storage_init()` still prefers a direct `crugroot` partition and otherwise
+  assembles `md0` from `fd00` partitions; `raid ready`,
+  `raid healthy`/`raid degraded` and the existing ext4/JBD2 path follow.
+- Host tools `mkraid.sh`, `raid-meta.py` and `check-raid.py`; `make
+  test-raid` gates a healthy two-member boot, `make test-raid-degraded` gates
+  a one-member boot, and `check-raid.py` validates metadata, `e2fsck` and
+  data-region equality.
+
 ## Phase 3B - remaining storage work
 
 - Journal and metadata checksums; multi-descriptor transactions and journal
   wrapping.
-- AHCI and NVMe drivers, multiple block devices and hotplug.
-- RAID1/RAID10 over `block.device`, degraded-mode boot and rebuild.
+- AHCI and NVMe drivers, hotplug and more than eight block devices.
+- RAID10, online rebuild, hot spare, scrub and a write-intent bitmap.
 - `crypt.device` with AES-256-XTS and Argon2id key derivation.
 - Redundant ESP and a recovery path.
 
