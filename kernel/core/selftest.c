@@ -8,6 +8,10 @@
 #include <crug/process.h>
 #include <crug/msgport.h>
 #include <crug/syscall.h>
+#include <crug/block.h>
+#include <crug/gpt.h>
+#include <crug/ext4.h>
+#include <crug/storage.h>
 
 static handle_table g_handle_test;
 
@@ -62,4 +66,12 @@ void selftest_run(void)
         panic("selftest: message ports");
     if (!syscall_selftest())
         panic("selftest: syscalls");
+    if (!block_selftest())
+        panic("selftest: block layer");
+    if (!gpt_selftest())
+        panic("selftest: GPT");
+    if (!ext4_selftest())
+        panic("selftest: ext4 structures");
+    if (!storage_selftest())
+        panic("selftest: storage stack");
 }

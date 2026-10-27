@@ -4,8 +4,9 @@ The specification defines 38 phases/gates. Phase 0 established the smallest
 end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
 phase 1 makes the kernel own physical memory, page tables, exceptions and
 timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
-IPC and syscalls). Every later phase keeps the same BootInfo contract, so the
-loader does not change for memory management, SMP or drivers.
+IPC and syscalls); phase 3A adds a working block/GPT/ext4 read-only path to a
+real disk. Every later phase keeps the same BootInfo contract, so the loader
+does not change for memory management, storage, SMP or drivers.
 
 ## Phase 0 - bootstrap (done)
 
@@ -52,12 +53,29 @@ loader does not change for memory management, SMP or drivers.
   gettid, yield, sleep, port create/send/recv, handle close and exit.
 - Boot self-tests for the heap, handles, scheduler, IPC and syscalls.
 
-## Phase 3 - storage and filesystem
+## Phase 3A - storage vertical slice (done)
 
-- Block layer over AHCI/NVMe; GPT partition parsing.
-- RAID1/RAID10 above `block.device`.
-- crypt.device with AES-256-XTS and Argon2id key derivation.
-- EXT4 read/write over crypt.device.
+- Block layer with a device registry, bounds-checked reads/writes and
+  partition offset views.
+- Legacy PCI virtio-blk driver (`vda`), polled single-request I/O, 2..256-entry
+  queue and a 500 ms completion timeout.
+- GPT parsing: protective MBR, header and entry CRC32, up to 16 partitions,
+  UTF-16 names; `storage_init()` prefers the `crugroot` partition.
+- Read-only ext4: 1/2/4 KiB blocks, 32/64-byte group descriptors, extents and
+  the legacy single-indirect mapping, linear directories, clean-state check.
+  Rejects journal recovery, htree, `metadata_csum`, `inline_data`, `encrypt`
+  and `meta_bg`.
+- Generated 16 MiB GPT/ext4 test disk (`make disk`) with `/hello.txt`, read and
+  verified during boot; `block ready`, `gpt ready`, `ext4 ready` and
+  `storage ready` markers.
+
+## Phase 3B - redundant, encrypted and writable storage
+
+- AHCI and NVMe drivers, multiple block devices and hotplug.
+- RAID1/RAID10 over `block.device`, degraded-mode boot and rebuild.
+- `crypt.device` with AES-256-XTS and Argon2id key derivation.
+- EXT4 write path and JBD2 journal replay.
+- Redundant ESP and a recovery path.
 
 ## Phase 4 - devices and userspace
 
@@ -78,7 +96,7 @@ loader does not change for memory management, SMP or drivers.
 1. The spec sketches Crug namespaces, `let`, attributes and kernel-safe
    ownership annotations; crugc 0.2.3 implements C plus `own/ref/mut/move/
    adopt/drop/borrow/slice/chan/select` and rejects ownership in kernel mode.
-   Phases 0-2 therefore use plain C-style Crug. Compiler work is tracked as a
+   Phases 0-3 therefore use plain C-style Crug. Compiler work is tracked as a
    prerequisite for the capability/ownership-heavy phases (G0.5).
 2. The spec targets x86_64 -> aarch64 -> riscv64, but only a native x86_64
    `crugc` exists. aarch64/riscv64 bring-up requires a cross backend.

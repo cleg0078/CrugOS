@@ -19,7 +19,8 @@ OVMF (UEFI firmware)
        - physical allocator, page tables + W^X
        - GDT/TSS, %gs per-CPU data, IDT and exceptions
        - LAPIC + TSC/LAPIC timer
-       - kernel heap, scheduler, handles and MsgPort IPC
+       - kernel heap, virtio-blk + GPT + ext4, storage self-test
+       - scheduler, handles and MsgPort IPC
        - syscall dispatcher behind int 0x80
        - self-tests, boot report, deterministic exit
 ```
@@ -29,7 +30,7 @@ OVMF (UEFI firmware)
 `include/crug/bootinfo.h` is the single contract between loader and kernel.
 The structure is versioned (`magic = 0x43524731`, `version = 1`) and the kernel
 refuses to boot if either does not match or if required fields are invalid.
-Phases 1 and 2 did not change the layout.
+Phases 1, 2 and 3 did not change the layout.
 
 | Field | Meaning |
 | --- | --- |
@@ -84,13 +85,20 @@ post-snapshot allocations cannot push it over capacity.
 6. `timer_init`: TSC frequency, TSC-deadline or LAPIC periodic. Interrupts
    stay disabled until the execution model exists.
 7. `heap_init`: slab caches and large-allocation headers. `CRUGOS: heap ready`.
-8. `sched_init`: per-class run queues, boot thread id 0 and the idle thread.
+8. `storage_init`: `block_init`, legacy virtio-blk, GPT, the `crugroot`
+   partition and a read-only ext4 mount. `CRUGOS: block ready`,
+   `CRUGOS: gpt ready`, `CRUGOS: ext4 ready`, `CRUGOS: storage ready`.
+9. `sched_init`: per-class run queues, boot thread id 0 and the idle thread.
    `CRUGOS: sched ready`.
-9. `process_init`: the kernel process and its handle table.
-   `CRUGOS: syscall ready`.
-10. `sti`, then `selftest_run`: allocator, mappings, W^X audit, `int3`, timer,
-    heap, handles, scheduler, message ports and syscalls.
-11. `report_boot`, `CRUGOS: phase 2 boot ok`, `arch_exit_qemu(0x10)`.
+10. `process_init`: the kernel process and its handle table.
+    `CRUGOS: syscall ready`.
+11. `sti`, then `selftest_run`: allocator, mappings, W^X audit, `int3`, timer,
+    heap, block/GPT/ext4/storage, handles, scheduler, message ports and
+    syscalls.
+12. `report_boot`, `CRUGOS: phase 3 boot ok`, `arch_exit_qemu(0x10)`.
+
+Storage is still brought up with interrupts disabled: the virtio driver polls
+its used ring between `heap_init` and `sched_init`.
 
 ## Page tables
 
@@ -167,6 +175,15 @@ negative `-errno` values for errors. The call set is ping, gettid, yield,
 sleep ticks, port create/send/recv, handle close and exit. There is no user
 mode yet: the self-test invokes the same gate from ring 0.
 
+## Storage
+
+The boot disk is a legacy PCI virtio-blk device (`vda`). `storage_init()`
+parses the GPT, prefers the partition named `crugroot`, creates a `vda1`
+partition view and mounts it read-only as ext4. It then reads `/hello.txt` into
+a static buffer and the self-test re-checks the mount, the directory listing and
+the file contents. The complete stack, supported ext4 subset and known limits
+are documented in [storage.md](storage.md).
+
 ## Exit protocol
 
 A successful boot ends by writing `0x10` to QEMU's `isa-debug-exit` port
@@ -183,10 +200,14 @@ CRUGOS: vm ready
 CRUGOS: cpu ready
 CRUGOS: timer ready
 CRUGOS: heap ready
+CRUGOS: block ready
+CRUGOS: gpt ready
+CRUGOS: ext4 ready
+CRUGOS: storage ready
 CRUGOS: sched ready
 CRUGOS: syscall ready
 CRUGOS: selftest ok
-CRUGOS: phase 2 boot ok
+CRUGOS: phase 3 boot ok
 ```
 
 `kernel/core/report.c` prints the machine description between them: kernel
@@ -200,7 +221,7 @@ Before `console_init` only the 16550 UART at `0x3F8` (115200 8N1) is used. After
 init, newlines are also mirrored to the GOP text console, which uses an embedded
 8x16 font generated from a host PSF by `tools/gen-font.py`.
 
-## Known phase 2 limitations
+## Known phase 3 limitations
 
 - The identity map is limited to the low 4 GiB; user address spaces, a
   higher-half kernel and demand paging arrive with user-mode address spaces.
@@ -210,5 +231,8 @@ init, newlines are also mirrored to the GOP text console, which uses an embedded
   but AP startup, IOAPIC and external interrupts are phase 5 work.
 - Empty slab pages are not returned to the PMM, and page-table pages created
   while splitting huge pages are not reclaimed.
+- Storage is read-only: no journal replay, no write path, one legacy
+  virtio-blk disk, polled one-sector requests, no RAID1/10 and no
+  `crypt.device` yet.
 - `SMEP`/`SMAP` are enabled only when the CPU reports them; `qemu64` does not.
 - No shutdown/reset path; QEMU's debug port is the exit mechanism.

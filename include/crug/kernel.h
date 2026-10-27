@@ -46,6 +46,7 @@ typedef struct boot_timings {
     u64 traps;
     u64 timer;
     u64 heap;
+    u64 storage;
     u64 sched;
     u64 syscall;
 } boot_timings;

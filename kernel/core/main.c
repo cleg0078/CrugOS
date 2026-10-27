@@ -1,4 +1,4 @@
-/* CrugOS Phase 2 kernel entry. */
+/* CrugOS Phase 3 kernel entry. */
 #include <crug/types.h>
 #include <crug/compiler.h>
 #include <crug/io.h>
@@ -11,6 +11,7 @@
 #include <crug/heap.h>
 #include <crug/thread.h>
 #include <crug/process.h>
+#include <crug/storage.h>
 
 void kernel_main(const boot_info *bi);
 
@@ -29,7 +30,7 @@ void kernel_main(const boot_info *bi)
     trace("K:console");
 
     console_write("\n");
-    console_write("CrugOS " CRUG_VERSION_STR " (phase 2) -- Amiga-inspired microkernel bring-up\n");
+    console_write("CrugOS " CRUG_VERSION_STR " (phase 3) -- Amiga-inspired microkernel bring-up\n");
     console_write("CRUGOS: hello\n");
     kprintf("CRUGOS: version %s\n", CRUG_VERSION_STR);
 
@@ -56,6 +57,10 @@ void kernel_main(const boot_info *bi)
     t.heap = arch_read_tsc();
     kprintf("CRUGOS: heap ready\n");
 
+    if (storage_init() < 0)
+        panic("storage init failed");
+    t.storage = arch_read_tsc();
+
     sched_init();
     t.sched = arch_read_tsc();
     kprintf("CRUGOS: sched ready\n");
@@ -71,7 +76,7 @@ void kernel_main(const boot_info *bi)
 
     report_boot(bi, &t);
 
-    kprintf("CRUGOS: phase 2 boot ok\n");
+    kprintf("CRUGOS: phase 3 boot ok\n");
     trace("K:exit-ok");
     arch_exit_qemu(0x10);
 }
