@@ -30,7 +30,7 @@ void kernel_main(const boot_info *bi)
     trace("K:console");
 
     console_write("\n");
-    console_write("CrugOS " CRUG_VERSION_STR " (phase 3b8) -- Amiga-inspired microkernel bring-up\n");
+    console_write("CrugOS " CRUG_VERSION_STR " (phase 3b9) -- Amiga-inspired microkernel bring-up\n");
     console_write("CRUGOS: hello\n");
     kprintf("CRUGOS: version %s\n", CRUG_VERSION_STR);
 
@@ -57,8 +57,12 @@ void kernel_main(const boot_info *bi)
     t.heap = arch_read_tsc();
     kprintf("CRUGOS: heap ready\n");
 
-    if (storage_init() < 0)
-        panic("storage init failed");
+    if (storage_init(bi) < 0) {
+        /* No root filesystem: a missing/unlockable volume is a boot failure,
+           not a kernel invariant violation, so exit without a panic dump. */
+        kprintf("CRUGOS: no root filesystem\n");
+        arch_exit_qemu(0x11);
+    }
     t.storage = arch_read_tsc();
 
     sched_init();
@@ -76,7 +80,8 @@ void kernel_main(const boot_info *bi)
 
     report_boot(bi, &t);
 
-    kprintf("CRUGOS: phase 3b8 boot ok\n");
+    storage_lock();
+    kprintf("CRUGOS: phase 3b9 boot ok\n");
     trace("K:exit-ok");
     arch_exit_qemu(0x10);
 }

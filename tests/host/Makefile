@@ -7,9 +7,11 @@ BUILD := build
 BIN := $(BUILD)/unit-tests
 
 SOURCES := main.c test_string.c test_printf.c test_elf.c test_bitmap.c test_vm_math.c test_handle.c \
-           test_crc32c.c \
+           test_crc32c.c test_blake2b.c test_aes.c test_argon2.c test_crypt.c \
            ../../kernel/lib/string.c ../../kernel/lib/printf.c ../../kernel/lib/bitmap.c \
-           ../../kernel/lib/crc32c.c \
+           ../../kernel/lib/crc32c.c ../../kernel/crypto/blake2b.c \
+           ../../kernel/crypto/aes.c ../../kernel/crypto/xts.c ../../kernel/crypto/aesni.S \
+           ../../kernel/crypto/argon2id.c ../../kernel/block/crypt_meta.c \
            ../../kernel/core/process.c \
            ../../boot/efi/elf.c
 

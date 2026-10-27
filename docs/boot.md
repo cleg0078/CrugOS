@@ -7,6 +7,7 @@ OVMF (UEFI firmware)
   -> EFI/BOOT/BOOTX64.EFI          CrugOS loader
        - serial + ConOut console
        - read \crugos\kernel.elf from the boot device
+       - read \crugos\cmdline.txt (optional kernel command line, <= 511 B)
        - load PT_LOAD segments at their physical addresses
        - program GOP to 1024x768
        - find the ACPI RSDP in the configuration table
@@ -19,8 +20,9 @@ OVMF (UEFI firmware)
        - physical allocator, page tables + W^X
        - GDT/TSS, %gs per-CPU data, IDT and exceptions
        - LAPIC + TSC/LAPIC timer
-       - kernel heap, virtio-blk/NVMe/AHCI + GPT + RAID assembly (cold-spare
-         rebuild) + writable ext4, JBD2 replay, self-test
+       - kernel heap, virtio-blk/NVMe/AHCI + GPT + AES-256-XTS crypt unlock
+         + RAID assembly (cold-spare rebuild) + writable ext4, JBD2 replay,
+         self-test
        - scheduler, handles and MsgPort IPC
        - syscall dispatcher behind int 0x80
        - self-tests, boot report, deterministic exit
@@ -31,14 +33,16 @@ OVMF (UEFI firmware)
 `include/crug/bootinfo.h` is the single contract between loader and kernel.
 The structure is versioned (`magic = 0x43524731`, `version = 1`) and the kernel
 refuses to boot if either does not match or if required fields are invalid.
-Phases 1 through 3B-7 did not change the layout.
+Phases 1 through 3B-9 did not change the layout; phase 3B-9 is the first
+kernel to consume the `command_line` field. The loader caps it at 511 bytes
+and the kernel wipes the page after it copies the `crypt.pass=` value.
 
 | Field | Meaning |
 | --- | --- |
 | `kernel_base`, `kernel_size` | physical extent of the loaded kernel image |
 | `memory_map`, `memory_map_count` | normalized `memory_region[]` |
 | `fb` | GOP framebuffer base/size/resolution/stride/pixel format |
-| `command_line`, `command_line_len` | optional, currently NULL/0 |
+| `command_line`, `command_line_len` | optional NUL-terminated command line from `\crugos\cmdline.txt`; `crypt.pass=<pass>` is consumed and the page wiped |
 | `acpi_rsdp` | ACPI 2.0 (or 1.0) RSDP physical address |
 | `fdt` | flattened device tree, 0 on x86_64 |
 | `initrd_base`, `initrd_size` | optional initial ramdisk, currently 0 |
@@ -89,8 +93,14 @@ post-snapshot allocations cannot push it over capacity.
 8. `storage_init`: `block_init`, the legacy virtio-blk devices, then the
    NVMe driver (PCI class 01/08/02, admin/I/O queues, namespace 1) and the AHCI
    driver (PCI class 01/06/01, port bring-up, IDENTIFY, `sd` names), and the GPT
-   of every block device. A partition named `crugroot` is mounted directly;
-   otherwise `fd00` partitions are assembled into RAID1 or RAID10 `md0` and
+   of every block device. `storage_parse_cmdline` first extracts `crypt.pass=`
+   from the loader command line and wipes that page. A partition named
+   `crugroot` is mounted directly; otherwise a partition named `crugcrypt` (or
+   carrying the CrugOS encrypted-root type GUID) is unlocked: the kernel reads
+   the 16 KiB header and keyslots, derives 96 bytes with Argon2id, verifies the
+   slot MAC, unwraps the 64-byte master key and registers `crypt0`; failing to
+   unlock fails the boot (there is no fallback past a present encrypted root).
+   Otherwise `fd00` partitions are assembled into RAID1 or RAID10 `md0` and
    mounted. A member whose metadata sectors are blank is a cold spare: the
    kernel assigns it the lowest missing slot, copies the missing data from its
    mirror and writes fresh metadata before mounting. A journaled filesystem is
@@ -114,7 +124,8 @@ post-snapshot allocations cannot push it over capacity.
     heap, block/GPT/ext4/storage (including the read-write round trip, checksum
     verification and a journal replay test), handles, scheduler, message ports
     and syscalls.
-12. `report_boot`, `CRUGOS: phase 3b8 boot ok`, `arch_exit_qemu(0x10)`.
+12. `report_boot`, `storage_lock` (wipes the passphrase, the volume keys and
+    the bounce buffer), `CRUGOS: phase 3b9 boot ok`, `arch_exit_qemu(0x10)`.
 
 Storage is still brought up with interrupts disabled: the virtio driver polls
 its used ring, the NVMe driver polls completion queues and the AHCI driver polls
@@ -200,7 +211,10 @@ mode yet: the self-test invokes the same gate from ring 0.
 The boot disks are legacy PCI virtio-blk devices (`vda`..`vdh`), NVMe
 namespaces (`nvme0n1`..) or AHCI/SATA drives (`sda`..`sdh`). `storage_init()` parses every disk's GPT and prefers
 a partition named
-`crugroot`, mounted directly as ext4. If there is none, it collects the
+`crugroot`, mounted directly as ext4. If there is none, it looks for an
+encrypted root (name `crugcrypt` or the CrugOS encrypted-root type GUID),
+unlocks it with the `crypt.pass=` value from the loader command line and mounts
+ext4 over `crypt0`. If there is neither, it collects the
 partitions whose type is Linux RAID (`fd00`), validates their 512-byte metadata
 records and assembles `md0`, then mounts that. The metadata level selects the
 layout: level 1 mirrors every sector across all members, while level 10
@@ -212,7 +226,10 @@ new checksummed metadata, flush) before the array is used; `CRUGOS: raid
 rebuilt (N member(s))` reports it. Degraded arrays print
 `CRUGOS: raid degraded (N/M members)`, and a healthy array prints
 `CRUGOS: raid healthy (N/M members)` after a geometry line such as
-`raid   : level 10, 4 member(s), 2 pair(s), chunk 128 sectors`. The root mount then reads
+`raid   : level 10, 4 member(s), 2 pair(s), chunk 128 sectors`. The encrypted path prints
+`CRUGOS: crypt ready (<n> sectors, keyslot <i>, Argon2id m=<m> KiB t=<t> p=<p>)`,
+`CRUGOS: crypt aes: software`/`aes-ni` and `CRUGOS: root device crypt0` instead
+of the RAID lines. The root mount then reads
 `/hello.txt` into a static buffer and the self-test re-checks the mount, the
 directory listing and the file contents. See [raid.md](raid.md) and
 [nvme.md](nvme.md).
@@ -265,6 +282,11 @@ CRUGOS: nvme ready
 CRUGOS: ahci ready
 CRUGOS: block ready
 CRUGOS: gpt ready
+CRUGOS: crypt ready (24544 sectors, keyslot 0, Argon2id m=4096 KiB t=3 p=1)
+CRUGOS: crypt aes: software        # or: aes-ni
+CRUGOS: crypt unlock failed        # wrong password: boot fails closed
+CRUGOS: crypt locked (no password) # no crypt.pass= supplied
+CRUGOS: root device crypt0
 CRUGOS: raid ready
 CRUGOS: raid rebuilt (1 member(s))  # only when a blank spare was repaired
 raid   : level 10, 4 member(s), 2 pair(s), chunk 128 sectors
@@ -278,16 +300,18 @@ CRUGOS: syscall ready
 CRUGOS: writable storage ok
 CRUGOS: journal selftest ok
 CRUGOS: selftest ok
-CRUGOS: phase 3b8 boot ok
+CRUGOS: phase 3b9 boot ok
 ```
 
 `raid ready` and `raid healthy`/`raid degraded` appear only on the RAID
-root path; the single-disk `crugroot` path goes straight from `gpt ready` to
-`ext4 ready`.
+root path, and the `crypt` lines only on the encrypted path; the single-disk
+`crugroot` path goes straight from `gpt ready` to `ext4 ready`. A failed unlock
+prints `CRUGOS: crypt unlock failed` and then `CRUGOS: no root filesystem`, and
+the kernel exits with status 35 (a deterministic boot failure, not a panic).
 
 `kernel/core/report.c` prints the machine description between them: kernel
 extent, firmware pointers, memory totals, allocator totals, framebuffer mode,
-command line, entropy, CPU features, W^X audit, heap totals, scheduler switches,
+redacted command-line length, entropy, CPU features, W^X audit, heap totals, scheduler switches,
 per-stage microsecond timings and the timer source/frequency.
 
 ## Console
@@ -317,6 +341,13 @@ init, newlines are also mirrored to the GOP text console, which uses an embedded
   while splitting huge pages are not reclaimed.
 - Storage is writable with JBD2 replay, ordered metadata journaling and
   ext4/JBD2 checksums, over legacy virtio-blk, NVMe and AHCI/SATA roots with
-  polled requests, a single extent-tree level, and no `crypt.device` yet.
+  polled requests and a single extent-tree level.
+- Encryption is a single `crypt.device` over one partition: AES-256-XTS has no
+  per-sector authentication, the passphrase comes from a loader command-line
+  file (testing convenience; it is ESP-visible), there is no TPM or keyfile
+  slot, no rekey tool, and RAID below encryption is not implemented yet. The
+  header and keyslots are MAC-protected, the passphrase/keys/bounce buffer are
+  wiped by `storage_lock()` before the final marker, and the boot report
+  redacts the command line.
 - `SMEP`/`SMAP` are enabled only when the CPU reports them; `qemu64` does not.
 - No shutdown/reset path; QEMU's debug port is the exit mechanism.

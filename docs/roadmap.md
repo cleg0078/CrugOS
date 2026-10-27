@@ -11,7 +11,9 @@ phase 3B-3 mirrors the root across two disks and boots from a degraded array;
 phase 3B-4 adds a polled NVMe root path; phase 3B-5 stripes the root across
 RAID10 mirror pairs and boots with one member missing per pair; phase 3B-6
 rebuilds a blank replacement member at boot; phase 3B-7 boots the same
-GPT/ext4/RAID stack from an AHCI/SATA disk.
+GPT/ext4/RAID stack from an AHCI/SATA disk; phase 3B-8 adds ext4/JBD2
+checksums; phase 3B-9 encrypts the root with AES-256-XTS and an Argon2id
+derived key.
 Every later phase keeps the same BootInfo contract, so the loader does not
 change for memory management, storage, SMP or drivers.
 
@@ -219,13 +221,39 @@ change for memory management, storage, SMP or drivers.
   `make test-journal-replay` (the kernel replays it). See
   [checksums.md](checksums.md).
 
+## Phase 3B-9 - encryption (done)
+
+- `crypt.device` (`kernel/block/crypt.c`) is a GPT partition with type GUID
+  `8f1c7d2e-3b45-4c6a-9e01-c2a1b7f0d9e3` named `crugcrypt`: a 16 KiB header with
+  eight 256-byte keyslots and an AES-256-XTS data area whose XTS tweak is the
+  data-relative 512-byte sector number.
+- The passphrase is stretched with Argon2id (RFC 9106) into a 96-byte
+  key-encryption/MAC key pair that unwraps a random 64-byte master key; each
+  keyslot carries a keyed BLAKE2b-256 MAC over the header and slot, and a
+  recovery passphrase can be sealed as a second slot.
+- AES-256-XTS is the P1619 XEX construction with AES-NI dispatch and a software
+  fallback; it is pinned to IEEE 1619 vector 10, and Argon2id is pinned to
+  libargon2 vectors. BLAKE2b provides the MAC.
+- `storage_init()` prefers `crugroot`, then unlocks a `crugcrypt` partition
+  (`CRUGOS: crypt ready ...`, `CRUGOS: crypt aes: ...`), then falls back to
+  RAID. The loader reads `\crugos\cmdline.txt` into `boot_info`; the kernel
+  consumes `crypt.pass=`, wipes the loader page, redacts the command line in
+  the boot report, and `storage_lock()` wipes the passphrase, the volume keys
+  and the bounce buffer before the final marker.
+- Host tools `tools/mkcrypt.c` (`format`, `extract`), a `crypt` mode of
+  `scripts/mkdisk.sh`, `scripts/tamper.py`, and five gates: healthy unlock,
+  recovery keyslot, wrong passphrase, tampered MAC and AES-NI. See
+  [crypto.md](crypto.md).
+
 ## Phase 3B - remaining storage work
 
 - Journal wrapping, revoke records and orphan-file recovery.
 - USB storage drivers, hotplug and more than four NVMe/AHCI controllers.
 - RAID online rebuild, hot spare, scrub, a write-intent bitmap and persisted
   failure tracking (rebuild is boot-time and synchronous today).
-- `crypt.device` with AES-256-XTS and Argon2id key derivation.
+- RAID below encryption: unlock one `crypt.device` above `md0` so mirrored
+  members share one ciphertext, plus TPM/keyfile keyslots, a rekey/slot tool and
+  per-sector integrity.
 - Redundant ESP and a recovery path.
 
 ## Phase 4 - devices and userspace
@@ -252,8 +280,10 @@ change for memory management, storage, SMP or drivers.
 2. The spec targets x86_64 -> aarch64 -> riscv64, but only a native x86_64
    `crugc` exists. aarch64/riscv64 bring-up requires a cross backend.
 3. Boot performance targets (<250 ms) now have calibrated stage timings in the
-   boot report, but the gate is not enforced yet; boot currently spends most of
-   its time in PIT-based TSC calibration.
+   boot report, but the gate is not enforced yet; unencrypted boot currently
+   spends most of its time in PIT-based TSC calibration, and an encrypted boot
+   adds roughly 200 ms of Argon2id work under TCG (m=4096, t=3). A production
+   install needs a deliberate KDF-parameter/boot-time tradeoff.
 4. The spec's 16 MiB headless target cannot be met with OVMF: under this
    QEMU/OVMF pair `MEMORY_MB=16`, `32`, `64` and `128` fail before the loader
    runs (`No bootable option` or no output), and 256 MiB is not reliable. The

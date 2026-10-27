@@ -6,6 +6,7 @@
 #include <crug/gpt.h>
 #include <crug/ext4.h>
 #include <crug/journal.h>
+#include <crug/crypt.h>
 #include <crug/raid.h>
 #include <crug/string.h>
 #include <crug/kernel.h>
@@ -17,6 +18,33 @@ static const u8 raid_type_guid[16] = {
     0x0F, 0x88, 0x9D, 0xA1, 0xFC, 0x05, 0x3B, 0x4D,
     0xA0, 0x06, 0x74, 0x3F, 0x0F, 0x84, 0x91, 0x1E
 };
+
+/* GPT type GUID 8f1c7d2e-3b45-4c6a-9e01-c2a1b7f0d9e3 (on-disk little-endian). */
+static const u8 crypt_type_guid[16] = {
+    0x2E, 0x7D, 0x1C, 0x8F, 0x45, 0x3B, 0x6A, 0x4C,
+    0x9E, 0x01, 0xC2, 0xA1, 0xB7, 0xF0, 0xD9, 0xE3
+};
+
+#define CRYPT_CMDLINE_MAX 4096u
+
+static char g_crypt_pass[CRUG_CRYPT_MAX_PASSWORD + 1];
+static u32 g_crypt_pass_len;
+static struct block_device *g_crypt_dev;
+
+/* Volunteer zeroization: memset can be elided, a volatile store cannot. */
+static void storage_wipe(void *ptr, usize len)
+{
+    volatile u8 *p = (volatile u8 *)ptr;
+
+    while (len-- > 0)
+        *p++ = 0;
+}
+
+static void storage_wipe_passphrase(void)
+{
+    storage_wipe(g_crypt_pass, sizeof(g_crypt_pass));
+    g_crypt_pass_len = 0;
+}
 
 /* Large enough that one journal transaction spans several descriptors:
    the per-descriptor tag capacity is 62 on a 1 KiB journal. */
@@ -184,7 +212,105 @@ static int storage_raid_root(u32 disks)
     return storage_mount_root(array);
 }
 
-int storage_init(void)
+static int cmdline_space(char c)
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+/* The loader copies \crugos\cmdline.txt into the boot_info page. Only the
+   crypt.pass= token is consumed for now: there is no interactive console yet. */
+static void storage_parse_cmdline(const boot_info *bi)
+{
+    static const char key[] = "crypt.pass=";
+    const usize key_len = sizeof(key) - 1;
+    const char *cmd;
+    u64 limit;
+    u64 i = 0;
+
+    g_crypt_pass_len = 0;
+    g_crypt_pass[0] = 0;
+    if (bi == 0 || bi->magic != BOOTINFO_MAGIC || bi->command_line == 0)
+        return;
+    cmd = bi->command_line;
+    limit = bi->command_line_len;
+    if (limit > CRYPT_CMDLINE_MAX)
+        limit = CRYPT_CMDLINE_MAX;
+    while (i < limit) {
+        u64 start;
+        u64 len;
+        u64 n;
+
+        while (i < limit && cmdline_space(cmd[i]))
+            i++;
+        start = i;
+        while (i < limit && !cmdline_space(cmd[i]))
+            i++;
+        len = i - start;
+        if (len <= key_len)
+            continue;
+        n = 0;
+        while (n < key_len && cmd[start + n] == key[n])
+            n++;
+        if (n != key_len)
+            continue;
+        n = len - key_len;
+        if (n > CRUG_CRYPT_MAX_PASSWORD)
+            n = CRUG_CRYPT_MAX_PASSWORD;
+        memcpy(g_crypt_pass, cmd + start + key_len, (usize)n);
+        g_crypt_pass[n] = 0;
+        g_crypt_pass_len = (u32)n;
+    }
+    /* The loader page is still mapped: drop the plaintext token right away. */
+    storage_wipe((void *)(uintptr)cmd, (usize)limit);
+}
+
+static int storage_crypt_root(u32 disks)
+{
+    u32 i, j;
+    char pname[BLOCK_NAME_MAX];
+
+    for (i = 0; i < disks; i++) {
+        if (!g_parsed[i])
+            continue;
+        for (j = 0; j < g_tables[i].count; j++) {
+            struct gpt_partition *part = &g_tables[i].partitions[j];
+            struct block_device *part_bd;
+            struct block_device *unlocked;
+            u64 sectors;
+
+            if (memcmp(part->type_guid, crypt_type_guid, 16) != 0 &&
+                strcmp(part->name, "crugcrypt") != 0)
+                continue;
+            if (part->last_lba < part->first_lba)
+                continue;
+            kprintf("gpt    : crypt root '%s' LBA %llu..%llu\n", part->name,
+                    (unsigned long long)part->first_lba,
+                    (unsigned long long)part->last_lba);
+            sectors = part->last_lba - part->first_lba + 1;
+            ksnprintf(pname, sizeof(pname), "%s%u", g_disks[i]->name, j + 1);
+            part_bd = block_partition(g_disks[i], part->first_lba, sectors, pname);
+            if (!part_bd)
+                return -1;
+            kprintf("CRUGOS: gpt ready\n");
+            if (g_crypt_pass_len == 0) {
+                kprintf("CRUGOS: crypt locked (no password)\n");
+                storage_wipe_passphrase();
+                return -1;
+            }
+            unlocked = crypt_unlock(part_bd, 0, (const u8 *)g_crypt_pass,
+                                    g_crypt_pass_len);
+            storage_wipe_passphrase();
+            if (!unlocked)
+                return -1;
+            g_crypt_dev = unlocked;
+            g_root_part = unlocked;
+            return storage_mount_root(g_root_part);
+        }
+    }
+    return 0;
+}
+
+int storage_init(const boot_info *bi)
 {
     int virtio_devices;
     int nvme_devices;
@@ -193,6 +319,7 @@ int storage_init(void)
     u32 i;
     int ret;
 
+    storage_parse_cmdline(bi);
     block_init();
     virtio_devices = virtio_blk_init();
     kprintf("CRUGOS: virtio ready (%d device(s))\n", virtio_devices);
@@ -217,11 +344,29 @@ int storage_init(void)
             kprintf("storage: no GPT on %s\n", g_disks[i]->name);
     }
     ret = storage_direct_root(disks);
-    if (ret < 0)
-        return -1;
-    if (ret > 0)
-        return 1;
-    return storage_raid_root(disks);
+    if (ret != 0) {
+        storage_wipe_passphrase();
+        return ret;
+    }
+    ret = storage_crypt_root(disks);
+    if (ret != 0) {
+        storage_wipe_passphrase();
+        return ret;
+    }
+    ret = storage_raid_root(disks);
+    storage_wipe_passphrase();
+    return ret;
+}
+
+/* Drop the volume key and the passphrase before the kernel hands the machine
+   back to the firmware; the crypt device refuses further I/O afterwards. */
+void storage_lock(void)
+{
+    storage_wipe_passphrase();
+    if (g_crypt_dev != 0) {
+        crypt_wipe_keys(g_crypt_dev);
+        g_crypt_dev = 0;
+    }
 }
 
 static int storage_cleanup(struct ext4_fs *fs)

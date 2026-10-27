@@ -14,6 +14,12 @@
 #   make test-raid10  boot RAID10 (four members) and verify member disks
 #   make test-nvme   boot from an NVMe namespace and verify the disk
 #   make test-ahci   boot from a SATA (AHCI) disk and verify the disk
+#   make crypt-disk  build the AES-256-XTS crypt test disk
+#   make test-crypt  boot from an encrypted root and verify the disk
+#   make test-crypt-recovery  unlock the encrypted root with the recovery keyslot
+#   make test-crypt-wrongkey  reject a wrong password without mounting
+#   make test-crypt-tamper  reject a tampered keyslot MAC
+#   make test-crypt-ni  boot the encrypted root using AES-NI
 #   make test-raid-degraded  boot RAID1 with one member missing
 #   make test-raid10-degraded  boot RAID10 with one member per pair
 #   make test-raid-repair  boot RAID1 with one blank member and rebuild it
@@ -37,6 +43,7 @@ SHELL := /bin/bash
 # Toolchain and host tools. Command-line overrides still win.
 CC := crugc
 LD := ld
+HOST_CC ?= cc
 PYTHON ?= python3
 QEMU ?= qemu-system-x86_64
 
@@ -54,6 +61,8 @@ EXPECT_RAID ?= no
 EXPECT_NVME ?= no
 EXPECT_REBUILD ?= no
 EXPECT_AHCI ?= no
+EXPECT_CRYPT ?= no
+EXPECT_AES ?= any
 
 # QEMU / firmware options.
 MEMORY_MB ?= 512
@@ -104,6 +113,12 @@ RAID10_DISK_C ?= $(BUILD)/raid10-c.img
 RAID10_DISK_D ?= $(BUILD)/raid10-d.img
 NVME_IMG ?= $(BUILD)/nvme.img
 AHCI_IMG ?= $(BUILD)/ahci.img
+CRYPT_IMG ?= $(BUILD)/crypt.img
+CRYPT_TAMPER_IMG ?= $(BUILD)/crypt-tamper.img
+CRYPT_PASS ?= crugos-test
+CRYPT_RECOVERY_PASS ?= crugos-recovery
+CRYPT_M ?= 4096
+MCRYPT := $(BUILD)/mkcrypt
 NVME_SERIAL ?= CRUGNVME0
 EXTRA_DISKS ?=
 
@@ -132,7 +147,8 @@ KERNEL_LDFLAGS := -nostdlib -static -no-pie -Wl,--build-id=none \
 KERNEL_SOURCES := $(wildcard kernel/arch/$(ARCH)/*.c) $(wildcard kernel/arch/$(ARCH)/*.S) \
                   $(wildcard kernel/core/*.c) $(wildcard kernel/lib/*.c) \
                   $(wildcard kernel/mm/*.c) $(wildcard kernel/block/*.c) \
-                  $(wildcard kernel/fs/*.c) $(wildcard drivers/*/*.c)
+                  $(wildcard kernel/fs/*.c) $(wildcard drivers/*/*.c) \
+                  $(wildcard kernel/crypto/*.c) $(wildcard kernel/crypto/*.S)
 KERNEL_OBJECTS := $(patsubst %,$(OBJ)/%.o,$(basename $(KERNEL_SOURCES)))
 KERNEL_DEPS := $(KERNEL_OBJECTS:.o=.d)
 
@@ -140,10 +156,14 @@ LOADER_SOURCES := $(wildcard boot/efi/*.c)
 LOADER_OBJECTS := $(patsubst %,$(OBJ)/%.o,$(basename $(LOADER_SOURCES)))
 LOADER_DEPS := $(LOADER_OBJECTS:.o=.d)
 
+HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
+                      $(wildcard kernel/crypto/*.c) $(wildcard kernel/crypto/*.S)
+
 .PHONY: all kernel loader esp disk raid-disks raid10-disks nvme-disk ahci-disk \
-        raid-repair-disks raid10-repair-disks run test test-compat \
+        mkcrypt crypt-disk raid-repair-disks raid10-repair-disks run test test-compat \
         test-raid test-raid-degraded test-raid10 test-raid10-degraded test-nvme test-ahci \
         test-raid-repair test-raid10-repair test-journal-csum test-journal-replay \
+        test-crypt test-crypt-recovery test-crypt-wrongkey test-crypt-tamper test-crypt-ni \
         crash-disk \
         check-disk size check-efi repro test-host preflight version options clean distclean help
 
@@ -158,6 +178,7 @@ esp: $(KERNEL) $(LOADER)
 	$(Q)cp $(LOADER) $(ESP)/EFI/BOOT/$(LOADER_EFI_NAME)
 	$(Q)cp $(KERNEL) $(ESP)/crugos/kernel.elf
 	$(Q)printf '%s\n' "$(CRUGOS_VERSION)" > $(ESP)/crugos/version
+	$(Q)printf 'crypt.pass=%s\n' "$(CRYPT_PASS)" > $(ESP)/crugos/cmdline.txt
 	@echo "  ESP   $(ESP) ($(CRUGOS_VERSION))"
 
 $(KERNEL_OBJECTS): VERSION
@@ -174,6 +195,14 @@ $(LOADER): $(LOADER_OBJECTS) VERSION
 		--image-base 0x10000000 --disable-reloc-section --no-insert-timestamp \
 		-o $@ $(LOADER_OBJECTS)
 	@echo "  PE    $@"
+
+$(MCRYPT): $(HOST_CRYPT_SOURCES) include/crug/crypt.h
+	@mkdir -p $(dir $@)
+	$(Q)$(HOST_CC) -Iinclude -std=gnu11 -O2 -g -Wall -Wextra -Wno-unused-parameter \
+		-fno-builtin -o $@ $(HOST_CRYPT_SOURCES)
+	@echo "  HOSTCC $@"
+
+mkcrypt: $(MCRYPT)
 
 $(OBJ)/kernel/%.o: kernel/%.c
 	@mkdir -p $(dir $@)
@@ -221,6 +250,12 @@ ahci-disk: scripts/mkdisk.sh
 	$(Q)rm -f $(AHCI_IMG)
 	$(Q)scripts/mkdisk.sh $(AHCI_IMG) $(DISK_SIZE_MB)
 	@echo "  AHCI  $(AHCI_IMG)"
+
+crypt-disk: $(MCRYPT) scripts/mkdisk.sh include/crug/crypt.h
+	$(Q)rm -f $(CRYPT_IMG)
+	$(Q)scripts/mkdisk.sh $(CRYPT_IMG) $(DISK_SIZE_MB) crypt $(abspath $(MCRYPT)) \
+		"$(CRYPT_PASS)" "$(CRYPT_RECOVERY_PASS)" $(CRYPT_M)
+	@echo "  DISK  $(CRYPT_IMG) (crypt mode)"
 
 raid-repair-disks: raid-disks scripts/raid-blank.sh
 	$(Q)scripts/raid-blank.sh $(RAID_DISK_B)
@@ -301,6 +336,39 @@ test-ahci: esp ahci-disk
 	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" no no no yes
 	$(Q)$(PYTHON) scripts/check-disk.py $(AHCI_IMG)
 
+test-crypt: esp crypt-disk
+	$(Q)$(MAKE) --no-print-directory run DISK_IMG=$(CRYPT_IMG) CRYPT_PASS="$(CRYPT_PASS)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION \
+		"$(EXPECT_AVX2)" no no no no yes "$(EXPECT_AES)"
+	$(Q)$(PYTHON) scripts/check-disk.py $(CRYPT_IMG) \
+		--crypt-tool $(abspath $(MCRYPT)) --crypt-password "$(CRYPT_PASS)"
+
+test-crypt-recovery: esp crypt-disk
+	$(Q)$(MAKE) --no-print-directory run DISK_IMG=$(CRYPT_IMG) \
+		CRYPT_PASS="$(CRYPT_RECOVERY_PASS)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION \
+		"$(EXPECT_AVX2)" no no no no yes "$(EXPECT_AES)"
+	$(Q)$(PYTHON) scripts/check-disk.py $(CRYPT_IMG) \
+		--crypt-tool $(abspath $(MCRYPT)) --crypt-password "$(CRYPT_RECOVERY_PASS)"
+
+test-crypt-wrongkey: esp crypt-disk
+	$(Q)$(MAKE) --no-print-directory run DISK_IMG=$(CRYPT_IMG) \
+		CRYPT_PASS="wrong-password"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION \
+		"$(EXPECT_AVX2)" no no no no wrong any
+
+test-crypt-tamper: esp crypt-disk scripts/tamper.py
+	$(Q)cp $(CRYPT_IMG) $(CRYPT_TAMPER_IMG)
+	# Keyslot 0 MAC: partition at LBA 2048, keyslots at 0x1000, mac at +0x68.
+	$(Q)$(PYTHON) scripts/tamper.py $(CRYPT_TAMPER_IMG) 1052776
+	$(Q)$(MAKE) --no-print-directory run DISK_IMG=$(CRYPT_TAMPER_IMG) \
+		CRYPT_PASS="$(CRYPT_PASS)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION \
+		"$(EXPECT_AVX2)" no no no no wrong any
+
+test-crypt-ni:
+	$(Q)$(MAKE) test-crypt QEMU_CPU=qemu64,+aes,+avx,+avx2 EXPECT_AES=aes-ni
+
 test-journal-csum: esp crash-disk
 	$(Q)$(MAKE) --no-print-directory run DISK_IMG=$(CRASH_IMG)
 	$(Q)$(PYTHON) scripts/check-journal.py $(SERIAL_LOG) $(QEMU_EXIT) $(CRASH_IMG)
@@ -354,6 +422,8 @@ options:
 	@printf '  %-16s %s\n' EXPECT_NVME "$(EXPECT_NVME)"
 	@printf '  %-16s %s\n' EXPECT_REBUILD "$(EXPECT_REBUILD)"
 	@printf '  %-16s %s\n' EXPECT_AHCI "$(EXPECT_AHCI)"
+	@printf '  %-16s %s\n' EXPECT_CRYPT "$(EXPECT_CRYPT)"
+	@printf '  %-16s %s\n' EXPECT_AES "$(EXPECT_AES)"
 	@printf '  %-16s %s\n' MEMORY_MB "$(MEMORY_MB)"
 	@printf '  %-16s %s\n' SMP "$(SMP)"
 	@printf '  %-16s %s\n' TIMEOUT_SEC "$(TIMEOUT_SEC)"
@@ -375,6 +445,13 @@ options:
 	@printf '  %-16s %s\n' NVME_IMG "$(NVME_IMG)"
 	@printf '  %-16s %s\n' NVME_SERIAL "$(NVME_SERIAL)"
 	@printf '  %-16s %s\n' AHCI_IMG "$(AHCI_IMG)"
+	@printf '  %-16s %s\n' CRYPT_IMG "$(CRYPT_IMG)"
+	@printf '  %-16s %s\n' CRYPT_TAMPER_IMG "$(CRYPT_TAMPER_IMG)"
+	@printf '  %-16s %s\n' CRYPT_PASS "$(CRYPT_PASS)"
+	@printf '  %-16s %s\n' CRYPT_RECOVERY_PASS "$(CRYPT_RECOVERY_PASS)"
+	@printf '  %-16s %s\n' CRYPT_M "$(CRYPT_M)"
+	@printf '  %-16s %s\n' MCRYPT "$(MCRYPT)"
+	@printf '  %-16s %s\n' HOST_CC "$(HOST_CC)"
 	@printf '  %-16s %s\n' EXTRA_DISKS "$(EXTRA_DISKS)"
 	@printf '  %-16s %s\n' BUILD "$(BUILD)"
 	@printf '  %-16s %s\n' KERNEL "$(KERNEL)"

@@ -1,9 +1,9 @@
 # Building CrugOS
 
-This document describes the phase 3B-7 build system: how the kernel, the UEFI
-loader and the test disk images are built, which invariants the link must
-preserve, and how to diagnose the failure modes that are specific to this
-toolchain.
+This document describes the phase 3B-9 build system: how the kernel, the UEFI
+loader, the host crypto tool and the test disk images are built, which
+invariants the link must preserve, and how to diagnose the failure modes that
+are specific to this toolchain.
 
 ## Requirements
 
@@ -14,6 +14,7 @@ toolchain.
 | `qemu-system-x86_64` | boot test | 10.x, TCG works without `/dev/kvm` |
 | OVMF | UEFI firmware | `/usr/share/OVMF/OVMF_CODE_4M.fd` + `OVMF_VARS_4M.fd` |
 | `python3` | boot/PE checks | standard library only |
+| `cc` (`HOST_CC`) | `tools/mkcrypt` and the host unit tests | any host C11 compiler; the crypt tool reuses `kernel/crypto/*` |
 | `sgdisk`, `mke2fs`, `debugfs`, `e2fsck`, `dd`, `truncate` | test disks | only for `make disk`, `make raid-disks`, `make raid10-disks` and their checks; `dd` also blanks repair spares; e2fsprogs |
 
 Run `make preflight` to check all of the above.
@@ -35,13 +36,20 @@ make test-raid-repair  # rebuild a blank RAID1 member at boot, then check both
 make test-raid10-repair  # rebuild two blank RAID10 members, then check all four
 make test-journal-csum  # crash after a journal commit, replay it with e2fsck
 make test-journal-replay  # crash, then replay the journal in the kernel
+make test-crypt  # boot from an AES-256-XTS root, decrypt it and check the image
+make test-crypt-recovery  # unlock the recovery keyslot instead of slot 0
+make test-crypt-wrongkey  # a wrong passphrase must fail closed (exit 35)
+make test-crypt-tamper  # a corrupted keyslot MAC must be rejected
+make test-crypt-ni  # the same encrypted boot with AES-NI enabled
 make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
-make test-host   # host unit tests for string/printf/ELF/bitmap/VM math/handles/CRC32C
+make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots
 make disk        # build the GPT/ext4 test disk at build/<arch>/disk.img
 make raid-disks  # build the two GPT/ext4 RAID1 member disks
 make raid10-disks  # build the four GPT/ext4 RAID10 member disks
 make nvme-disk   # build the GPT/ext4 image used by test-nvme
 make ahci-disk   # build the GPT/ext4 image used by test-ahci
+make crypt-disk  # build the AES-256-XTS encrypted test image
+make mkcrypt     # build the host crypt tool (format/extract)
 make check-disk  # e2fsck and persisted-file checks on the current disk
 make size        # kernel size budget (<1 MiB stretch, <2 MiB hard)
 make check-efi   # PE32+ structure checks on the loader
@@ -72,6 +80,8 @@ options` prints the complete resolved set (including paths derived from
 | `EXPECT_NVME` | `no` | what `make test` requires for NVMe (`yes` needs `nvme0n1`) |
 | `EXPECT_AHCI` | `no` | what `make test` requires for AHCI/SATA (`yes` needs an `sd?` root) |
 | `EXPECT_REBUILD` | `no` | number of RAID members the boot must rebuild; `no` also rejects an unexpected rebuild |
+| `EXPECT_CRYPT` | `no` | encrypted-root expectation: `no`, `yes` or `wrong` (unlock must fail) |
+| `EXPECT_AES` | `any` | AES implementation the boot must report: `software`, `aes-ni` or `any` |
 | `CRASH_IMG` | `$(BUILD)/crash.img` | crash-gate image (journal commit, no checkpoint) |
 | `CRASH_REPLAY_IMG` | `$(BUILD)/crash-replay.img` | copy the kernel replays on the second crash-gate boot |
 | `CC` | `crugc` | compiler for kernel and loader objects |
@@ -91,6 +101,13 @@ options` prints the complete resolved set (including paths derived from
 | `NVME_IMG` | `build/<arch>/nvme.img` | image attached as an NVMe namespace |
 | `NVME_SERIAL` | `CRUGNVME0` | QEMU NVMe serial reported by OVMF |
 | `AHCI_IMG` | `build/<arch>/ahci.img` | image attached as a SATA disk on `ide.1` |
+| `CRYPT_IMG` | `build/<arch>/crypt.img` | encrypted-root image attached as `vda` |
+| `CRYPT_TAMPER_IMG` | `build/<arch>/crypt-tamper.img` | copy of `CRYPT_IMG` with one MAC byte flipped |
+| `CRYPT_PASS` | `crugos-test` | passphrase written to the ESP `crugos/cmdline.txt` and used by `mkcrypt` |
+| `CRYPT_RECOVERY_PASS` | `crugos-recovery` | recovery-slot passphrase sealed by `mkcrypt` |
+| `CRYPT_M` | `4096` | Argon2id memory cost (KiB) for the test volume |
+| `MCRYPT` | `build/<arch>/mkcrypt` | host crypt tool (format/extract) |
+| `HOST_CC` | `cc` | host compiler for `mkcrypt` and `tests/host` |
 | `EXTRA_DISKS` | empty | space-separated images attached after `DISK_IMG` |
 
 ## Version stamping
@@ -219,6 +236,21 @@ The journal gates run on their own crash image:
   The second boot must print `CRUGOS: journal replayed 100 block(s) at mount`
   and `CRUGOS: journal replay verified`; `e2fsck -fn` must then be clean.
 - `make crash-disk` only builds that image.
+
+The encrypted gates use an image with a type-`8f1c7d2e-...` `crugcrypt`
+partition: `make crypt-disk` builds the plaintext ext4/JBD2 image with
+`mkdisk.sh ... crypt`, and `mkcrypt format` writes the 16 KiB header, seals
+keyslot 0 (`CRYPT_PASS`) and optionally slot 1 (`CRYPT_RECOVERY_PASS`), then
+encrypts the 12 MiB data area in place. `make test-crypt` writes
+`crypt.pass=$(CRYPT_PASS)` into the ESP command-line file, boots, requires
+`CRUGOS: crypt ready` with the requested AES implementation, and then runs
+`check-disk.py --crypt-tool mkcrypt --crypt-password ...`, which extracts and
+decrypts the partition before `e2fsck -fn` and the file checks.
+`make test-crypt-wrongkey` boots with a different passphrase and expects
+`crypt unlock failed`, `CRUGOS: no root filesystem` and exit 35;
+`make test-crypt-tamper` flips byte 1052776 (the MAC of keyslot 0) with
+`scripts/tamper.py` and expects the same fail-closed result. See
+[crypto.md](crypto.md) for the header layout, key hierarchy and limits.
 
 The supported ext4 subset, write path, checksum layout, journal format and
 failure modes are documented in [storage.md](storage.md) and
@@ -368,6 +400,25 @@ randomisation that leaks into the output will fail this target.
   `journal_test_skip_checkpoint()` is active and that
   `ext4_test_mark_dirty()` ran before the commit (the superblock must carry
   `needs_recovery`, incompat bit 0x4).
+- **`CRUGOS: crypt unlock failed` on `make test-crypt`**: the passphrase in the
+  ESP `crugos/cmdline.txt` differs from the one sealed into the image. The
+  makefile writes `crypt.pass=$(CRYPT_PASS)` when it builds the ESP; rebuild
+  with the same `CRYPT_PASS` used by `crypt-disk`. A missing file prints
+  `crypt locked (no password)` instead.
+- **Tamper gate boots successfully**: the flipped byte must land in the
+  partition, not in the image's GPT area. The gate uses offset
+  `1052776 = 2048*512 + 0x1000 + 0x68` (keyslot 0 MAC); `scripts/tamper.py`
+  prints the byte it flipped, and `mkcrypt extract` failing is the expected
+  proof.
+- **`crypt aes: software` in `make test-crypt-ni`**: the QEMU CPU model must
+  include `+aes`; the target passes `QEMU_CPU=qemu64,+aes,+avx,+avx2`, and the
+  guest log must report `crypt aes: aes-ni`.
+- **Encrypted boot is much slower than the plain gates**: Argon2id with
+  `m=4096, t=3` costs roughly 200 ms under TCG. Reduce `CRYPT_M` for faster
+  local iterations, but keep the release gate at the default.
+- **`mkcrypt: ... short read` / key mismatch**: `mkcrypt format` expects a
+  plaintext filesystem image no larger than the data area
+  (`volume_sectors - 32` sectors); regenerate with `make crypt-disk`.
 - **QEMU exits before OVMF starts**: verify the firmware paths and that
   `OVMF_VARS` is writable (the run script copies it into `build/`).
 - **Guest still reports the old version after a bump**: ensure `VERSION` is a

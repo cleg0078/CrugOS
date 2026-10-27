@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Verify a CrugOS boot: serial markers, guest version, AVX2 policy, storage mode and exit code.
+"""Verify a CrugOS boot: serial markers, guest version, CPU policy, storage mode, encryption and exit code.
 
 usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE \
     [VERSION_FILE [EXPECT_AVX2 [EXPECT_RAID [EXPECT_NVME [EXPECT_REBUILD \
-    [EXPECT_AHCI]]]]]]
+    [EXPECT_AHCI [EXPECT_CRYPT [EXPECT_AES]]]]]]]]
 """
 
 import re
@@ -29,10 +29,24 @@ REQUIRED_MARKERS = (
     "CRUGOS: selftest ok",
     "CRUGOS: nvme ready",
     "CRUGOS: ahci ready",
-    "CRUGOS: phase 3b8 boot ok",
+    "CRUGOS: phase 3b9 boot ok",
+)
+# A rejected unlock stops before scheduling, storage mounting and self-tests.
+WRONG_CRYPT_MARKERS = (
+    "CRUGOS: hello",
+    "CRUGOS: pmm ready",
+    "CRUGOS: vm ready",
+    "CRUGOS: cpu ready",
+    "CRUGOS: timer ready",
+    "CRUGOS: heap ready",
+    "CRUGOS: block ready",
+    "CRUGOS: gpt ready",
+    "CRUGOS: crypt unlock failed",
+    "CRUGOS: no root filesystem",
 )
 VERSION_PATTERN = re.compile(r"CRUGOS: version (\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?)")
 SUCCESS_EXIT = 33  # isa-debug-exit: port 0xf4 value 0x10 -> (0x10 << 1) | 1
+ENCRYPT_FAIL_EXIT = 35  # arch_exit_qemu(0x11): no root filesystem
 
 
 def fail(message: str, log: str) -> int:
@@ -45,10 +59,10 @@ def fail(message: str, log: str) -> int:
 
 
 def main() -> int:
-    if len(sys.argv) not in (3, 4, 5, 6, 7, 8, 9):
+    if len(sys.argv) not in tuple(range(3, 12)):
         print("usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE "
               "[VERSION_FILE [EXPECT_AVX2 [EXPECT_RAID [EXPECT_NVME "
-              "[EXPECT_REBUILD [EXPECT_AHCI]]]]]]",
+              "[EXPECT_REBUILD [EXPECT_AHCI [EXPECT_CRYPT [EXPECT_AES]]]]]]]]",
               file=sys.stderr)
         return 2
 
@@ -60,6 +74,8 @@ def main() -> int:
     expect_nvme = sys.argv[6] if len(sys.argv) >= 7 else "no"
     expect_rebuild = sys.argv[7] if len(sys.argv) >= 8 else "no"
     expect_ahci = sys.argv[8] if len(sys.argv) >= 9 else "no"
+    expect_crypt = sys.argv[9] if len(sys.argv) >= 10 else "no"
+    expect_aes = sys.argv[10] if len(sys.argv) >= 11 else "any"
 
     if not serial_path.exists():
         return fail(f"missing serial log {serial_path}", "")
@@ -72,7 +88,18 @@ def main() -> int:
     if "CRUGOS PANIC" in text or "CRUGOS loader: FAIL" in text:
         return fail("panic or loader failure detected", text)
 
-    for marker in REQUIRED_MARKERS:
+    if expect_crypt not in ("no", "yes", "wrong"):
+        return fail(f"invalid EXPECT_CRYPT {expect_crypt!r}", text)
+    if expect_aes not in ("any", "software", "aes-ni"):
+        return fail(f"invalid EXPECT_AES {expect_aes!r}", text)
+
+    required = list(REQUIRED_MARKERS)
+    if expect_crypt == "wrong":
+        # The boot is expected to stop before a root filesystem exists.
+        required = list(WRONG_CRYPT_MARKERS)
+    elif expect_crypt == "yes":
+        required.append("CRUGOS: crypt ready")
+    for marker in required:
         if marker not in text:
             return fail(f"missing serial marker: {marker!r}", text)
 
@@ -119,6 +146,14 @@ def main() -> int:
         if not re.search(r"ahci\s*: sd[a-z] \d+ sectors", text):
             return fail("expected at least one AHCI block device", text)
 
+    if expect_crypt == "yes":
+        match = re.search(r"CRUGOS: crypt aes: (\S+)", text)
+        if not match:
+            return fail("expected the crypt device to report its AES implementation", text)
+        if expect_aes != "any" and match.group(1) != expect_aes:
+            return fail(f"crypt AES implementation {match.group(1)!r} != EXPECT_AES {expect_aes!r}",
+                        text)
+
     if expect_rebuild == "no" and "CRUGOS: raid rebuilt" in text:
         return fail("unexpected RAID member rebuild during boot", text)
     if expect_rebuild != "no":
@@ -138,15 +173,17 @@ def main() -> int:
     except ValueError:
         return fail(f"invalid exit code {raw_exit!r}", text)
 
-    if status != SUCCESS_EXIT:
-        return fail(f"guest did not exit cleanly: QEMU status {status}", text)
+    expected_exit = ENCRYPT_FAIL_EXIT if expect_crypt == "wrong" else SUCCESS_EXIT
+    if status != expected_exit:
+        return fail(f"guest exit status {status} != expected {expected_exit}", text)
 
     boot_report = [line for line in text.splitlines()
                    if line.lstrip().startswith("boot") and ":" in line]
     print("ok: boot markers found, version", guest_version,
           "avx2", expect_avx2, "raid", expect_raid,
           "nvme", expect_nvme, "rebuild", expect_rebuild,
-          "ahci", expect_ahci, "QEMU exit status", status)
+          "ahci", expect_ahci, "crypt", expect_crypt, "aes", expect_aes,
+          "QEMU exit status", status)
     for line in boot_report:
         print("  " + line)
     return 0

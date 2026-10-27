@@ -13,7 +13,10 @@ RAID10 striping over mirror pairs, with healthy four-member and degraded
 (two-member, one per pair) boot gates. Phase 3B-6 rebuilds blank replacement
 members from their mirror at boot, so a swapped disk is repaired before ext4 is
 mounted. Phase 3B-7 adds a polled AHCI/SATA driver, so the same stack can boot
-from a SATA disk as well. Encryption and metadata checksums are later phases.
+from a SATA disk as well. Phase 3B-8 adds ext4 metadata checksums and JBD2
+journal checksums with multi-descriptor transactions. Phase 3B-9 adds
+`crypt.device`, an AES-256-XTS volume unlocked with an Argon2id-derived key, so
+the same ext4/JBD2 stack can run on an encrypted partition.
 
 ```
 virtio-blk-pci (legacy I/O BAR)  NVMe PCIe (class 01/08/02)  AHCI/SATA (class 01/06/01)
@@ -21,6 +24,7 @@ virtio-blk-pci (legacy I/O BAR)  NVMe PCIe (class 01/08/02)  AHCI/SATA (class 01
   -> kernel/block/block.c          registry, partitions, bounds checks, flush
   -> kernel/fs/gpt.c               GPT header + entries, CRC32
   -> kernel/block/raid.c           optional RAID1/RAID10 array "md0"
+  -> kernel/block/crypt.c          optional AES-256-XTS "crypt0"
   -> kernel/fs/ext4.c              mount, lookup, read/write, create, rename
   -> kernel/fs/storage.c           boot policy and read/write self-test
 ```
@@ -37,6 +41,9 @@ CRUGOS: nvme ready (<n> device(s))
 CRUGOS: ahci ready (<n> device(s))
 CRUGOS: block ready (<n> device(s))
 CRUGOS: gpt ready
+CRUGOS: crypt ready (<n> sectors, keyslot <i>, Argon2id m=<m> KiB t=<t> p=<p>)
+CRUGOS: crypt aes: software           # or: aes-ni
+CRUGOS: root device crypt0            # encrypted root only
 CRUGOS: raid ready                    # RAID root only
 CRUGOS: raid rebuilt (<n> member(s))  # only after rebuilding a blank spare
 CRUGOS: raid healthy (<n>/<n> members) # or: CRUGOS: raid degraded (<n>/<n> members)
@@ -49,6 +56,10 @@ CRUGOS: storage ready
 CRUGOS: writable storage ok
 CRUGOS: journal selftest ok (<n> blocks recovered)
 ```
+
+The `crypt` lines appear only when a `crugcrypt` partition is the root; a
+rejected passphrase prints `CRUGOS: crypt unlock failed` (with a reason) and
+then `CRUGOS: no root filesystem` before the deterministic failure exit.
 
 A missing virtio/NVMe/AHCI device, an unusable GPT, a bad RAID metadata record
 or an ext4 mount failure panics (`storage: ...`) because the phase 3 boot gate expects a
@@ -161,16 +172,18 @@ controller (port 0), so a passing boot normally prints two `sd` devices. See
 validates the `EFI PART` header, its CRC32 (poly `0xEDB88320`) and the entry
 array CRC. Entries are 128..4096 bytes, at most 128 are scanned and at most
 `GPT_MAX_PARTITIONS` (16) are kept. UTF-16 partition names are converted to
-ASCII by dropping the high byte. `storage_init()` has two root policies: it
-prefers a partition named exactly `crugroot`, and otherwise assembles a RAID
+ASCII by dropping the high byte. `storage_init()` has three root policies: it
+prefers a partition named exactly `crugroot`; otherwise it unlocks an encrypted
+root, which is a partition named `crugcrypt` or carrying the CrugOS type GUID
+`8f1c7d2e-3b45-4c6a-9e01-c2a1b7f0d9e3`; failing both, it assembles a RAID
 array from partitions whose type GUID is the Linux RAID type
 `A19D880F-05FC-4D3B-A006-743F0F84911E`. Partition bounds are checked again
 when an offset view is created.
 
 ## RAID1 and RAID10
 
-When no `crugroot` partition exists, every `fd00` partition becomes a member
-of one array. Each member carries a checksummed 512-byte metadata record in
+When no `crugroot` or encrypted partition exists, every `fd00` partition
+becomes a member of one array. Each member carries a checksummed 512-byte metadata record in
 its last two sectors; `raid_assemble()` validates level, chunk, geometry,
 UUID, generation and slots, then registers `md0` with `member_sectors - 2`
 usable sectors. Missing members boot degraded instead of failing. The full
@@ -199,6 +212,23 @@ array generation and never rewrites a valid member. If the copy fails the slot
 stays missing and the array boots degraded. See [raid.md](raid.md) for the
 alignment loop and limits.
 
+## crypt.device
+
+`kernel/block/crypt.c` wraps one partition as `crypt0`. The 16 KiB header
+holds the algorithm identifiers, Argon2id parameters, a 32-byte salt, the
+volume id and eight 256-byte keyslots; the data area begins at sector 32 of the
+partition. `storage_parse_cmdline()` has already taken `crypt.pass=` from the
+loader command line, so `crypt_unlock()` derives 96 bytes with Argon2id (a
+64-byte XTS key-encryption key and a 32-byte MAC key), verifies the keyslot MAC
+with a constant-time compare, unwraps the 64-byte master key and registers the
+device. Reads decrypt each 512-byte sector in place with the data-relative LBA
+as the XTS tweak; writes encrypt through a 16 KiB bounce buffer. AES-NI is used
+when the CPU advertises it, otherwise the software tables. `storage_lock()`
+wipes the passphrase, the volume keys and the bounce buffer and marks the
+device unusable before the boot report finishes, and the report prints only the
+redacted command-line length. The full layout, key hierarchy, security limits
+and host tools are in [crypto.md](crypto.md).
+
 ## ext4 mount and read path
 
 `ext4_mount()` reads the 1024-byte superblock at byte 1024 and supports:
@@ -206,9 +236,12 @@ alignment loop and limits.
 - block sizes 1, 2 and 4 KiB; 32-bit block counts only
   (`s_blocks_count_hi` must be zero);
 - 32- and 64-byte group descriptors; inode sizes 128 bytes up to one block;
-- `FILETYPE`, `EXTENTS`, `64BIT` and `FLEX_BG` incompatible features;
-- `SPARSE_SUPER`, `LARGE_FILE`, `HUGE_FILE`, `DIR_NLINK` and `EXTRA_ISIZE`
-  read-only-compatible features;
+- `FILETYPE`, `EXTENTS`, `64BIT`, `FLEX_BG`, `CSUM_SEED` and `RECOVER`
+  incompatible features;
+- `SPARSE_SUPER`, `LARGE_FILE`, `RECOVER`, `HUGE_FILE`, `DIR_NLINK`,
+  `EXTRA_ISIZE` and `METADATA_CSUM` read-only-compatible features; the kernel
+  verifies and recomputes superblock, group-descriptor, bitmap, inode,
+  directory-tail and extent-tail checksums when `METADATA_CSUM` is set;
 - a clean filesystem, or a dirty one whose journal can be replayed; a read-only
   mount is refused while the journal is dirty, while `EXT4_MOUNT_RW` replays
   it first;
@@ -217,8 +250,8 @@ alignment loop and limits.
 - linear directories; `DIR_INDEX` (htree) is rejected.
 
 Unsupported features are rejected at mount time rather than misread:
-`META_BG`, `INLINE_DATA`, `ENCRYPT`, `METADATA_CSUM`, `RO_COMPAT_RECOVER`
-without a journal and any unknown incompatible bit. There is no triple-indirect
+`META_BG`, `INLINE_DATA`, `ENCRYPT`, an unknown checksum type and any unknown
+incompatible bit. There is no triple-indirect
 or double-indirect extent mapping beyond the single indirect block.
 
 When `COMPAT_HAS_JOURNAL` is set, `ext4_mount()` opens the journal before it
@@ -386,6 +419,18 @@ journal was checkpointed and cleared: a leftover dirty journal makes
 recipe (GPT `crugroot` plus ext4) for `make test-nvme`. `make ahci-disk` builds
 `build/x86_64/ahci.img` the same way for `make test-ahci`.
 
+`make crypt-disk` builds `build/x86_64/crypt.img` with `scripts/mkdisk.sh ...
+crypt`: a GPT `crugcrypt` partition (type `8f1c7d2e-...`) whose 12 MiB data
+area is the usual ext4/JBD2 image, encrypted in place by `mkcrypt format`
+after a 16 KiB header and two sealed keyslots are written. `make test-crypt`
+puts `crypt.pass=$(CRYPT_PASS)` in the ESP command-line file, boots from the
+image, and runs `check-disk.py --crypt-tool build/x86_64/mkcrypt
+--crypt-password ...`, which extracts and decrypts the partition before
+`e2fsck -fn` and the file checks. The wrong-key and tamper gates expect
+`CRUGOS: crypt unlock failed` instead, and `make test-crypt-ni` repeats the
+healthy boot with `QEMU_CPU=qemu64,+aes,+avx,+avx2` and requires
+`CRUGOS: crypt aes: aes-ni`.
+
 `make raid-disks` builds two 16 MiB GPT disks with `scripts/mkraid.sh`:
 each has a `crugraid` partition of type `fd00` at LBA 2048..26623, the same
 ext4 image is written to both data regions, and `scripts/raid-meta.py` stamps
@@ -447,6 +492,19 @@ scripts/check-raid.py build/x86_64/raid-a.img build/x86_64/raid-b.img
 - `CRUGOS: raid degraded` on a two-disk test: one virtio device did not appear
   or its metadata was rejected; the serial log lists the devices found. A
   four-member RAID10 test showing `2/4` is expected for the degraded gate.
+- `CRUGOS: crypt unlock failed` with a `crypt` parenthetical: the 16 KiB
+  header is not valid, the passphrase does not match any active keyslot, or a
+  keyslot MAC failed. Check that `crypt.pass=` in the ESP command line matches
+  the passphrase `mkdisk.sh`/`mkcrypt format` sealed; `make test-crypt-wrongkey`
+  and `make test-crypt-tamper` expect this failure.
+- `CRUGOS: crypt locked (no password)`: the loader found no `crugos/cmdline.txt`
+  or it has no `crypt.pass=` token. The ESP is rebuilt by the `test-crypt`
+  targets; for `make run` write the file yourself.
+- `CRUGOS: crypt ready` but the ext4 mount fails: the decrypted data is not the
+  filesystem image that was formatted, or the image was regenerated without
+  re-encrypting it. Run `make crypt-disk` and `make test-crypt` together.
+- `crypt aes: software` in `make test-crypt-ni`: the guest CPU model lacks
+  `+aes`; the target sets `QEMU_CPU=qemu64,+aes,+avx,+avx2`.
 - `ahci   : BAR setup failed`: 32-bit BAR mask overflow or a BAR inside the
   identity map that needs `vm_protect_page()` instead of `vm_map_page()`; see
   [ahci.md](ahci.md).
@@ -496,6 +554,11 @@ scripts/check-raid.py build/x86_64/raid-a.img build/x86_64/raid-b.img
   attributes are not implemented.
 - RAID1 and RAID10 only, one array (`md0`). Rebuild is boot-time and
   synchronous, only for fully blank metadata; there is no online rebuild, hot
-  spare, scrub, write-intent bitmap or generation bump. No `crypt.device`, no
-  AES-256-XTS or Argon2id, and no redundant ESP yet. These remain phase 3B
+  spare, scrub, write-intent bitmap or generation bump.
+- Encryption is one `crypt.device` over one partition: AES-256-XTS with no
+  per-sector authentication (header/keyslot MACs only), passphrase from the
+  loader command line, no TPM/keyfile slot, no rekey or slot-management tool,
+  no discard propagation, and RAID below encryption is not implemented. The
+  passphrase, keys and bounce buffer are wiped by `storage_lock()` and the boot
+  report redacts the command line. No redundant ESP yet. These remain phase 3B
   work.

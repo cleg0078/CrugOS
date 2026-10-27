@@ -3,18 +3,28 @@
 # The journal gets JBD2 checksum v3 (mke2fs 1.47 does not enable it).
 # mode "crash" also plants /simulate-crash, which makes the kernel commit a
 # transaction and exit without checkpointing (see scripts/check-journal.py).
+# mode "crypt" creates an AES-256-XTS crypt volume (crypt.device): the ext4
+# filesystem lives in the data area after the 16 KiB header, so it is built as
+# a standalone image and sealed by tools/mkcrypt.
+#
+# usage: mkdisk.sh OUTPUT [SIZE_MB] [normal|crash|crypt] [MCRYPT [PASS [RECOVERY [M_KIB]]]]
 set -euo pipefail
 
-out=${1:?usage: mkdisk.sh OUTPUT [SIZE_MB] [normal|crash]}
+out=${1:?usage: mkdisk.sh OUTPUT [SIZE_MB] [normal|crash|crypt] [MCRYPT [PASS [RECOVERY [M_KIB]]]]}
 size_mb=${2:-16}
 mode=${3:-normal}
 part_sectors=24576
 part_mb=$((part_sectors / 2048))
 script_dir=$(dirname "$0")
+crypt_tool=${4:-}
+crypt_pass=${5:-crugos-test}
+crypt_recovery=${6:-}
+crypt_m=${7:-4096}
+crypt_header_bytes=16384
 
 case "$mode" in
-    normal|crash) ;;
-    *) echo "mkdisk: unknown mode '$mode' (normal|crash)" >&2; exit 1 ;;
+    normal|crash|crypt) ;;
+    *) echo "mkdisk: unknown mode '$mode' (normal|crash|crypt)" >&2; exit 1 ;;
 esac
 
 for tool in truncate sgdisk mke2fs debugfs dd python3; do
@@ -23,6 +33,16 @@ for tool in truncate sgdisk mke2fs debugfs dd python3; do
         exit 1
     fi
 done
+if [ "$mode" = crypt ]; then
+    if [ -z "$crypt_tool" ] || [ ! -x "$crypt_tool" ]; then
+        echo "mkdisk: crypt mode needs an executable mkcrypt (got '$crypt_tool')" >&2
+        exit 1
+    fi
+    if [ -z "$crypt_pass" ]; then
+        echo "mkdisk: crypt mode needs a password" >&2
+        exit 1
+    fi
+fi
 
 out_dir=$(dirname "$out")
 mkdir -p "$out_dir"
@@ -30,23 +50,54 @@ tmp=$(mktemp -d "$out_dir/.mkdisk.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 
 truncate -s "${size_mb}M" "$out"
-sgdisk --clear \
-    --new=1:2048:+"$part_sectors" \
-    --typecode=1:8300 \
-    --change-name=1:crugroot \
-    "$out" >/dev/null
+if [ "$mode" = crypt ]; then
+    sgdisk --clear \
+        --new=1:2048:+"$part_sectors" \
+        --typecode=1:8f1c7d2e-3b45-4c6a-9e01-c2a1b7f0d9e3 \
+        --change-name=1:crugcrypt \
+        "$out" >/dev/null
+else
+    sgdisk --clear \
+        --new=1:2048:+"$part_sectors" \
+        --typecode=1:8300 \
+        --change-name=1:crugroot \
+        "$out" >/dev/null
+fi
 
-truncate -s "${part_mb}M" "$tmp/part.img"
+part_bytes=$((part_mb * 1024 * 1024))
+fs_bytes=$part_bytes
+fs_image=$tmp/part.img
+if [ "$mode" = crypt ]; then
+    fs_bytes=$((part_bytes - crypt_header_bytes))
+    fs_image=$tmp/fs.img
+fi
+
+truncate -s "$part_bytes" "$tmp/part.img"
+truncate -s "$fs_bytes" "$fs_image"
 mke2fs -q -t ext4 -F -b 1024 -I 256 -J size=1 \
     -O has_journal,metadata_csum,^64bit,^flex_bg,^dir_index,^resize_inode,^sparse_super,^large_file,^orphan_file \
-    "$tmp/part.img"
-"$script_dir/journal-csum.py" "$tmp/part.img"
+    "$fs_image"
+"$script_dir/journal-csum.py" "$fs_image"
 printf 'hello from ext4\n' > "$tmp/hello.txt"
-debugfs -w -R "write $tmp/hello.txt /hello.txt" "$tmp/part.img" >/dev/null
+debugfs -w -R "write $tmp/hello.txt /hello.txt" "$fs_image" >/dev/null
 if [ "$mode" = crash ]; then
     printf 'dirty journal gate\n' > "$tmp/crash.txt"
-    debugfs -w -R "write $tmp/crash.txt /simulate-crash" "$tmp/part.img" >/dev/null
+    debugfs -w -R "write $tmp/crash.txt /simulate-crash" "$fs_image" >/dev/null
 fi
+
+if [ "$mode" = crypt ]; then
+    mkcrypt_args=(format "$tmp/part.img" --plain "$fs_image" --password "$crypt_pass" --m "$crypt_m")
+    if [ -n "$crypt_recovery" ]; then
+        mkcrypt_args+=(--recovery "$crypt_recovery")
+    fi
+    "$crypt_tool" "${mkcrypt_args[@]}"
+    data_bytes=$fs_bytes
+fi
+
 dd if="$tmp/part.img" of="$out" bs=512 seek=2048 conv=notrunc status=none
 
-echo "mkdisk: $out (${size_mb} MiB, ext4 root at LBA 2048, journal checksums, mode $mode)"
+if [ "$mode" = crypt ]; then
+    echo "mkdisk: $out (${size_mb} MiB, AES-256-XTS crypt root at LBA 2048, data ${data_bytes} bytes, mode $mode)"
+else
+    echo "mkdisk: $out (${size_mb} MiB, ext4 root at LBA 2048, journal checksums, mode $mode)"
+fi

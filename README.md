@@ -8,12 +8,12 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 3B-8 checksums (`v0.12.0`)
+## Status: phase 3B-9 encryption (`v0.13.0`)
 
-Phases 1-3B-8 keep the boot path under a kernel that owns memory, CPU state,
+Phases 1-3B-9 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
-striped RAID roots that can rebuild a replacement member, and three storage
-transports:
+striped RAID roots that can rebuild a replacement member, an AES-256-XTS
+encrypted root, and three storage transports:
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -176,54 +176,88 @@ Phase 3B-8 makes the on-disk format self-checking:
 - `make test-journal-csum` proves `e2fsck` replays our checksummed journal and
   `make test-journal-replay` proves the kernel replays it on the next boot;
   `make test` still requires a clean `e2fsck -fn` on the resulting image.
-It detects AVX2, enables XSAVE state and, by default, refuses to boot without
-AVX2. Self-tests run at boot, then the kernel prints a boot report to a 16550
-serial port and the framebuffer and exits QEMU deterministically for automated
-testing.
+
+Phase 3B-9 adds encryption at the block layer:
+
+- `crypt.device` is a GPT partition with type GUID
+  `8f1c7d2e-3b45-4c6a-9e01-c2a1b7f0d9e3` named `crugcrypt`: a 16 KiB header
+  with eight 256-byte keyslots followed by an AES-256-XTS data area, where the
+  data-relative 512-byte sector number is the XTS tweak;
+- the passphrase is stretched with Argon2id (RFC 9106) into a 96-byte
+  key-encryption/MAC key pair that unwraps a random 64-byte master key held in
+  a keyslot; each slot is authenticated with a keyed BLAKE2b-256 MAC over the
+  header and slot, and a recovery passphrase can be sealed as a second slot;
+- AES-256-XTS uses the P1619 XEX construction, AES-NI when the CPU advertises
+  it and a table-driven software fallback otherwise; XTS is pinned to IEEE
+  1619 vector 10 and Argon2id to libargon2 vectors;
+- the UEFI loader copies `\crugos\cmdline.txt` into `boot_info`, the kernel
+  consumes `crypt.pass=` and wipes the loader page immediately, and the boot
+  report prints only `cmdline: <n> bytes (redacted)`;
+- `storage_init()` prefers `crugroot`, then unlocks a `crugcrypt` partition
+  (`CRUGOS: crypt ready ...` and `CRUGOS: crypt aes: ...`), then falls back to
+  RAID; before the final marker `storage_lock()` wipes the passphrase, the
+  volume keys and the bounce buffer, and the crypt device refuses further I/O;
+- host tools `tools/mkcrypt.c` (`format`, `extract`), a `crypt` mode of
+  `scripts/mkdisk.sh`, `check-disk.py --crypt-tool`, and five gates: healthy
+  unlock, recovery keyslot, wrong passphrase, tampered MAC and AES-NI. See
+  [crypto.md](docs/crypto.md).
+
+The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
+boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
+to a 16550 serial port and the framebuffer and exits QEMU deterministically for
+automated testing.
 
 Verified in this tree:
 
 ```
-CrugOS 0.12.0 (phase 3b8) -- Amiga-inspired microkernel bring-up
+CrugOS 0.13.0 (phase 3b9) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.12.0
-pmm    : 118442 pages (462 MiB), free 118441, bitmap 131072 B
+CRUGOS: version 0.13.0
+pmm    : 118342 pages (462 MiB), free 118341, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
-vm     : 4 GiB identity map, W^X kernel sections, guard=0x000000000014a000
+vm     : 4 GiB identity map, W^X kernel sections, guard=0x0000000000183000
 CRUGOS: vm ready
 CRUGOS: cpu ready
-timer  : 2688576035 Hz (pit), mode=lapic-periodic, 100 Hz tick
+timer  : 2687980163 Hz (pit), mode=lapic-periodic, 100 Hz tick
 CRUGOS: timer ready
 CRUGOS: heap ready
-CRUGOS: virtio ready (0 device(s))
+virtio : blk vda, 32768 sectors, io=0x6000
+CRUGOS: virtio ready (1 device(s))
 CRUGOS: nvme ready (0 device(s))
 ahci   : sda 1032192 sectors, port 0
-ahci   : sdb 32768 sectors, port 1
-CRUGOS: ahci ready (2 device(s))
+CRUGOS: ahci ready (1 device(s))
 CRUGOS: block ready (2 device(s))
 storage: no GPT on sda
-gpt    : 1 partition(s), root 'crugroot' LBA 2048..26623
+gpt    : crypt root 'crugcrypt' LBA 2048..26623
 CRUGOS: gpt ready
-CRUGOS: root device sdb1
+CRUGOS: crypt ready (24544 sectors, keyslot 0, Argon2id m=4096 KiB t=3 p=1)
+CRUGOS: crypt aes: aes-ni
+CRUGOS: root device crypt0
 CRUGOS: ext4 ready
 CRUGOS: journal ready
 CRUGOS: ext4 /hello.txt: hello from ext4
 CRUGOS: storage ready
 CRUGOS: sched ready
 CRUGOS: syscall ready
+CRUGOS: journal committed 1 block(s) in 1 descriptor(s)
 CRUGOS: journal selftest ok (1 blocks recovered)
 CRUGOS: writable storage ok
 CRUGOS: selftest ok
 wx     : audit ok, identity map 0..4 GiB, guard unmapped
-heap   : total=57344 B used=7952 B slab_pages=12 large_pages=2
-boot   : pmm=25572 us cpu=366 us vm=580 us traps=293 us timer=65312 us heap=45 us storage=90248 us sched=304 us syscall=104 us total=182828 us
-CRUGOS: phase 3b8 boot ok
+heap   : total=77824 B used=26000 B slab_pages=12 large_pages=7
+cmdline: 23 bytes (redacted)
+boot   : pmm=27798 us cpu=422 us vm=628 us traps=318 us timer=65311 us heap=60 us storage=289150 us sched=303 us syscall=103 us total=384098 us
+CRUGOS: phase 3b9 boot ok
 ```
 
-This excerpt is the `make test-ahci` boot: no virtio or NVMe disk is attached,
-so the ESP and the test image are both reached through the q35 AHCI controller
-(`sda` is the firmware's ESP disk, `sdb` is the ext4 root).
+This excerpt is the `make test-crypt-ni` boot, so it shows the AES-NI path;
+plain `make test-crypt` boots the same image and prints `crypt aes: software`.
+Argon2id with `m=4096 KiB, t=3` dominates the ~290 ms storage stage under TCG,
+so an encrypted boot takes about 380-430 ms while the unencrypted gates take
+about 190 ms. The
+`storage: no GPT on sda` line is expected: `sda` is the firmware's ESP disk,
+and the test volume is the virtio disk `vda`.
 
 Timing and memory values vary with the host and the QEMU CPU model.
 
@@ -244,15 +278,22 @@ make test-raid-repair  # rebuild a blank RAID1 member at boot, then check
 make test-raid10-repair  # rebuild blank RAID10 slots 1 and 3 at boot
 make test-journal-csum  # crash after a journal commit, replay it with e2fsck
 make test-journal-replay  # crash, then replay the journal in the kernel
+make test-crypt  # boot from an AES-256-XTS encrypted root and check it
+make test-crypt-recovery  # unlock the second (recovery) keyslot
+make test-crypt-wrongkey  # a wrong passphrase must fail closed
+make test-crypt-tamper  # a corrupted keyslot MAC must be rejected
+make test-crypt-ni  # the same encrypted boot with AES-NI
 make run         # boot and keep the serial log for inspection
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
-make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C)
+make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots)
 make check-disk  # e2fsck + persisted-file checks on the latest test disk
 make disk        # generate the GPT/ext4 test disk
 make raid-disks  # generate the two RAID1 member disks
 make raid10-disks  # generate the four RAID10 member disks
 make nvme-disk   # generate the GPT/ext4 image used by test-nvme
 make ahci-disk   # generate the GPT/ext4 image used by test-ahci
+make crypt-disk  # generate the encrypted test image (mkcrypt + mkdisk)
+make mkcrypt     # build the host tool that formats/extracts crypt volumes
 make version     # print the release version from VERSION
 make options     # print every build/QEMU/storage option and its value
 make size        # kernel budget: <1 MiB stretch, <2 MiB hard
@@ -266,7 +307,9 @@ default in the makefile; `make options` prints the full resolved set. Useful
 variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `QEMU_DISPLAY`, `QEMU_EXTRA`, `OVMF_CODE`, `OVMF_VARS`, `REQUIRE_AVX2`,
 `EXPECT_AVX2`, `EXPECT_RAID`, `EXPECT_NVME`, `EXPECT_REBUILD`, `EXPECT_AHCI`,
-`NVME_IMG`, `AHCI_IMG` and `MODE`; see [docs/build.md](docs/build.md).
+`EXPECT_CRYPT`, `EXPECT_AES`, `NVME_IMG`, `AHCI_IMG`, `CRYPT_IMG`,
+`CRYPT_TAMPER_IMG`, `CRYPT_PASS`, `CRYPT_RECOVERY_PASS`, `CRYPT_M`, `MCRYPT`,
+`HOST_CC` and `MODE`; see [docs/build.md](docs/build.md).
 
 ## Repository layout
 
@@ -278,13 +321,14 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/core/` | kernel entry, console, printf, panic, self-tests, scheduler, handles, MsgPort, syscall dispatcher, boot report |
 | `kernel/lib/` | freestanding string, formatting and bitmap routines |
 | `kernel/mm/` | physical allocator, W^X page tables, kernel heap |
-| `kernel/block/` | block-device registry, partitions, bounds checks, RAID1/RAID10 and boot-time rebuild |
+| `kernel/block/` | block-device registry, partitions, bounds checks, RAID1/RAID10, boot-time rebuild and the AES-256-XTS `crypt.device` |
 | `kernel/fs/` | GPT, writable checksummed ext4, checksummed JBD2 journal and the storage boot policy |
+| `kernel/crypto/` | AES, XTS, AES-NI, BLAKE2b and Argon2id (shared with the host tools) |
 | `drivers/` | PCI, legacy virtio-blk, NVMe and AHCI/SATA block device drivers |
-| `scripts/` | QEMU runner, disk/RAID1/RAID10 image builders, boot/PE/disk/RAID checks, size and reproducibility gates |
+| `scripts/` | QEMU runner, disk/RAID1/RAID10/crypt image builders, boot/PE/disk/RAID/journal/crypt checks, tamper helper, size and reproducibility gates |
 | `tests/host/` | host unit tests for freestanding code |
-| `tools/` | host-side development tools (`gen-font.py`) |
-| `docs/` | [build](docs/build.md), [boot](docs/boot.md), [storage](docs/storage.md), [checksums](docs/checksums.md), [NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
+| `tools/` | host-side development tools (`gen-font.py`, `mkcrypt.c`, `gen-crc32c.py`) |
+| `docs/` | [build](docs/build.md), [boot](docs/boot.md), [storage](docs/storage.md), [checksums](docs/checksums.md), [crypto](docs/crypto.md), [NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
 
 ## Versioning
 
@@ -300,7 +344,7 @@ compatibility rules.
 
 `include/crug/bootinfo.h` defines `boot_info`: magic `0x43524731`, version 1,
 the kernel extent, the normalized memory map, framebuffer mode, ACPI RSDP,
-optional FDT/initrd, boot CPU id, a 64-byte entropy seed and the loader's TSC.
+optional FDT/initrd, boot CPU id, a 64-byte entropy seed, the loader's TSC and the optional command line used for `crypt.pass=` during bring-up.
 See [docs/boot.md](docs/boot.md) for the full handoff ABI and exit protocol.
 
 ## Toolchain notes
@@ -321,7 +365,7 @@ See [docs/boot.md](docs/boot.md) for the full handoff ABI and exit protocol.
 
 ## Roadmap
 
-Phases 0, 1, 2, 3A and 3B-1 through 3B-8 are done. Phase 3A covered the block
+Phases 0, 1, 2, 3A and 3B-1 through 3B-9 are done. Phase 3A covered the block
 layer, legacy virtio-blk, GPT and read-only EXT4; phase 3B-1 added the writable
 EXT4 path and an on-disk consistency gate; phase 3B-2 added JBD2 journal replay
 and ordered metadata journaling; phase 3B-3 added a RAID1 root with healthy and
@@ -329,9 +373,12 @@ degraded boots; phase 3B-4 added a polled NVMe root path; phase 3B-5 added
 RAID10 with healthy four-member and degraded two-member boots; phase 3B-6 added
 boot-time rebuild of a blank RAID1/RAID10 member; phase 3B-7 added a polled
 AHCI/SATA driver and a SATA-root boot gate; phase 3B-8 added ext4 metadata and
-JBD2 journal checksums plus multi-descriptor transactions. Remaining phase 3B
-work is online RAID rebuild, hot spare, scrub and a write-intent bitmap, a
-redundant ESP, `crypt.device` (AES-256-XTS/Argon2id), and USB storage/hotplug. Later phases cover USB/audio/graphics, Workbench userspace,
+JBD2 journal checksums plus multi-descriptor transactions; phase 3B-9 added an
+AES-256-XTS encrypted root with Argon2id keyslots, a recovery passphrase,
+loader-supplied passphrase handling and key zeroization. Remaining phase 3B
+work is online RAID rebuild, hot spare, scrub and a write-intent bitmap, RAID
+below encryption, a redundant ESP, TPM/keyfile keyslots and USB
+storage/hotplug. Later phases cover USB/audio/graphics, Workbench userspace,
 SMP/IOMMU and virtualisation. See
 [docs/roadmap.md](docs/roadmap.md) for the full sequence and the known
 specification gaps (Crug syntax, cross-architecture compilers and the OVMF

@@ -17,6 +17,10 @@ void test_bitmap_functions(void);
 void test_vm_math(void);
 void test_handle_functions(void);
 void test_crc32c_functions(void);
+void test_blake2b_functions(void);
+void test_aes_functions(void);
+void test_argon2_functions(void);
+void test_crypt_functions(void);
 
 int main(void)
 {
@@ -28,6 +32,10 @@ int main(void)
     RUN(test_vm_math);
     RUN(test_handle_functions);
     RUN(test_crc32c_functions);
+    RUN(test_blake2b_functions);
+    RUN(test_aes_functions);
+    RUN(test_argon2_functions);
+    RUN(test_crypt_functions);
     printf("%d checks, %d failure(s)\n", tests_run, tests_failed);
     return tests_failed == 0 ? 0 : 1;
 }

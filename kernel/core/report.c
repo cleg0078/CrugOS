@@ -47,8 +47,11 @@ void report_boot(const boot_info *bi, const boot_timings *t)
     } else {
         kprintf("fb     : none (serial console only)\n");
     }
-    kprintf("cmdline: %s\n",
-            (bi->command_line && bi->command_line_len) ? bi->command_line : "(none)");
+    /* The command line may hold a crypt passphrase, so only its size is shown. */
+    if (bi->command_line && bi->command_line_len)
+        kprintf("cmdline: %llu bytes (redacted)\n", bi->command_line_len);
+    else
+        kprintf("cmdline: (none)\n");
     kprintf("entropy: %02x%02x%02x%02x%02x%02x%02x%02x\n", bi->entropy_seed[0],
             bi->entropy_seed[1], bi->entropy_seed[2], bi->entropy_seed[3],
             bi->entropy_seed[4], bi->entropy_seed[5], bi->entropy_seed[6],

@@ -10,6 +10,7 @@
 
 #define PAGE_SIZE 4096ull
 #define EFI_BUFFER_TOO_SMALL_LOCAL 0x8000000000000005ull
+#define CMDLINE_MAX 512ull
 
 typedef void (*kernel_entry_point)(const boot_info *info);
 
@@ -181,6 +182,10 @@ EFIAPI efi_status efi_main(efi_handle image, efi_system_table *system_table)
         '\\', 'c', 'r', 'u', 'g', 'o', 's', '\\',
         'k', 'e', 'r', 'n', 'e', 'l', '.', 'e', 'l', 'f', 0,
     };
+    static char16 cmdline_path[] = {
+        '\\', 'c', 'r', 'u', 'g', 'o', 's', '\\',
+        'c', 'm', 'd', 'l', 'i', 'n', 'e', '.', 't', 'x', 't', 0,
+    };
     elf_image image_info;
     boot_info *info;
     memory_region *map;
@@ -241,12 +246,33 @@ EFIAPI efi_status efi_main(efi_handle image, efi_system_table *system_table)
         loader_fail("cannot normalize memory map");
     }
 
-    info_bytes = loader_page_round(sizeof(boot_info));
+    info_bytes = loader_page_round(sizeof(boot_info) + CMDLINE_MAX);
     info = loader_alloc_pages(info_bytes);
     if (!info) {
         loader_fail("cannot allocate boot info");
     }
     memset(info, 0, sizeof(*info));
+
+    /* Optional \crugos\cmdline.txt carrier (crypt.pass=...). The copy lives in
+       the boot_info allocation so it is marked CRUG_MEM_BOOTLOADER below. */
+    {
+        void *cmdline = 0;
+        u64 cmdline_len = 0;
+
+        if (loader_read_file(system_table->boot_services, loaded_image->device_handle,
+                             cmdline_path, &cmdline, &cmdline_len) == 0 && cmdline != 0) {
+            char *payload = (char *)((u8 *)info + sizeof(boot_info));
+            u64 copy = cmdline_len < CMDLINE_MAX - 1 ? cmdline_len : CMDLINE_MAX - 1;
+
+            memcpy(payload, cmdline, copy);
+            payload[copy] = 0;
+            info->command_line = payload;
+            info->command_line_len = copy;
+            loader_print("CRUGOS loader: cmdline bytes ");
+            loader_print_hex(copy);
+            loader_println("");
+        }
+    }
 
     kernel_bytes = loader_page_round(image_info.size);
     if (loader_memmap_mark(map, &map_count, map_capacity, image_info.base, kernel_bytes,

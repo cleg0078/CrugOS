@@ -9,6 +9,10 @@
 #endif
 
 #define MSR_GS_BASE 0xc0000101u
+#define CR0_MP (1ull << 1)
+#define CR0_EM (1ull << 2)
+#define CR4_OSFXSR (1ull << 9)
+#define CR4_OSXMMEXCPT (1ull << 10)
 #define CR4_PGE (1ull << 7)
 #define CR4_OSXSAVE (1ull << 18)
 #define CR4_SMEP (1ull << 20)
@@ -156,6 +160,18 @@ static void cpu_detect(void)
     if (max_ext >= 0x80000001u) {
         cpuid(0x80000001u, 0, &a, &b, &c, &d);
         g_cpu_features.nx = (d >> 20) & 1;
+    }
+
+    /* SSE state must be live before any AES-NI/SSE-encoded crypto code runs.
+     * UEFI firmware normally leaves these set, but ExitBootServices hands over an
+     * unspecified control-register state, and AESENC faults with #UD when
+     * CR4.OSFXSR is clear. */
+    {
+        u32 mxcsr = 0x1f80u;
+
+        write_cr0((read_cr0() | CR0_MP) & ~CR0_EM);
+        write_cr4(read_cr4() | CR4_OSFXSR | CR4_OSXMMEXCPT);
+        __asm__ volatile("ldmxcsr %0" : : "m"(mxcsr));
     }
 
     if (g_cpu_features.xsave && g_cpu_features.avx) {
