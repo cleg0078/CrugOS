@@ -242,7 +242,10 @@ line:
   socket through `QEMU_EXTRA`, and injects one `send-key` per character into
   the emulated keyboard; `make test-crypt-keyboard` and
   `test-crypt-keyboard-wrong` prove a keyboard unlock and the three-attempt
-  lockout without any display. See [input.md](docs/input.md).
+  lockout without any display;
+- `make crypt-run` builds the encrypted image with `CRYPT_PASS=` and opens a QEMU
+  window, so the passphrase can be typed on the host keyboard and watched on the
+  framebuffer. See [input.md](docs/input.md).
 
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
@@ -348,6 +351,7 @@ make test-crypt-prompt-wrong  # three wrong lines must lock the volume
 make test-crypt-prompt-timeout  # an unanswered prompt must fail closed
 make test-crypt-keyboard  # type the passphrase on the PS/2 keyboard
 make test-crypt-keyboard-wrong  # three wrong keyboard lines must lock
+make crypt-run   # boot the encrypted disk in a QEMU window and type it
 make run         # boot and keep the serial log for inspection
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
 make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes)
@@ -374,7 +378,8 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `EXPECT_AVX2`, `EXPECT_RAID`, `EXPECT_NVME`, `EXPECT_REBUILD`, `EXPECT_AHCI`,
 `EXPECT_CRYPT`, `EXPECT_AES`, `NVME_IMG`, `AHCI_IMG`, `CRYPT_IMG`,
 `CRYPT_TAMPER_IMG`, `CRYPT_PASS`, `CRYPT_RECOVERY_PASS`, `CRYPT_M`,
-`CRYPT_PROMPT_TIMEOUT_SEC`, `CRYPT_PROMPT_WRONG_PASS`, `CMDLINE_EXTRA`,
+`CRYPT_PROMPT_TIMEOUT_SEC`, `CRYPT_PROMPT_WRONG_PASS`, `CRYPT_RUN_DISPLAY`,
+`CRYPT_RUN_TIMEOUT_SEC`, `CMDLINE_EXTRA`,
 `SERIAL_TCP`, `MCRYPT`, `HOST_CC` and `MODE`; see [docs/build.md](docs/build.md).
 
 ## Repository layout

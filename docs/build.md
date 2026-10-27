@@ -46,6 +46,7 @@ make test-crypt-prompt-wrong  # three wrong console passphrases must lock the vo
 make test-crypt-prompt-timeout  # an unanswered prompt must fail closed
 make test-crypt-keyboard  # type the passphrase on the PS/2 keyboard and boot
 make test-crypt-keyboard-wrong  # three wrong keyboard passphrases must lock the volume
+make crypt-run   # boot the encrypted disk in a QEMU window for real typing
 make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
 make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes
 make disk        # build the GPT/ext4 test disk at build/<arch>/disk.img
@@ -113,6 +114,8 @@ options` prints the complete resolved set (including paths derived from
 | `CRYPT_M` | `4096` | Argon2id memory cost (KiB) for the test volume |
 | `CRYPT_PROMPT_TIMEOUT_SEC` | `2` | per-attempt console prompt timeout used by the timeout gate |
 | `CRYPT_PROMPT_WRONG_PASS` | `wrong-password` | passphrase typed three times by the wrong-passphrase gate |
+| `CRYPT_RUN_DISPLAY` | `gtk` | `-display` value used by `make crypt-run`; override with `sdl`, `vnc=...` or `none` |
+| `CRYPT_RUN_TIMEOUT_SEC` | `600` | QEMU timeout for `make crypt-run`, long enough to type a passphrase |
 | `CMDLINE_EXTRA` | empty | extra tokens appended to the ESP `crugos/cmdline.txt`, e.g. `crypt.prompt_timeout=2` |
 | `SERIAL_TCP` | empty | when set, QEMU exposes the serial console as `tcp:<value>` instead of a log file (used by the console-prompt gates; the keyboard gates instead pass a `-qmp unix:<sock>` argument through `QEMU_EXTRA`) |
 | `MCRYPT` | `build/<arch>/mkcrypt` | host crypt tool (format/extract) |

@@ -25,6 +25,7 @@
 #   make test-crypt-prompt-timeout  fail closed when the prompt times out
 #   make test-crypt-keyboard  type the passphrase on the PS/2 keyboard
 #   make test-crypt-keyboard-wrong  reject three wrong keyboard passphrases
+#   make crypt-run  boot the encrypted disk and type the passphrase in a QEMU window
 #   make test-raid-degraded  boot RAID1 with one member missing
 #   make test-raid10-degraded  boot RAID10 with one member per pair
 #   make test-raid-repair  boot RAID1 with one blank member and rebuild it
@@ -126,6 +127,8 @@ CRYPT_RECOVERY_PASS ?= crugos-recovery
 CRYPT_PROMPT_WRONG_PASS ?= wrong-password
 CRYPT_M ?= 4096
 CRYPT_PROMPT_TIMEOUT_SEC ?= 2
+CRYPT_RUN_DISPLAY ?= gtk
+CRYPT_RUN_TIMEOUT_SEC ?= 600
 CMDLINE_EXTRA ?=
 MCRYPT := $(BUILD)/mkcrypt
 NVME_SERIAL ?= CRUGNVME0
@@ -175,7 +178,7 @@ HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
         test-raid-repair test-raid10-repair test-journal-csum test-journal-replay \
         test-crypt test-crypt-recovery test-crypt-wrongkey test-crypt-tamper test-crypt-ni \
         test-crypt-prompt test-crypt-prompt-wrong test-crypt-prompt-timeout \
-        test-crypt-keyboard test-crypt-keyboard-wrong \
+        test-crypt-keyboard test-crypt-keyboard-wrong crypt-run \
         crash-disk \
         check-disk size check-efi repro test-host preflight version options clean distclean help
 
@@ -300,6 +303,15 @@ run: esp
 		NVME_SERIAL="$(NVME_SERIAL)" EXTRA_DISKS="$(EXTRA_DISKS)" \
 		AHCI_DISK=$(if $(AHCI_DISK),$(abspath $(AHCI_DISK)),) \
 		scripts/run-qemu.sh
+
+# Interactive keyboard test: build the encrypted test disk and boot it with
+# no crypt.pass= token on the ESP command line, so the kernel must ask the
+# console. Keeps a QEMU window open for real typing and a long timeout.
+crypt-run: crypt-disk
+	$(Q)$(MAKE) --no-print-directory run DISK_IMG=$(CRYPT_IMG) CRYPT_PASS= \
+		QEMU_DISPLAY=$(CRYPT_RUN_DISPLAY) TIMEOUT_SEC=$(CRYPT_RUN_TIMEOUT_SEC)
+	@echo "  NOTE  type the passphrase in the QEMU window (Ctrl+Alt+G releases input)"
+	@echo "  NOTE  serial log $(SERIAL_LOG), exit status $(QEMU_EXIT)"
 
 test:
 	$(Q)rm -f $(DISK_IMG)
@@ -509,6 +521,8 @@ options:
 	@printf '  %-16s %s\n' MCRYPT "$(MCRYPT)"
 	@printf '  %-16s %s\n' CRYPT_PROMPT_TIMEOUT_SEC "$(CRYPT_PROMPT_TIMEOUT_SEC)"
 	@printf '  %-16s %s\n' CRYPT_PROMPT_WRONG_PASS "$(CRYPT_PROMPT_WRONG_PASS)"
+	@printf '  %-16s %s\n' CRYPT_RUN_DISPLAY "$(CRYPT_RUN_DISPLAY)"
+	@printf '  %-16s %s\n' CRYPT_RUN_TIMEOUT_SEC "$(CRYPT_RUN_TIMEOUT_SEC)"
 	@printf '  %-16s %s\n' HOST_CC "$(HOST_CC)"
 	@printf '  %-16s %s\n' CMDLINE_EXTRA "$(CMDLINE_EXTRA)"
 	@printf '  %-16s %s\n' SERIAL_TCP "$(SERIAL_TCP)"

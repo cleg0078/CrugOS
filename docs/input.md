@@ -141,6 +141,35 @@ keyboard. The script asserts the passphrase never appears in the serial log, the
 prompt count, the ready/locked marker, and the QEMU exit status (33 unlocked,
 35 locked).
 
+## Typing a passphrase by hand
+
+The gates above are headless. To try the prompt yourself, boot an encrypted
+disk in a QEMU window and type on the host keyboard - QEMU forwards it to the
+emulated PS/2 controller, so the kernel sees exactly the same scancodes as on
+real hardware:
+
+```
+make crypt-run                              # gtk window, 10 minute timeout
+make crypt-run CRYPT_RUN_DISPLAY=sdl        # another display backend
+make crypt-run CRYPT_RUN_TIMEOUT_SEC=120    # shorter window
+```
+
+`crypt-run` rebuilds `$(CRYPT_IMG)` and therefore reseals the passphrases, then
+boots it with `CRYPT_PASS=` so the kernel must prompt. Type `crugos-test` and
+press Enter (the recovery slot's `crugos-recovery` also unlocks it). Seal a
+different passphrase with `make crypt-run CRYPT_PASS=my-passphrase`, then type
+that one. `Ctrl+Alt+G` releases the mouse/keyboard grab; closing the window ends
+the run. The serial log (`build/<arch>/serial.log`) records the masked prompt and
+never the passphrase. `make run ... QEMU_DISPLAY=none` still works for headless
+boots, but then only a harness can answer the prompt.
+
+On real hardware, copy `build/<arch>/esp` onto a FAT32 EFI system partition and
+the encrypted image onto a spare SATA/NVMe disk (the kernel never touches the ESP
+disk as a root candidate). Boot UEFI-only with Secure Boot off. A PS/2 keyboard
+works directly; a USB keyboard only works through the firmware's legacy USB
+emulation, because there is no xHCI/HID driver yet. Consumer boards rarely
+expose a COM1 header, so watch the framebuffer console for the prompt.
+
 ## Limits
 
 - Polled only: no IRQ1 handler, no key repeat, no LED state, no Num Lock.
