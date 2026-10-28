@@ -47,8 +47,10 @@ read the non-secret `net.tcp=` / `net.serve=` / `net.dns=` /
 adds `wb.shell=1` / `wb.sh=` for the shell window, phase 6D adds
 `wb.keys=1` for keyboard navigation of the desktop, phase 6E adds
 `wb.desk=1` for desktop objects and the depth gadget, phase 6F adds
-`wb.ikeys=1` for keyboard focus of the icon table, and phase 6G adds `wb.dr=1`
-for drawer scrolling and refresh plus `wb.fill=<n>` to fill the root first. A boot
+`wb.ikeys=1` for keyboard focus of the icon table, phase 6G adds `wb.dr=1`
+for drawer scrolling and refresh plus `wb.fill=<n>` to fill the root first, and
+phase 6H adds `wb.dsel=1` for click-selected drawer rows and a draggable
+scrollbar. A boot
 medium that ships no block device (the hybrid
 ISO) passes `storage=none`, which is the one token that changes the storage
 contract instead of adding work to it. The
@@ -133,8 +135,10 @@ post-snapshot allocations cannot push it over capacity.
    `wb.acts=<n>`, `wb.hold=<seconds>`, `wb.keys=<0|1>`, `wb.desk=<0|1>`,
    `wb.ikeys=<0|1>` (parsed before `wb.desk=`, and still ignored while
    `wb.shell=1` owns the keyboard) and `wb.dr=<0|1>` / `wb.fill=<0..24>` (the
-   drawer's keys and a one-shot fill of `/f00`..`/f(N-1)` before it opens),
-   and `wb_init` builds the desktop only when
+   drawer's keys and a one-shot fill of `/f00`..`/f(N-1)` before it opens) and
+   `wb.dsel=<0|1>` (parsed before `wb.shell=`: it gives the drawer body the
+   click-and-drag handler, and the drawer must be opened for it to matter), and
+   `wb_init` builds the desktop only when
    the token was supplied: it takes
    the framebuffer away from the text console and prints `CRUGOS: wb desktop
    ready (1024x768, 2 window(s))`, followed by `CRUGOS: wb keys ready (window 2
@@ -143,7 +147,9 @@ post-snapshot allocations cannot push it over capacity.
    desktop object and by `CRUGOS: wb icons ready (N object(s), keyboard focus)`
    when `wb.ikeys=1` asked for the icon table's keyboard focus, and by
    `CRUGOS: wb drawer mode (arrow keys scroll, r refreshes)` when `wb.dr=1`
-   gave the drawer the keys. Without the token the framebuffer console keeps
+   gave the drawer the keys, and by `CRUGOS: wb select mode (click a row, drag
+   the scrollbar)` when `wb.dsel=1` installed the body-input handler after the
+   desktop-ready line. Without the token the framebuffer console keeps
    its text mode and no Workbench line appears.
 9. `net_init`: reset `net.device` and `tcp_init`, then probe legacy virtio-net
    PCI functions (up to four `eth0`..`eth3`) and register them, bind the DHCP
@@ -227,10 +233,13 @@ post-snapshot allocations cannot push it over capacity.
     prints `CRUGOS: wb icons selftest ok (N move(s), M front(s))`, and with
     `wb.dr=1` it waits for `wb.acts=` drawer scrolls and refreshes and prints
     `CRUGOS: wb drawer selftest ok (N scroll(s), M refresh(es))`, or
-    `CRUGOS: wb drawer timeout (N/M)` when the wait expires first. The whole
+    `CRUGOS: wb drawer timeout (N/M)` when the wait expires first; with
+    `wb.dsel=1` it waits for two row clicks and one scrollbar drag and prints
+    `CRUGOS: wb select selftest ok (N select(s), M scrollbar drag(s))`, or
+    `CRUGOS: wb select timeout (N/M)`. The whole
     check is silent unless `wb.enable=` enabled it.
 14. `report_boot`, `storage_lock` (wipes the passphrase, the volume keys and
-    the bounce buffer), `CRUGOS: phase 6g boot ok`, then `wb_hold` (only when
+    the bounce buffer), `CRUGOS: phase 6h boot ok`, then `wb_hold` (only when
     `wb.hold=` was given: the guest stays alive with the desktop on screen until
     the deadline), `arch_exit_qemu(0x10)`.
 
@@ -399,6 +408,7 @@ CRUGOS: wb keys ready (window 2 active)    # only with wb.keys=1
 CRUGOS: wb icon ready ('System:', volume)  # only with wb.desk=1
 CRUGOS: wb icons ready (1 object(s), keyboard focus)  # only with wb.ikeys=1
 CRUGOS: wb drawer mode (arrow keys scroll, r refreshes)  # only with wb.dr=1
+CRUGOS: wb select mode (click a row, drag the scrollbar)   # only with wb.dsel=1
 CRUGOS: usb keyboard ready (endpoint 0x81, 8 byte reports)  # USB keyboard attached
 CRUGOS: usb key 'a'                       # one per decoded key while usb.wait= is set
 CRUGOS: usb mouse ready (endpoint 0x81, 4 byte reports)     # USB mouse attached
@@ -476,6 +486,9 @@ CRUGOS: wb drawer 'System:' opened (29 entries)
 CRUGOS: wb drawer ready (29 entries, 11 row(s))
 CRUGOS: wb drawer scrolled (top 1 of 29)
 CRUGOS: wb drawer refreshed (29 entries)
+CRUGOS: wb drawer selected '<name>' (index 2 of 29)  # only with wb.dsel=1
+CRUGOS: wb drawer scrollbar grabbed
+CRUGOS: wb drawer scrollbar to (top 18 of 29)
 CRUGOS: wb window 3 sent to back
 CRUGOS: wb action 2 icon 0
 CRUGOS: wb action 3 depth window 3
@@ -490,13 +503,14 @@ CRUGOS: wb window 1 sent to front
 CRUGOS: wb action 6 front window 1
 CRUGOS: wb icons selftest ok (1 move(s), 1 front(s))
 CRUGOS: sh run 'ver'
-CRUGOS: sh out CrugOS 0.29.0 (phase 6g), x86_64
+CRUGOS: sh out CrugOS 0.30.0 (phase 6h), x86_64
 CRUGOS: wb selftest ok (1 drag(s), 1 action(s))
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb drawer selftest ok (3 scroll(s), 1 refresh(es))
+CRUGOS: wb select selftest ok (2 select(s), 1 scrollbar drag(s))
 CRUGOS: sh selftest ok (1 command(s))
 CRUGOS: selftest ok
-CRUGOS: phase 6g boot ok
+CRUGOS: phase 6h boot ok
 ```
 
 The `virtio : net eth0 mac ...` line, the lease, the ARP resolution, the echo
@@ -545,8 +559,12 @@ focus, activation, drag, drop and send-to-front lines and
 `wb.dr=1 wb.fill=24 wb.acts=4`, so the log carries the read-write remount, the
 fill count, the drawer ready, scroll and refresh lines and
 `CRUGOS: wb drawer selftest ok`, and the driver resizes the drawer between
-screendumps to prove the rows reflowed. See [workbench.md](workbench.md) and
-[build.md](build.md).
+screendumps to prove the rows reflowed. `make test-workbench-select` adds
+`wb.dsel=1` on top of that command line (with `wb.acts=3`), so the log also
+carries `CRUGOS: wb select mode`, the row-selected, scrollbar-grabbed and
+scrollbar-to lines and `CRUGOS: wb select selftest ok`, while the driver clicks
+rows and drags the thumb between screendumps. See [workbench.md](workbench.md)
+and [build.md](build.md).
 
 The `audio` lines appear only on machines with a USB audio function: a default
 `q35` boot prints `CRUGOS: audio device absent`, while `make test-audio` adds
@@ -571,13 +589,13 @@ replaced by the skip marker, and the USB device the firmware booted from shows
 up in the USB lines as an unsupported mass-storage function:
 
 ```
-CRUGOS: version 0.29.0
+CRUGOS: version 0.30.0
 CRUGOS: usb controller ready (xhci, 8 port(s))
 CRUGOS: usb device 46f4:0001 on port 1 (speed 4)
 CRUGOS: usb device class 8 on port 1 (unsupported)
 CRUGOS: storage skipped (storage=none)
 CRUGOS: selftest ok
-CRUGOS: phase 6g boot ok
+CRUGOS: phase 6h boot ok
 ```
 
 `kernel/core/report.c` prints the machine description between them: kernel
@@ -644,5 +662,8 @@ reading the byte queue. See [input.md](input.md) for the scancode decoder and
   selectable, but they cannot be renamed, there is no multi-select and no
   rubber-band selection. A drawer reads the root once on open and scrolls one
   row per arrow key; `r` re-reads the listing, but nothing refreshes it
-  automatically, the scrollbar cannot be dragged, the listing is a flat read of
-  the root and only one drawer window exists.
+  automatically, the listing is a flat read of the root and only one drawer
+  window exists. Since phase 6H a click selects a single row and the scrollbar
+  thumb drags, but there is no marquee or multi-select, a refresh paints no
+  selection, the track has no page-step buttons and the keyboard has no row
+  cursor in the drawer (the arrow keys still scroll the viewport).

@@ -33,6 +33,7 @@
 #   make test-workbench-desk  open a drawer from the desktop volume icon and send it back
 #   make test-workbench-icons  drag a desktop icon, raise a window and drive the icons by keyboard
 #   make test-workbench-drawer  scroll, refresh and resize the System: drawer
+#   make test-workbench-select  select a drawer row and drag its scrollbar
 #   make crypt-disk  build the AES-256-XTS crypt test disk
 #   make test-crypt  boot from an encrypted root and verify the disk
 #   make test-crypt-recovery  unlock the encrypted root with the recovery keyslot
@@ -101,6 +102,7 @@ EXPECT_KEYS ?= no
 EXPECT_DESK ?= no
 EXPECT_ICONS ?= no
 EXPECT_DRAWER ?= no
+EXPECT_SELECT ?= no
 
 # QEMU / firmware options.
 MEMORY_MB ?= 512
@@ -152,6 +154,10 @@ WB_DRAWER_WAIT ?= 30
 WB_DRAWER_ACTS ?= 4
 WB_DRAWER_FILL ?= 24
 WB_DRAWER_RUN_TIMEOUT_SEC ?= 240
+WB_SELECT_WAIT ?= 30
+WB_SELECT_ACTS ?= 3
+WB_SELECT_FILL ?= 24
+WB_SELECT_RUN_TIMEOUT_SEC ?= 240
 
 # Interactive demo (make demo): a real QEMU window with a USB keyboard and
 # mouse, the Workbench desktop and a hold so the window stays open.
@@ -289,6 +295,7 @@ HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
         test-net-dns test-usb-hotplug test-usb-mouse test-audio test-gfx \
         test-workbench test-workbench-menu test-workbench-shell test-workbench-keys \
         test-workbench-desk test-workbench-icons test-workbench-drawer \
+        test-workbench-select \
         iso check-iso test-iso usb \
         crash-disk \
         check-disk size check-efi repro test-host preflight version options clean distclean help
@@ -680,6 +687,21 @@ test-workbench-drawer: esp
 	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no $(EXPECT_ICONS) $(EXPECT_DRAWER)
 	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 
+# Selection gate: wb.dsel=1 makes the drawer rows selectable and turns the
+# scrollbar thumb into a drag handle.  Serial markers prove the selection and the
+# scrollbar drag; screendumps prove the amber band and that the view moved.
+test-workbench-select: EXPECT_SELECT := yes
+test-workbench-select: esp
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(PYTHON) scripts/run-workbench-select.py --repo $(CURDIR) \
+		--disk $(abspath $(DISK_IMG)) --serial-log $(abspath $(SERIAL_LOG)) \
+		--exit-code $(abspath $(QEMU_EXIT)) --acts $(WB_SELECT_ACTS) \
+		--fill $(WB_SELECT_FILL) --wb-wait $(WB_SELECT_WAIT) \
+		--run-timeout $(WB_SELECT_RUN_TIMEOUT_SEC) \
+		--qemu-extra "$(WB_QEMU_EXTRA)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no $(EXPECT_ICONS) $(EXPECT_DRAWER) $(EXPECT_SELECT)
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
 test:
 	$(Q)rm -f $(DISK_IMG)
 	$(Q)$(MAKE) --no-print-directory run
@@ -915,6 +937,11 @@ options:
 	@printf '  %-16s %s\n' WB_DRAWER_ACTS "$(WB_DRAWER_ACTS)"
 	@printf '  %-16s %s\n' WB_DRAWER_FILL "$(WB_DRAWER_FILL)"
 	@printf '  %-16s %s\n' WB_DRAWER_RUN_TIMEOUT_SEC "$(WB_DRAWER_RUN_TIMEOUT_SEC)"
+	@printf '  %-16s %s\n' EXPECT_SELECT "$(EXPECT_SELECT)"
+	@printf '  %-16s %s\n' WB_SELECT_WAIT "$(WB_SELECT_WAIT) (seconds)"
+	@printf '  %-16s %s\n' WB_SELECT_ACTS "$(WB_SELECT_ACTS)"
+	@printf '  %-16s %s\n' WB_SELECT_FILL "$(WB_SELECT_FILL)"
+	@printf '  %-16s %s\n' WB_SELECT_RUN_TIMEOUT_SEC "$(WB_SELECT_RUN_TIMEOUT_SEC)"
 	@printf '  %-16s %s\n' MEMORY_MB "$(MEMORY_MB)"
 	@printf '  %-16s %s\n' SMP "$(SMP)"
 	@printf '  %-16s %s\n' TIMEOUT_SEC "$(TIMEOUT_SEC)"

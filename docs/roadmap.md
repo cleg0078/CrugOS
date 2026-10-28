@@ -1,6 +1,6 @@
 # Roadmap
 
-The specification defines 42 phases/gates. Phase 0 established the smallest
+The specification defines 43 phases/gates. Phase 0 established the smallest
 end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
 phase 1 makes the kernel own physical memory, page tables, exceptions and
 timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
@@ -37,7 +37,9 @@ stacking order; phase 6F makes those icons draggable, gives every title bar a
 send-to-front gadget beside the depth box and gives the icon table keyboard
 focus; phase 6G makes the drawer a scrolling viewport with arrow keys, a
 refresh key and a scrollbar, and fills the root from a boot token so there is
-something below the fold. Release
+something below the fold; phase 6H hands a window's body presses, motions and
+releases to a registered handler, which the drawer uses to select a row on a
+click and to drag its scrollbar thumb. Release
 `v0.23.1` adds packaging rather than a spec phase: `make iso` produces a hybrid
 UEFI ISO that boots from a USB stick or a CD-ROM, with the kernel's
 `storage=none` token so an image with no root filesystem still passes the boot
@@ -847,6 +849,65 @@ change for memory management, storage, SMP or drivers.
   scrolling drawer, `wb.dr=` / `wb.fill=`, the remount helpers and the gate.
 - All 42 gates pass at `v0.29.0`.
 
+## Phase 6H - drawer selection and a draggable scrollbar (done)
+
+- `include/crug/intuition.h`: a window can now own the presses inside its body.
+  `INTUITION_BODY_PRESS` (0), `INTUITION_BODY_MOVE` (1) and
+  `INTUITION_BODY_RELEASE` (2) are the kinds, and
+  `int intuition_set_body_input(int id, void (*fn)(int id, u32 kind, i32 x, i32 y, void *ctx), void *ctx)`
+  registers a handler that receives body-relative coordinates; `NULL` clears it
+  and an unknown id returns -1.
+- precedence: `kernel/gfx/intuition.c` gives the window an internal body window
+  on a press inside a body that has a handler, forwards `PRESS`, repaints and
+  returns, so the press never starts a title-bar drag, a resize or a gadget
+  press; while the button is held every pointer motion is forwarded as `MOVE`;
+  the release forwards `RELEASE`, repaints and returns before the icon, resize,
+  gadget and drag branches.
+- geometry: the new `body_rect()` helper and `win_draw_body()` share one body
+  rectangle, `x + BORDER`, `y + BORDER + TITLE_HEIGHT`, `w - 2 * BORDER` by
+  `h - 2 * BORDER - TITLE_HEIGHT`, so a handler and the painter agree on the
+  body edge.
+- `kernel/gfx/workbench.c`: `wb.dsel=1` (parsed before `wb.shell=`) gives the
+  drawer body that handler. The drawer opens at (560,60,360x260), a 356x236
+  body over 29 entries with 11 visible rows on a 20-pixel pitch and a maximum
+  top row of 18; a click at body `y` selects index `top + (y - 6) / 20` and
+  paints an amber `INTUITION_MENU_HIGHLIGHT_RGB` (`0x00FFB000`) band with the
+  text in the window-background colour, printing
+  `CRUGOS: wb drawer selected '<name>' (index N of M)`.
+- scrollbar: the 4-pixel `WB_TRACK_W` track sits at body-local
+  `x = body width - 8`, `y + 6`, `h - 12`, and the thumb is
+  `max(12, track * rows / entries)` tall with its position proportional to the
+  first visible row. A press on the track jumps the view and grabs the thumb at
+  the press point, dragging follows the pointer, and the release prints
+  `CRUGOS: wb drawer scrollbar to (top N of M)`.
+- markers: `wb.dsel=1` prints
+  `CRUGOS: wb select mode (click a row, drag the scrollbar)` after
+  `CRUGOS: wb desktop ready` and makes the self-test wait for `wb.acts=`
+  operations, printing
+  `CRUGOS: wb select selftest ok (2 select(s), 1 scrollbar drag(s))` or
+  `CRUGOS: wb select timeout (N/M)`. The `wb.fill=N` fill from phase 6G is
+  what gives the gate a listing long enough to overflow the 11 rows.
+- `make test-workbench-select` is the 43rd gate: it boots
+  `wb.enable=1 wb.wait=30 wb.desk=1 wb.dr=1 wb.dsel=1 wb.fill=24 wb.acts=3`,
+  verifies row 0 is window background `(8,16,24)`, clicks row 2 at (600,136)
+  for an amber `(255,176,0)` band at (890,136) and index 2 of 29, drags the
+  thumb from (911,100) to (911,280) for top row 18 and a repaint that clears
+  row 2's band, clicks the new row 0 at (600,96) to select index 18, waits for
+  the self-test line and requires exit status 33, `EXPECT_SELECT=yes` and a
+  clean `e2fsck`.
+- `scripts/boot-check.py` gained its 20th `EXPECT_` positional,
+  `EXPECT_SELECT` (argv[25]), and reports `select yes` in its summary line;
+  the phase marker is `CRUGOS: phase 6h boot ok`.
+- `tests/host/test_intuition.c` gained `test_intuition_body_input` (the
+  body-relative press, move and release coordinates, the release that stops
+  forwarding, title-bar and close-gadget presses that never reach the handler,
+  the closed window that leaves nothing stale, the `NULL` clear and
+  `intuition_set_body_input(99, ...) == -1`), and `make test-host` reports
+  3104 checks.
+- docs: README, workbench, boot, build, versioning, gfx and iso describe the
+  body-input hook, the selectable rows, the draggable scrollbar and the gate.
+- All 43 gates pass at `v0.30.0`.
+
 ## Bootable media - hybrid UEFI ISO (done, `v0.23.1`)
 
 - `kernel/fs/storage.c` gained the `storage=none` command-line token: every
@@ -906,15 +967,16 @@ change for memory management, storage, SMP or drivers.
   validation, AAAA/PTR/SRV, search domains, negative caching) on top of the
   phase 4B-4D stack, richer socket semantics (bind, options, non-blocking, more
   than four sockets); IPv6, fragmentation and reassembly.
-- Software framebuffer -> VirtIO-GPU -> vendor GPU drivers: with the phase 6G
-  desktop in place (window resizing, the depth and front gadgets, icon dragging
-  and a scrolling, refreshing drawer are done), the next Workbench work is
-  renaming an icon, drag-selecting icons, dragging the drawer's scrollbar,
-  sub-menus on top of the phase 6B menu bar, a gadget toolkit on top of its
-  event queue and richer shell semantics (quoting, a working directory) on top
-  of the shell, the phase 5D cursor, the phase 5B pointer stack and the phase
-  5C audio stack; application bundles (phase 7, specification section 35) are
-  the next layer above the desktop.
+- Software framebuffer -> VirtIO-GPU -> vendor GPU drivers: with the phase 6H
+  desktop in place (window resizing, the depth and front gadgets, icon dragging,
+  a scrolling, refreshing drawer and its selectable rows and draggable
+  scrollbar are done), the next Workbench increments are keyboard row
+  navigation and Enter activation of icons from the drawer, multi-select, a
+  gadget toolkit, sub-menus on top of the phase 6B menu bar, renaming an icon
+  and richer shell semantics (quoting, a working directory) on top of the
+  shell, the phase 5D cursor, the phase 5B pointer stack and the phase 5C audio
+  stack; application bundles (phase 7, specification section 35) are the next
+  layer above the desktop.
 - Workbench userspace, `.app` bundles, `.crpkg` packages, capability model.
 - POSIX-like layer: 64-bit UID/GID, ACLs, process groups, signals.
 

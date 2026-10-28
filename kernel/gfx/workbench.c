@@ -62,6 +62,19 @@ static u32 g_drawer_rows;
 static u32 g_drawer_scrolls;
 static u32 g_drawer_refreshes;
 static u32 g_drawer_ops_seen;
+/* Phase 6H: row selection and the draggable scrollbar.  The selection is an
+   index into the listing, so it scrolls with the view; the body size is
+   remembered by the painter because the pointer handler only gets
+   body-relative coordinates. */
+static int g_select_mode;
+static int g_drawer_sel = -1;
+static u32 g_drawer_selects;
+static u32 g_drawer_scrollbar;
+static u32 g_select_ops;
+static int g_scroll_drag;
+static u32 g_scroll_grab;
+static u32 g_drawer_body_w;
+static u32 g_drawer_body_h;
 
 static void wb_open_drawer(void);
 static void wb_icon_keyboard_activate(void);
@@ -193,6 +206,13 @@ static void wb_cmdline_token(const char *tok, usize len)
     if (used >= 0) {
         if (wb_parse_u32(tok + used, len - (usize)used, &value) == 0) {
             g_fill_count = value > WB_FILL_MAX ? WB_FILL_MAX : value;
+        }
+        return;
+    }
+    used = wb_prefix(tok, len, "wb.dsel=");
+    if (used >= 0) {
+        if (wb_parse_u32(tok + used, len - (usize)used, &value) == 0) {
+            g_select_mode = value ? 1 : 0;
         }
         return;
     }
@@ -440,8 +460,34 @@ static void wb_drawer_clamp_top(void)
     }
 }
 
-/* Body painter of the drawer window: the visible slice of the listing and,
-   while the listing is longer than the body, a scrollbar on the right edge. */
+/* Scrollbar geometry shared by the painter and the pointer handler: the track
+   sits on the right edge of the body, the thumb is proportional to the rows
+   the body can show, and span is the travel of the thumb from top to bottom. */
+static void wb_track_geom(u32 w, u32 h, u32 *track_x, u32 *track_y,
+                          u32 *track_h, u32 *thumb_h, u32 *span)
+{
+    u32 rows = wb_drawer_rows(h);
+    u32 th = 0u;
+
+    *track_x = w > 8u ? w - 8u : 0u;
+    *track_y = 6u;
+    *track_h = h > 12u ? h - 12u : 0u;
+    if (g_drawer_count != 0u) {
+        th = *track_h * rows / g_drawer_count;
+    }
+    if (th < 12u) {
+        th = 12u;
+    }
+    if (th > *track_h) {
+        th = *track_h;
+    }
+    *thumb_h = th;
+    *span = *track_h > th ? *track_h - th : 0u;
+}
+
+/* Body painter of the drawer window: the visible slice of the listing, the
+   selected row in inverse amber and, while the listing is longer than the
+   body, a scrollbar on the right edge. */
 static void wb_drawer_paint(int id, i32 x, i32 y, u32 w, u32 h, void *ctx)
 {
     u32 max_chars = w > 20u ? (w - 20u) / 8u : 0u;
@@ -454,6 +500,8 @@ static void wb_drawer_paint(int id, i32 x, i32 y, u32 w, u32 h, void *ctx)
         max_chars = 47u;
     }
     g_drawer_rows = rows;
+    g_drawer_body_w = w;
+    g_drawer_body_h = h;
     wb_drawer_clamp_top();
     fb_fill_rect((u32)x, (u32)y, w, h, INTUITION_WINDOW_RGB);
     if (g_drawer_count == 0u) {
@@ -465,6 +513,8 @@ static void wb_drawer_paint(int id, i32 x, i32 y, u32 w, u32 h, void *ctx)
         u32 index = g_drawer_top + i;
         char text[WB_DRAWER_NAME_MAX];
         u32 n = 0u;
+        u32 fg = INTUITION_BODY_TEXT_RGB;
+        u32 bg = INTUITION_WINDOW_RGB;
 
         if (index >= g_drawer_count) {
             break;
@@ -477,25 +527,147 @@ static void wb_drawer_paint(int id, i32 x, i32 y, u32 w, u32 h, void *ctx)
         if (max_chars != 0u && n > max_chars) {
             text[max_chars] = 0;
         }
+        if (g_drawer_sel >= 0 && (u32)g_drawer_sel == index) {
+            fg = INTUITION_WINDOW_RGB;
+            bg = INTUITION_MENU_HIGHLIGHT_RGB;
+            fb_fill_rect((u32)x, (u32)y + 4u + i * WB_DRAWER_ROW_H,
+                         w > 12u ? w - 12u : w, WB_DRAWER_ROW_H, bg);
+        }
         fb_draw_text((u32)x + 6u, (u32)y + 6u + i * WB_DRAWER_ROW_H, text,
-                     INTUITION_BODY_TEXT_RGB, INTUITION_WINDOW_RGB);
+                     fg, bg);
     }
     if (g_drawer_count > rows && w > 12u && h > 12u) {
-        u32 track_x = (u32)x + w - 8u;
-        u32 track_y = (u32)y + 6u;
-        u32 track_h = h - 12u;
-        u32 thumb_h = track_h * rows / g_drawer_count;
+        u32 track_x;
+        u32 track_y;
+        u32 track_h;
+        u32 thumb_h;
+        u32 span;
         u32 max_top = wb_drawer_max_top();
-        u32 thumb_y = track_y;
+        u32 thumb_y;
 
-        if (thumb_h < 12u) {
-            thumb_h = 12u;
+        wb_track_geom(w, h, &track_x, &track_y, &track_h, &thumb_h, &span);
+        thumb_y = (u32)y + track_y;
+        if (max_top != 0u && span != 0u) {
+            thumb_y += span * g_drawer_top / max_top;
         }
-        if (max_top != 0u) {
-            thumb_y = track_y + (track_h - thumb_h) * g_drawer_top / max_top;
+        fb_fill_rect((u32)x + track_x, (u32)y + track_y, WB_TRACK_W,
+                     track_h, 0x00404040u);
+        fb_fill_rect((u32)x + track_x, thumb_y, WB_TRACK_W, thumb_h,
+                     INTUITION_MENU_BG_RGB);
+    }
+}
+
+/* Move the view so the thumb follows a pointer at body-relative y during a
+   scrollbar drag.  g_scroll_grab is the pointer offset inside the thumb at
+   press time, so grabbing the thumb anywhere keeps its grip. */
+static void wb_drawer_seek(u32 pointer_y)
+{
+    u32 track_x;
+    u32 track_y;
+    u32 track_h;
+    u32 thumb_h;
+    u32 span;
+    u32 max_top = wb_drawer_max_top();
+    u32 offset;
+    u32 top;
+
+    if (g_drawer_body_w == 0u || g_drawer_body_h == 0u) {
+        return;
+    }
+    wb_track_geom(g_drawer_body_w, g_drawer_body_h, &track_x, &track_y,
+                  &track_h, &thumb_h, &span);
+    if (span == 0u || max_top == 0u) {
+        return;
+    }
+    offset = pointer_y > track_y + g_scroll_grab
+                 ? pointer_y - track_y - g_scroll_grab
+                 : 0u;
+    if (offset > span) {
+        offset = span;
+    }
+    top = offset * max_top / span;
+    if (top > max_top) {
+        top = max_top;
+    }
+    if (top == g_drawer_top) {
+        return;
+    }
+    g_drawer_top = top;
+    intuition_redraw_window(g_drawer_window);
+}
+
+/* Phase 6H: pointer handler for the drawer body.  A press inside the scrollbar
+   track jumps the view there and starts a thumb drag; a press on a row selects
+   it.  The selection is an index into the listing, so it scrolls with the
+   view instead of sticking to a screen row. */
+static void wb_drawer_input(int id, u32 kind, i32 x, i32 y, void *ctx)
+{
+    u32 track_x;
+    u32 track_y;
+    u32 track_h;
+    u32 thumb_h;
+    u32 span;
+    u32 max_top = wb_drawer_max_top();
+
+    (void)ctx;
+    if (id != g_drawer_window || g_drawer_rows == 0u ||
+        g_drawer_body_w == 0u || g_drawer_body_h == 0u) {
+        return;
+    }
+    wb_track_geom(g_drawer_body_w, g_drawer_body_h, &track_x, &track_y,
+                  &track_h, &thumb_h, &span);
+    if (kind == INTUITION_BODY_PRESS) {
+        if (span != 0u && max_top != 0u && x >= (i32)track_x - 2 &&
+            x < (i32)(track_x + WB_TRACK_W + 2) && y >= (i32)track_y &&
+            y < (i32)(track_y + track_h)) {
+            u32 thumb_y = track_y + span * g_drawer_top / max_top;
+
+            if ((u32)y >= thumb_y && (u32)y < thumb_y + thumb_h) {
+                g_scroll_grab = (u32)y - thumb_y;
+            } else {
+                g_scroll_grab = thumb_h / 2u;
+            }
+            g_scroll_drag = 1;
+            g_drawer_scrollbar++;
+            g_select_ops++;
+            wb_drawer_seek((u32)y);
+            if (g_reporting) {
+                kprintf("CRUGOS: wb drawer scrollbar grabbed\n");
+            }
+            return;
         }
-        fb_fill_rect(track_x, track_y, 4u, track_h, 0x00404040u);
-        fb_fill_rect(track_x, thumb_y, 4u, thumb_h, INTUITION_MENU_BG_RGB);
+        if (x >= 0 && y >= 0 && (u32)y >= track_y) {
+            u32 row = ((u32)y - track_y) / WB_DRAWER_ROW_H;
+            u32 index = g_drawer_top + row;
+
+            if (index < g_drawer_count) {
+                g_drawer_sel = (int)index;
+                g_drawer_selects++;
+                g_select_ops++;
+                intuition_redraw_window(g_drawer_window);
+                if (g_reporting) {
+                    kprintf("CRUGOS: wb drawer selected '%s' (index %u of %u)\n",
+                            g_drawer_names[index], (unsigned)index,
+                            (unsigned)g_drawer_count);
+                }
+            }
+        }
+        return;
+    }
+    if (kind == INTUITION_BODY_MOVE) {
+        if (g_scroll_drag) {
+            wb_drawer_seek((u32)(y > 0 ? y : 0));
+        }
+        return;
+    }
+    /* INTUITION_BODY_RELEASE */
+    if (!g_scroll_drag) {
+        return;
+    }
+    g_scroll_drag = 0;
+    if (g_reporting) {
+        kprintf("CRUGOS: wb drawer scrollbar to (top %u of %u)\n",
+                (unsigned)g_drawer_top, (unsigned)g_drawer_count);
     }
 }
 
@@ -560,11 +732,16 @@ static void wb_open_drawer(void)
     }
     entries = wb_drawer_load();
     g_drawer_top = 0u;
+    g_drawer_sel = -1;
+    g_scroll_drag = 0;
+    g_drawer_body_w = 0u;
+    g_drawer_body_h = 0u;
     g_drawer_window = intuition_open(560, 60, 360, 260, "System:", NULL);
     if (g_drawer_window < 0) {
         return;
     }
     intuition_set_paint(g_drawer_window, wb_drawer_paint, 0);
+    intuition_set_body_input(g_drawer_window, wb_drawer_input, 0);
     intuition_redraw_window(g_drawer_window);
     g_drawers++;
     if (g_reporting) {
@@ -718,14 +895,14 @@ int wb_init(void)
     }
     g_reporting = (g_want_drags > 0u || g_menu_mode || g_keys_mode ||
                    g_shell_mode || g_desk_mode || g_icon_keys_mode ||
-                   g_drawer_mode)
+                   g_drawer_mode || g_select_mode)
                       ? 1
                       : 0;
     fb_set_text_enabled(0);
     intuition_init();
     intuition_set_reporting(g_reporting);
     top = intuition_open(80, 90, 360, 220, "Workbench",
-                         "CrugOS Workbench\nphase 6g\nsoftware rendered");
+                         "CrugOS Workbench\nphase 6h\nsoftware rendered");
     shell_id = intuition_open(480, 300, 320, 200, "Shell", "4.OS\ncrugos>");
     intuition_set_menus(top, wb_menus_top, 2u);
     intuition_add_gadget(top, 12, 60, 96, 22, "Run");
@@ -772,6 +949,9 @@ int wb_init(void)
     if (g_drawer_mode) {
         kprintf("CRUGOS: wb drawer mode (arrow keys scroll, r refreshes)\n");
     }
+    if (g_select_mode) {
+        kprintf("CRUGOS: wb select mode (click a row, drag the scrollbar)\n");
+    }
     return 0;
 }
 
@@ -793,6 +973,7 @@ int wb_selftest(void)
     u32 want_actions;
     u32 want_commands;
     u32 want_drawer;
+    u32 want_select;
 
     if (!g_enabled) {
         return 1;
@@ -813,13 +994,18 @@ int wb_selftest(void)
                        : 0u;
     want_commands = g_shell_mode ? (g_want_commands ? g_want_commands : 1u) : 0u;
     /* Drawer mode counts scrolls and refreshes instead of desktop actions, so
-       the gate waits for exactly the view moves its driver scripts. */
-    want_drawer = g_drawer_mode ? (g_want_actions ? g_want_actions : 1u) : 0u;
+       the gate waits for exactly the view moves its driver scripts.  Select
+       mode counts row selections plus scrollbar grabs instead. */
+    want_drawer = (g_drawer_mode && !g_select_mode)
+                      ? (g_want_actions ? g_want_actions : 1u)
+                      : 0u;
+    want_select = g_select_mode ? (g_want_actions ? g_want_actions : 1u) : 0u;
     deadline = timer_monotonic_ns() +
                (u64)(g_wait_seconds ? g_wait_seconds : 5u) * 1000000000ull;
     while (intuition_drag_count() < (u64)want ||
            g_actions_seen < want_actions ||
            g_drawer_ops_seen < want_drawer ||
+           g_select_ops < want_select ||
            g_commands_seen < want_commands) {
         /* input_poll() runs the console hook, which pumps the USB mouse and
            then drains the pointer state into intuition.device; the shell pump
@@ -839,6 +1025,9 @@ int wb_selftest(void)
             } else if (g_drawer_ops_seen < want_drawer) {
                 kprintf("CRUGOS: wb drawer timeout (%u/%u)\n",
                         (unsigned)g_drawer_ops_seen, (unsigned)want_drawer);
+            } else if (g_select_ops < want_select) {
+                kprintf("CRUGOS: wb select timeout (%u/%u)\n",
+                        (unsigned)g_select_ops, (unsigned)want_select);
             } else {
                 kprintf("CRUGOS: sh command timeout (%u/%u)\n",
                         (unsigned)g_commands_seen, (unsigned)want_commands);
@@ -868,6 +1057,10 @@ int wb_selftest(void)
     if (g_drawer_mode) {
         kprintf("CRUGOS: wb drawer selftest ok (%u scroll(s), %u refresh(es))\n",
                 (unsigned)g_drawer_scrolls, (unsigned)g_drawer_refreshes);
+    }
+    if (g_select_mode) {
+        kprintf("CRUGOS: wb select selftest ok (%u select(s), %u scrollbar drag(s))\n",
+                (unsigned)g_drawer_selects, (unsigned)g_drawer_scrollbar);
     }
     /* Keep the finished desktop on screen for a moment so the gate's last
        screendump does not race the rest of the boot to the exit. */

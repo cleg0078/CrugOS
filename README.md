@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 6G drawer scrolling, refresh and reflow (`v0.29.0`)
+## Status: phase 6H drawer row selection and a draggable scrollbar (`v0.30.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -39,7 +39,10 @@ Phase 6F makes those icons interactive: a press grabs and drags a tile, a
 send-to-front gadget joined the depth gadget in every title bar, and the icon
 table takes the keyboard, and phase 6G turns the `System:` drawer into a
 scrolling list: the arrow keys move the viewport, `r` re-reads the volume, a
-scrollbar tracks the position and a resize reflows the rows. Release `v0.23.1`
+scrollbar tracks the position and a resize reflows the rows. Phase 6H makes
+those rows selectable and the scrollbar draggable through a generic Intuition
+body-input hook that hands a window's own presses, motions and releases to a
+handler. Release `v0.23.1`
 made that tree bootable media: `make iso` writes a hybrid UEFI ISO
 that boots from a USB stick or a CD-ROM, with no disk image and no test
 tokens baked in.
@@ -668,6 +671,66 @@ Phase 6G makes the `System:` drawer a scrolling list.
   describe the scrolling drawer, the two tokens, the remount helpers and the
   gate.
 
+Phase 6H makes the drawer rows selectable and its scrollbar draggable.
+
+- `include/crug/intuition.h`: a generic body-input hook.
+  `INTUITION_BODY_PRESS` (0), `INTUITION_BODY_MOVE` (1) and
+  `INTUITION_BODY_RELEASE` (2) arrive in body-relative coordinates through
+  `int intuition_set_body_input(int id, void (*fn)(int id, u32 kind, i32 x, i32 y, void *ctx), void *ctx)`;
+  a NULL `fn` clears the handler and an unknown id returns -1.
+  `kernel/gfx/intuition.c` gives the handler the press: with one installed it
+  records an internal body window, forwards PRESS, repaints and returns before
+  any title-bar drag, resize or gadget branch, so a body press never steers the
+  window; while the button is held every pointer motion is forwarded as MOVE,
+  and the release is forwarded as RELEASE before the icon, resize, gadget and
+  drag branches run. `win_draw_body()` and the new `body_rect()` helper share
+  one body rectangle, `x+BORDER, y+BORDER+TITLE_HEIGHT, w-2*BORDER,
+  h-2*BORDER-TITLE_HEIGHT`;
+- `kernel/gfx/workbench.c`: `wb.dsel=1` points that hook at the open drawer.
+  The drawer is opened at (560,60,360x260), a 356x236 body over 29 entries (five
+  root entries plus 24 from `wb.fill=`), 11 visible rows on a 20-pixel row
+  pitch and a maximum top row of 18. A click at body `y` selects index
+  `top + (y - 6) / 20` and paints an amber band
+  (`INTUITION_MENU_HIGHLIGHT_RGB` `0x00FFB000`) with the text in the
+  window-background colour, printing
+  `CRUGOS: wb drawer selected '<name>' (index N of M)`. The 4-pixel scrollbar
+  track (`WB_TRACK_W`) sits at body-local `x = body width - 8`, `y + 6`,
+  `h - 12` tall; the thumb is `max(12, track * rows / entries)` pixels high
+  and its offset follows the first visible row. Pressing the track jumps the
+  view and grabs the thumb at the press point, dragging follows the pointer, and
+  the release prints the final top row;
+- select mode prints `CRUGOS: wb select mode (click a row, drag the scrollbar)`
+  right after `CRUGOS: wb desktop ready`, the drawer prints
+  `CRUGOS: wb drawer scrollbar grabbed` and
+  `CRUGOS: wb drawer scrollbar to (top N of M)`, the self-test ends with
+  `CRUGOS: wb select selftest ok (2 select(s), 1 scrollbar drag(s))` (or
+  `CRUGOS: wb select timeout (N/M)` when the clicks do not arrive) and the boot
+  marker is now `CRUGOS: phase 6h boot ok`. The phase 6G drawer markers
+  (ready, scrolled, refreshed) are unchanged;
+- `make test-workbench-select` is the 43rd gate:
+  `scripts/run-workbench-select.py` boots
+  `wb.enable=1 wb.desk=1 wb.dr=1 wb.dsel=1 wb.fill=24 wb.acts=3`, hotplugs a
+  `usb-mouse` and double-clicks the `System:` desktop icon. A screendump must
+  show row 0 in the window-background colour (8,16,24); a click on row 2 at
+  (600,136) must paint the amber (255,176,0) band at (890,136) while row 0 stays
+  dark, and the guest reports `2 of 29`; pressing the thumb at (911,100) and
+  dragging to (911,280) makes the guest report top row 18 of 29 and clears row
+  2's band, after which a click on the new row 0 at (600,96) -- index 18 --
+  paints its band amber. The gate waits for the selftest line and requires exit
+  status 33 and a clean `e2fsck`, expects `EXPECT_SELECT=yes`
+  (`boot-check.py` prints `select yes`) and prints
+  `ok: workbench drawer selection and scrollbar dragging (exit 33)`;
+- `tests/host/test_intuition.c` gained `test_intuition_body_input`: it prints
+  `- intuition body input` and covers the body-relative PRESS and MOVE
+  coordinates (48,78 then 68,108 in a window at 100,100,300,300), no forwarding
+  after the release, title-bar presses and the close gadget never reaching the
+  handler, no stale interaction after a window closes, NULL clearing the handler
+  and `intuition_set_body_input(99, ...) == -1`; `make test-host` reports 3104
+  checks;
+- docs: README, workbench, boot, build, roadmap, versioning, gfx and iso
+  describe the selectable rows, the draggable scrollbar, the body-input hook,
+  the `wb.dsel=` token and the gate.
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -676,9 +739,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.29.0 (phase 6g) -- Amiga-inspired microkernel bring-up
+CrugOS 0.30.0 (phase 6h) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.29.0
+CRUGOS: version 0.30.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -738,7 +801,7 @@ heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
 boot   : pmm=28552 us cpu=438 us vm=626 us traps=360 us timer=65357 us heap=60 us storage=94487 us sched=354 us syscall=122 us total=190359 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase 6g boot ok
+CRUGOS: phase 6h boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -941,12 +1004,13 @@ make test-workbench-keys   # resize a window by its grip and drive it from the k
 make test-workbench-desk   # select desktop objects and send a window to the back
 make test-workbench-icons  # drag a desktop icon, raise a window by its front gadget and drive the icons from the keyboard
 make test-workbench-drawer  # scroll, refresh and resize the System: drawer
+make test-workbench-select  # click drawer rows and drag its scrollbar
 make iso         # build a bootable hybrid UEFI ISO (build/x86_64/crugos.iso)
 make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
 make usb         # write the ISO to a USB block device (USB_DEV=/dev/sdX)
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
-make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows/menus/gadgets, resize grips, keyboard focus and keys, icon dragging, the send-to-front gadget and keyboard icon focus, the text grid and the shell)
+make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows/menus/gadgets, resize grips, keyboard focus and keys, icon dragging, the send-to-front gadget and keyboard icon focus, the body input handler, the text grid and the shell)
 make check-disk  # e2fsck + persisted-file checks on the latest test disk
 make disk        # generate the GPT/ext4 test disk
 make raid-disks  # generate the two RAID1 member disks
@@ -971,7 +1035,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `EXPECT_CRYPT`, `EXPECT_AES`, `EXPECT_NET`, `EXPECT_TCP`, `EXPECT_DNS`,
 `EXPECT_USB`, `EXPECT_MOUSE`, `EXPECT_AUDIO`, `EXPECT_GFX`, `EXPECT_WB`,
 `EXPECT_MENU`, `EXPECT_SHELL`, `EXPECT_KEYS`, `EXPECT_DESK`, `EXPECT_ICONS`,
-`EXPECT_DRAWER`,
+`EXPECT_DRAWER`, `EXPECT_SELECT`,
 `AUDIO_RUN_TIMEOUT_SEC`, `AUDIO_QEMU_EXTRA`, `GFX_WAIT`, `GFX_MOVES`,
 `GFX_RUN_TIMEOUT_SEC`, `GFX_QEMU_EXTRA`, `WB_WAIT`, `WB_DRAG`,
 `WB_RUN_TIMEOUT_SEC`, `WB_QEMU_EXTRA`, `WB_MENU_WAIT`, `WB_MENU_ACTS`,
@@ -980,7 +1044,8 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `WB_KEYS_RUN_TIMEOUT_SEC`, `WB_DESK_WAIT`, `WB_DESK_ACTS`,
 `WB_DESK_RUN_TIMEOUT_SEC`, `WB_ICONS_WAIT`, `WB_ICONS_ACTS`,
 `WB_ICONS_RUN_TIMEOUT_SEC`, `WB_DRAWER_WAIT`, `WB_DRAWER_ACTS`, `WB_DRAWER_FILL`,
-`WB_DRAWER_RUN_TIMEOUT_SEC`, `DEMO_DISPLAY`, `DEMO_HOLD_SEC`,
+`WB_DRAWER_RUN_TIMEOUT_SEC`, `WB_SELECT_WAIT`, `WB_SELECT_ACTS`,
+`WB_SELECT_FILL`, `WB_SELECT_RUN_TIMEOUT_SEC`, `DEMO_DISPLAY`, `DEMO_HOLD_SEC`,
 `DEMO_TIMEOUT_SEC`, `DEMO_CMDLINE`, `DEMO_MACHINE_EXTRA`, `DEMO_QEMU_EXTRA`,
 `ISO_IMAGE`, `ISO_STAGE`, `ISO_FAT_IMG`, `ISO_SIZE_MB`, `ISO_VOLID`,
 `ISO_CMDLINE`, `ISO_DATE`, `ISO_RUN_TIMEOUT_SEC`, `EXPECT_ISO`, `ISO_IMG`,
@@ -1008,7 +1073,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/input/` | `input.device`: set-1 scancode decoder, the console byte queue and the pointer state |
 | `kernel/audio/` | `audio.device` PCM ring, the per-channel mixer and the tone generator |
 | `kernel/net/` | `net.device`, Ethernet/ARP/IPv4/ICMP/UDP, TCP, the DHCP client and the DNS resolver |
-| `kernel/gfx/` | `gfx.device` (the pointer-driven framebuffer cursor) and `intuition.device` with the phase 6A desktop, its phase 6B menus, gadgets and event queue, and the phase 6C body painter the shell window uses, the phase 6D resize grips and keyboard navigation, the phase 6E desktop objects, depth gadget and drawer, the phase 6F icon dragging, send-to-front gadget and keyboard icon focus, and the phase 6G scrolling drawer with its scrollbar, refresh and reflow |
+| `kernel/gfx/` | `gfx.device` (the pointer-driven framebuffer cursor) and `intuition.device` with the phase 6A desktop, its phase 6B menus, gadgets and event queue, and the phase 6C body painter the shell window uses, the phase 6D resize grips and keyboard navigation, the phase 6E desktop objects, depth gadget and drawer, the phase 6F icon dragging, send-to-front gadget and keyboard icon focus, the phase 6G scrolling drawer with its scrollbar, refresh and reflow, and the phase 6H drawer row selection with its draggable scrollbar and body-input hook |
 | `kernel/shell/` | the Workbench shell: line editor, history, the command table and the `shell_io` binding to the mounted ext4 root |
 | `kernel/mm/` | physical allocator, W^X page tables, kernel heap |
 | `kernel/block/` | block-device registry, partitions, bounds checks, RAID1/RAID10, boot-time rebuild and the AES-256-XTS `crypt.device` |
@@ -1096,17 +1161,20 @@ the windows, added the depth gadget and painted a drawer from the root
 directory; phase 6F made those icons draggable, added the send-to-front gadget
 and gave the icon table keyboard focus; phase 6G made that drawer scroll with a
 scrollbar, refresh with `r` and reflow on resize, and added the read-write
-remount helpers the fill and the shell's `write` command need. Remaining
+remount helpers the fill and the shell's `write` command need; phase 6H gave a
+window body its own input handler, which the drawer uses to select rows on a
+click and to drag its scrollbar thumb. Remaining
 phase 3B work is
 online RAID rebuild, hot spare, scrub and a write-intent bitmap, RAID below
 encryption, a redundant ESP, TPM/keyfile keyslots and USB storage; phase 4
 continues with framebuffer (GOP) console input and virtual terminals, plus a
 routing table and richer resolver features on top of the phase 4B-4D stack;
-the next step is the rest of Workbench userspace: drag-selecting icons,
-dragging the drawer's scrollbar, renaming an icon, sub-menus, a gadget toolkit
-and, in phase 7, application bundles (spec section 35), on top of the phase 6G
-desktop (window resizing, the depth and front gadgets, icon dragging and a
-scrolling drawer are done). Later
+the next step is the rest of Workbench userspace: keyboard row navigation and
+Enter activation from the drawer, multi-select, renaming an icon, sub-menus, a
+gadget toolkit and, in phase 7, application bundles (spec section 35), on top of
+the phase 6H desktop (window resizing, the depth and front gadgets, icon
+dragging, a scrolling drawer and its selectable rows and draggable scrollbar are
+done). Later
 phases cover USB storage, graphics, Workbench userspace, SMP/IOMMU and
 virtualisation. See
 [docs/roadmap.md](docs/roadmap.md) for the full sequence and the known

@@ -24,6 +24,10 @@
 #define WB_DRAWER_NAME_MAX 32u
 #define WB_FILL_MAX 24u
 #define WB_DRAWER_ROW_H 20u
+/* Phase 6H: the drawer body selects rows and drags its scrollbar; the track
+   is 4 pixels wide on the right edge of the body. */
+#define WB_SELECT_ACTS_MAX 8u
+#define WB_TRACK_W 4u
 
 int wb_init(void);
 void wb_cmdline(const boot_info *bi);

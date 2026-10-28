@@ -42,6 +42,14 @@
 #define INTUITION_FRONT_SIZE 12u
 #define INTUITION_ICON_DRAG_MIN 4u
 
+/* Phase 6H: a body painter can also own its window's pointer input.  The
+   callback receives body-relative coordinates and one of these kinds, so a
+   list can select a row and drag its own scrollbar without intuition.device
+   knowing what is painted there. */
+#define INTUITION_BODY_PRESS 0u
+#define INTUITION_BODY_MOVE 1u
+#define INTUITION_BODY_RELEASE 2u
+
 /* What a desktop object represents; the Workbench decides what a press on it
    means, intuition.device only reports the icon index. */
 #define INTUITION_ICON_VOLUME 0u
@@ -140,6 +148,15 @@ int intuition_set_paint(int id,
                         void (*fn)(int id, i32 x, i32 y, u32 w, u32 h,
                                    void *ctx),
                         void *ctx);
+/* Install a body input handler (phase 6H): a press inside the window body is
+   reported with INTUITION_BODY_PRESS, every pointer move while the button is
+   held with INTUITION_BODY_MOVE and the release with INTUITION_BODY_RELEASE,
+   all relative to the body rectangle.  A NULL handler restores the plain
+   activate-and-raise behaviour; unknown window ids return -1. */
+int intuition_set_body_input(int id,
+                             void (*fn)(int id, u32 kind, i32 x, i32 y,
+                                        void *ctx),
+                             void *ctx);
 /* Repaint the whole desktop: background, windows, menu bar, open menu. */
 void intuition_redraw(void);
 /* Repaint one window only; cheap enough for a keystroke. */

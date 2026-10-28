@@ -1200,6 +1200,114 @@ static void test_intuition_icon_keys(void)
     CHECK(intuition_icon_key('\n') == 0);
     CHECK(intuition_icon_selected() == -1);
 }
+/* Phase 6H: a window with a body input handler owns presses inside its body.
+ * The handler receives body-relative coordinates for the press, for every
+ * move while the button is held and for the release; title-bar presses and
+ * the close gadget never reach it. */
+struct body_probe {
+    u32 calls;
+    int id;
+    u32 kind;
+    i32 x;
+    i32 y;
+};
+
+static void body_probe_fn(int id, u32 kind, i32 x, i32 y, void *ctx)
+{
+    struct body_probe *p = (struct body_probe *)ctx;
+
+    p->calls++;
+    p->id = id;
+    p->kind = kind;
+    p->x = x;
+    p->y = y;
+}
+
+static void test_intuition_body_input(void)
+{
+    struct body_probe probe;
+    struct input_pointer ev;
+    u32 drags;
+    i32 x = 0;
+    i32 y = 0;
+    u32 w = 0;
+    u32 h = 0;
+
+    memset(&probe, 0, sizeof(probe));
+    test_reset(1024, 768);
+    CHECK(intuition_open(100, 100, 300, 300, "One", "body") == 1);
+    CHECK(intuition_set_body_input(1, body_probe_fn, &probe) == 0);
+    CHECK(probe.calls == 0u);
+    /* A press inside the body arrives body-relative: (150, 200) is (48, 78)
+       inside a body that starts at (102, 122). */
+    move_cursor(150, 200);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(probe.calls == 1u);
+    CHECK(probe.id == 1);
+    CHECK(probe.kind == INTUITION_BODY_PRESS);
+    CHECK(probe.x == 48 && probe.y == 78);
+    /* Moves keep flowing to the handler while the press is held. */
+    move_cursor(170, 230);
+    pointer(&ev, 20, 30, 0x01u, 0x00u);
+    intuition_pointer_event(&ev);
+    CHECK(probe.calls == 2u);
+    CHECK(probe.kind == INTUITION_BODY_MOVE);
+    CHECK(probe.x == 68 && probe.y == 108);
+    /* The release closes the interaction. */
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(probe.calls == 3u);
+    CHECK(probe.kind == INTUITION_BODY_RELEASE);
+    CHECK(probe.x == 68 && probe.y == 108);
+    /* After the release a bare move is no longer forwarded. */
+    move_cursor(300, 300);
+    pointer(&ev, 130, 70, 0x00u, 0x00u);
+    intuition_pointer_event(&ev);
+    CHECK(probe.calls == 3u);
+    /* A title-bar press drags the window and never reaches the body. */
+    drags = intuition_drag_count();
+    move_cursor(200, 110);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(probe.calls == 3u);
+    move_cursor(220, 130);
+    pointer(&ev, 20, 20, 0x01u, 0x00u);
+    intuition_pointer_event(&ev);
+    CHECK(probe.calls == 3u);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(probe.calls == 3u);
+    CHECK(intuition_drag_count() == drags + 1u);
+    /* Moving the tile count on: the close gadget does not call the handler.
+       The title drag moved the window to (120, 120), so its close box is at
+       (400..412, 126..138). */
+    CHECK(intuition_window_rect(1, &x, &y, &w, &h) == 0);
+    CHECK(x == 120 && y == 120);
+    move_cursor(406, 132);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(probe.calls == 3u);
+    CHECK(intuition_window_count() == 0u);
+    /* A closed window leaves no stale body interaction behind. */
+    move_cursor(160, 210);
+    pointer(&ev, -200, 0, 0x00u, 0x00u);
+    intuition_pointer_event(&ev);
+    CHECK(probe.calls == 3u);
+    /* Clearing the handler restores a plain body press. */
+    CHECK(intuition_open(100, 100, 300, 300, "Two", "body") == 1);
+    CHECK(intuition_set_body_input(1, body_probe_fn, &probe) == 0);
+    CHECK(intuition_set_body_input(1, 0, 0) == 0);
+    move_cursor(150, 200);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(probe.calls == 3u);
+    CHECK(intuition_window_count() == 1u);
+    /* Unknown windows are refused instead of crashing. */
+    CHECK(intuition_set_body_input(99, body_probe_fn, &probe) == -1);
+}
 void test_intuition_functions(void)
 {
     printf("- intuition basics / clamping / limits\n");
@@ -1238,4 +1346,6 @@ void test_intuition_functions(void)
     test_intuition_front();
     printf("- intuition keyboard icon focus\n");
     test_intuition_icon_keys();
+    printf("- intuition body input\n");
+    test_intuition_body_input();
 }

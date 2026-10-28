@@ -149,9 +149,13 @@ both self-test outcomes.
   table since phase 6F, whose `make test-workbench-desk` and
   `make test-workbench-icons` gates check the icon frame, the selected frame,
   the drawer, the stacking-order title bars and a dragged tile in
-  `screendump`s, and since phase 6G the `System:` drawer scrolls its rows with
-  a scrollbar and reflows them when the window is resized, which
-  `make test-workbench-drawer` checks in `screendump`s).
+  `screendump`s, since phase 6G the `System:` drawer scrolls its rows with a
+  scrollbar and reflows them when the window is resized, which
+  `make test-workbench-drawer` checks in `screendump`s, and since phase 6H its
+  rows are click-selectable -- an amber `INTUITION_MENU_HIGHLIGHT_RGB` band on
+  the selected row -- and its scrollbar thumb can be dragged, through a generic
+  body-input hook, which `make test-workbench-select` checks in the same
+  `screendump`s).
 - Relative motion only, no acceleration curve, no wheel scrolling of the
   console, no click handling beyond recording the button mask.
 - The sprite is clipped at the screen edge; there is no wrap-around.

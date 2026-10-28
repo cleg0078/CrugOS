@@ -48,6 +48,10 @@ struct window {
        instead of the static body string. */
     void (*paint)(int id, i32 x, i32 y, u32 w, u32 h, void *ctx);
     void *paint_ctx;
+    /* Optional body input handler (phase 6H): a body press, the moves while
+       the button is held and the release, in body-relative coordinates. */
+    void (*body_input)(int id, u32 kind, i32 x, i32 y, void *ctx);
+    void *body_input_ctx;
 };
 
 static struct icon g_icons[INTUITION_MAX_ICONS];
@@ -91,6 +95,8 @@ static u32 g_gadget_clicks;
 static u64 g_close_count;
 static int g_gadget_win; /* window whose gadget is pressed, 0 when none */
 static int g_gadget;
+/* Phase 6H: the window whose body owns the current pointer press, or -1. */
+static int g_body_win = -1;
 
 static struct intuition_event g_events[INTUITION_EVENT_QUEUE];
 static u32 g_event_head;
@@ -518,25 +524,40 @@ static void win_draw_resize(struct window *w)
     fb_fill_rect((u32)(gx + 6), (u32)(gy + 6), 3u, 3u, INTUITION_FRAME_RGB);
 }
 
+/* The body rectangle of a window in screen coordinates: everything inside the
+   frame and below the title bar.  The painter, the body input handler and the
+   static text path all measure a body this way. */
+static void body_rect(const struct window *w, i32 *bx, i32 *by, u32 *bw,
+                      u32 *bh)
+{
+    *bx = w->x + (i32)INTUITION_BORDER;
+    *by = w->y + (i32)INTUITION_BORDER + (i32)INTUITION_TITLE_HEIGHT;
+    *bw = w->w - 2u * INTUITION_BORDER;
+    *bh = w->h - 2u * INTUITION_BORDER - INTUITION_TITLE_HEIGHT;
+}
+
 static void win_draw_body(struct window *w)
 {
-    u32 bx = (u32)w->x + INTUITION_BORDER;
-    u32 by = (u32)w->y + INTUITION_BORDER + INTUITION_TITLE_HEIGHT;
-    u32 bw = w->w - 2u * INTUITION_BORDER;
-    u32 bh = w->h - 2u * INTUITION_BORDER - INTUITION_TITLE_HEIGHT;
-    u32 line_y = by + 6u;
+    i32 bx;
+    i32 by;
+    u32 bw;
+    u32 bh;
+    u32 line_y;
     const char *line = w->body;
+
+    body_rect(w, &bx, &by, &bw, &bh);
+    line_y = (u32)by + 6u;
 
     if (bw == 0u || bh <= INTUITION_TITLE_HEIGHT) {
         return;
     }
-    fb_fill_rect(bx, by, bw, bh, INTUITION_WINDOW_RGB);
+    fb_fill_rect((u32)bx, (u32)by, bw, bh, INTUITION_WINDOW_RGB);
     if (w->paint) {
-        w->paint(w->id, (i32)bx, (i32)by, bw, bh, w->paint_ctx);
+        w->paint(w->id, bx, by, bw, bh, w->paint_ctx);
         win_draw_gadgets(w);
         return;
     }
-    while (line && *line && line_y + 16u <= by + bh) {
+    while (line && *line && line_y + 16u <= (u32)by + bh) {
         char text[48];
         u32 n = 0;
 
@@ -547,7 +568,7 @@ static void win_draw_body(struct window *w)
         if (*line == '\n') {
             line++;
         }
-        fb_draw_text(bx + 6u, line_y, text, INTUITION_BODY_TEXT_RGB,
+        fb_draw_text((u32)bx + 6u, line_y, text, INTUITION_BODY_TEXT_RGB,
                      INTUITION_WINDOW_RGB);
         line_y += 20u;
     }
@@ -1226,6 +1247,27 @@ static void press(i32 px, i32 py)
         intuition_redraw();
         return;
     }
+    /* Phase 6H: a window with a body input handler owns presses inside its
+       body, so a list can select a row and drag its own scrollbar. */
+    {
+        i32 bx;
+        i32 by;
+        u32 bw;
+        u32 bh;
+
+        body_rect(w, &bx, &by, &bw, &bh);
+        if (w->body_input && bw > 0u && bh > INTUITION_TITLE_HEIGHT &&
+            px >= bx && px < bx + (i32)bw && py >= by && py < by + (i32)bh) {
+            g_body_win = id;
+            if (g_reporting) {
+                kprintf("CRUGOS: wb window %d active\n", id);
+            }
+            w->body_input(id, INTUITION_BODY_PRESS, px - bx, py - by,
+                          w->body_input_ctx);
+            intuition_redraw();
+            return;
+        }
+    }
     if (py >= w->y + (i32)INTUITION_BORDER &&
         py < w->y + (i32)INTUITION_BORDER + (i32)INTUITION_TITLE_HEIGHT) {
         g_drag = id;
@@ -1244,6 +1286,26 @@ static void press(i32 px, i32 py)
 
 static void release(i32 px, i32 py)
 {
+    /* Phase 6H: finish a body interaction before any window or icon drag
+       branch can run; a body press never starts one of those. */
+    if (g_body_win >= 0) {
+        int id = g_body_win;
+        struct window *w = win_find(id);
+
+        g_body_win = -1;
+        if (w && w->body_input) {
+            i32 bx;
+            i32 by;
+            u32 bw;
+            u32 bh;
+
+            body_rect(w, &bx, &by, &bw, &bh);
+            w->body_input(id, INTUITION_BODY_RELEASE, px - bx, py - by,
+                          w->body_input_ctx);
+        }
+        intuition_redraw();
+        return;
+    }
     /* Phase 6F: ending an icon drag queues the new tile origin once. */
     if (g_icon_drag >= 0) {
         int index = g_icon_drag;
@@ -1371,6 +1433,24 @@ static void motion(i32 px, i32 py, i32 dx, i32 dy)
             g_gadget = -1;
             intuition_redraw();
         }
+        return;
+    }
+    /* Phase 6H: while a press sits inside a window body, every pointer move
+       belongs to that window's handler. */
+    if (g_body_win >= 0) {
+        struct window *w = win_find(g_body_win);
+        i32 bx;
+        i32 by;
+        u32 bw;
+        u32 bh;
+
+        if (!w || !w->body_input) {
+            g_body_win = -1;
+            return;
+        }
+        body_rect(w, &bx, &by, &bw, &bh);
+        w->body_input(g_body_win, INTUITION_BODY_MOVE, px - bx, py - by,
+                      w->body_input_ctx);
         return;
     }
     if (g_icon_drag >= 0 && (dx != 0 || dy != 0)) {
@@ -1521,6 +1601,25 @@ int intuition_set_paint(int id,
     }
     w->paint = fn;
     w->paint_ctx = ctx;
+    return 0;
+}
+
+/* Install a body input handler for one window.  Intuition.device keeps
+   delivering pointer reports to it until the button is released, so the
+   callee (a list painter in the Workbench) can select a row and drag its
+   scrollbar without the device knowing the body layout. */
+int intuition_set_body_input(int id,
+                             void (*fn)(int id, u32 kind, i32 x, i32 y,
+                                        void *ctx),
+                             void *ctx)
+{
+    struct window *w = win_find(id);
+
+    if (!w) {
+        return -1;
+    }
+    w->body_input = fn;
+    w->body_input_ctx = ctx;
     return 0;
 }
 

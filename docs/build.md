@@ -42,6 +42,7 @@ make test-workbench-keys   # resize a window by its grip and drive it from the k
 make test-workbench-desk   # select desktop objects and send a window to the back
 make test-workbench-icons  # drag a desktop icon, raise a window by its front gadget and drive the icons from the keyboard
 make test-workbench-drawer  # scroll, refresh and resize the System: drawer
+make test-workbench-select  # click drawer rows and drag its scrollbar
 make iso         # build a bootable hybrid UEFI ISO (build/<arch>/crugos.iso)
 make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
@@ -68,7 +69,7 @@ make test-crypt-keyboard  # type the passphrase on the PS/2 keyboard and boot
 make test-crypt-keyboard-wrong  # three wrong keyboard passphrases must lock the volume
 make crypt-run   # boot the encrypted disk in a QEMU window for real typing
 make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
-make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/USB HID keyboard and mouse descriptors and reports/pointer state/IPv4/TCP/UDP checksums/DHCP parsing/DNS/audio mixer, tone and PCM ring/framebuffer cursor/intuition windows, menus and gadgets, icon dragging, the send-to-front gadget and keyboard icon focus, the drawer viewport, scrollbar and refresh, 3075 checks
+make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/USB HID keyboard and mouse descriptors and reports/pointer state/IPv4/TCP/UDP checksums/DHCP parsing/DNS/audio mixer, tone and PCM ring/framebuffer cursor/intuition windows, menus and gadgets, icon dragging, the send-to-front gadget and keyboard icon focus, the drawer viewport, scrollbar and refresh, the drawer body-input handler, 3104 checks
 make disk        # build the GPT/ext4 test disk at build/<arch>/disk.img
 make raid-disks  # build the two GPT/ext4 RAID1 member disks
 make raid10-disks  # build the four GPT/ext4 RAID10 member disks
@@ -165,6 +166,11 @@ options` prints the complete resolved set (including paths derived from
 | `WB_DRAWER_ACTS` | `4` | drawer operations (three scrolls and one refresh) the gate performs and verifies |
 | `WB_DRAWER_FILL` | `24` | files `wb.fill=` creates in the root before the drawer opens, so the listing is longer than one screen |
 | `WB_DRAWER_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for `make test-workbench-drawer` |
+| `EXPECT_SELECT` | `no` | `yes` requires the `wb select mode` / `wb drawer selected` / `wb drawer scrollbar grabbed` / `wb drawer scrollbar to` / `wb select selftest ok` markers written by `make test-workbench-select` |
+| `WB_SELECT_WAIT` | `30` | seconds the select gate boots with `wb.wait=` so the mouse can be hotplugged late |
+| `WB_SELECT_ACTS` | `3` | actions (two row clicks and one scrollbar drag) the gate performs and verifies |
+| `WB_SELECT_FILL` | `24` | files `wb.fill=` creates in the root, so the drawer overflows its 11 rows and the click map and thumb geometry have room to diverge |
+| `WB_SELECT_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for `make test-workbench-select` |
 | `DEMO_DISPLAY` | `gtk` | QEMU display `make demo` opens (any `-display` value, for example `sdl` or `none`) |
 | `DEMO_HOLD_SEC` | `600` | seconds `make demo` keeps the desktop on screen before the guest exits by itself |
 | `DEMO_TIMEOUT_SEC` | `900` | wall-clock budget for the whole `make demo` boot |
@@ -587,6 +593,25 @@ reflow its rows (desktop `(16,32,48)` at (830,400) before, window body
 and `r` must print `wb drawer refreshed`. The gate requires exit status 33, the
 `drawer` markers (`EXPECT_DRAWER=yes`) and a clean `e2fsck`; it prints
 `ok: workbench drawer scrolling, refresh and reflow (exit 33)`.
+
+`make test-workbench-select` is gate 43 and proves the phase 6H drawer row
+selection and draggable scrollbar on that same setup, with
+[scripts/run-workbench-select.py](../scripts/run-workbench-select.py) in place of
+the drawer driver. It boots with `wb.enable=1 wb.wait=$(WB_SELECT_WAIT)
+wb.desk=1 wb.dr=1 wb.dsel=1 wb.fill=$(WB_SELECT_FILL) wb.acts=$(WB_SELECT_ACTS)`:
+the fill again creates `/f00`..`/f23`, and a double click on the `System:`
+volume opens the drawer at (560,60,360x260), a 356x236 body over 29 entries and
+11 rows. A `screendump` before the first click must show row 0 in the
+window-background colour `(8,16,24)`; a click at (600,136) selects row 2, so the
+band at (890,136) turns amber `(255,176,0)` while row 0 stays dark and the log
+prints `wb drawer selected '<name>' (index 2 of 29)`. The thumb press at
+(911,100) drags to (911,280), which repaints the body and reports
+`wb drawer scrollbar to (top 18 of 29)`, so row 2 is no longer in view; the
+click at (600,96) then selects the new row 0, index 18, and turns its band
+amber. The gate requires the `wb select selftest ok (2 select(s), 1 scrollbar
+drag(s))` line, exit status 33, the `select` marker in `boot-check.py`
+(`EXPECT_SELECT=yes`) and a clean `e2fsck`; it prints
+`ok: workbench drawer selection and scrollbar dragging (exit 33)`.
 
 ## Interactive demo
 
