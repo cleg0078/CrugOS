@@ -42,8 +42,9 @@ read the non-secret `net.tcp=` / `net.serve=` / `net.dns=` /
 `net.dns-tcp=` / `net.name=` tokens from the same field, phase 5A adds
 `usb.wait=` / `usb.keys=`, phase 5B adds `usb.mouse=` / `usb.moves=`, phase
 5C adds `audio.rate=` / `audio.volume=` / `audio.seconds=`, phase 5D adds
-`gfx.wait=` / `gfx.moves=`, and phase 6A adds `wb.enable=` / `wb.wait=` /
-`wb.drag=` / `wb.hold=`. A boot medium that ships no block device (the hybrid
+`gfx.wait=` / `gfx.moves=`, phase 6A adds `wb.enable=` / `wb.wait=` /
+`wb.drag=` / `wb.hold=`, and phase 6B adds `wb.menu=` / `wb.acts=`. A boot
+medium that ships no block device (the hybrid
 ISO) passes `storage=none`, which is the one token that changes the storage
 contract instead of adding work to it. The
 loader caps
@@ -123,8 +124,8 @@ post-snapshot allocations cannot push it over capacity.
    `gfx.wait=<seconds>` and `gfx.moves=<n>`: the boot prints
    `CRUGOS: gfx framebuffer absent` or
    `CRUGOS: gfx ready (1024x768, cursor at 512,384)`. `wb_cmdline` then reads
-   `wb.enable=`, `wb.wait=<seconds>`, `wb.drag=<n>` and `wb.hold=<seconds>`, and
-   `wb_init` builds the
+   `wb.enable=`, `wb.wait=<seconds>`, `wb.drag=<n>`, `wb.menu=<0|1>`,
+   `wb.acts=<n>` and `wb.hold=<seconds>`, and `wb_init` builds the
    desktop only when the token was supplied: it takes the framebuffer away from
    the text console and prints `CRUGOS: wb desktop ready (1024x768, 2
    window(s))`. Without the token the framebuffer console keeps its text mode
@@ -202,10 +203,11 @@ post-snapshot allocations cannot push it over capacity.
     otherwise; then the graphics check, which shows the cursor and waits for
     `gfx.moves=` pointer reports within `gfx.wait=` seconds when those tokens
     were supplied and is silent otherwise; then the Workbench check, which shows
-    the desktop and waits for `wb.drag=` title-bar drags within `wb.wait=`
-    seconds when `wb.enable=` enabled it, and is silent otherwise.
+    the desktop and waits for `wb.drag=` title-bar drags and, with `wb.menu=1`,
+    for `wb.acts=` menu, gadget and close actions within `wb.wait=` seconds when
+    `wb.enable=` enabled it, and is silent otherwise.
 14. `report_boot`, `storage_lock` (wipes the passphrase, the volume keys and
-    the bounce buffer), `CRUGOS: phase 6a boot ok`, then `wb_hold` (only when
+    the bounce buffer), `CRUGOS: phase 6b boot ok`, then `wb_hold` (only when
     `wb.hold=` was given: the guest stays alive with the desktop on screen until
     the deadline), `arch_exit_qemu(0x10)`.
 
@@ -427,9 +429,12 @@ CRUGOS: gfx selftest ok (3 move(s), buttons 0x00)
 CRUGOS: wb window 2 drag start (512, 312)   # only with wb.enable=1
 CRUGOS: wb window 2 drag to (570, 350)
 CRUGOS: wb window 2 moved to (570, 350)
-CRUGOS: wb selftest ok (1 drag(s))
+CRUGOS: wb menu 'Shell' open (window 2)     # only with wb.menu=1
+CRUGOS: wb menu 'Shell' selected ('New')
+CRUGOS: wb action 1 menu window 2 item 0
+CRUGOS: wb selftest ok (1 drag(s), 1 action(s))
 CRUGOS: selftest ok
-CRUGOS: phase 6a boot ok
+CRUGOS: phase 6b boot ok
 ```
 
 The `virtio : net eth0 mac ...` line, the lease, the ARP resolution, the echo
@@ -462,7 +467,11 @@ The `wb` lines appear only with `wb.enable=1`: `make test-workbench` boots that
 way, hotplugs a `usb-mouse` and drags a window by its title bar, so the log
 shows the desktop, the two demo windows, the drag lines and
 `CRUGOS: wb selftest ok`. The gate then checks the active title bar in a
-screendump, so a window that logs a move without repainting fails. `make demo`
+screendump, so a window that logs a move without repainting fails.
+`make test-workbench-menu` adds `wb.menu=1 wb.acts=4` to that command line and
+clicks menus, the `Run` gadget, the close gadget and a second menu, so the log
+carries the `wb menu ...` and `wb action N ...` lines on top of the desktop and
+window lines. `make demo`
 boots the same desktop interactively instead of headlessly: it passes
 `wb.enable=1 wb.wait=0 wb.hold=<seconds>`, so the log shows the desktop, the two
 windows, `CRUGOS: wb holding desktop for <seconds> s` and
@@ -492,13 +501,13 @@ replaced by the skip marker, and the USB device the firmware booted from shows
 up in the USB lines as an unsupported mass-storage function:
 
 ```
-CRUGOS: version 0.23.1
+CRUGOS: version 0.24.0
 CRUGOS: usb controller ready (xhci, 8 port(s))
 CRUGOS: usb device 46f4:0001 on port 1 (speed 4)
 CRUGOS: usb device class 8 on port 1 (unsupported)
 CRUGOS: storage skipped (storage=none)
 CRUGOS: selftest ok
-CRUGOS: phase 6a boot ok
+CRUGOS: phase 6b boot ok
 ```
 
 `kernel/core/report.c` prints the machine description between them: kernel

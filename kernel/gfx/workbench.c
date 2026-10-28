@@ -1,8 +1,10 @@
-/* Workbench desktop bring-up (phase 6A).
+/* Workbench desktop bring-up (phase 6A/6B).
    The desktop is a gate-only mode for now: wb.enable=1 takes the framebuffer
    away from the text console (which keeps writing to the serial port), opens
-   two windows through intuition.device, and waits for a title-bar drag so the
-   hotplug gate can prove the event path with a screendump comparison. */
+   two windows through intuition.device, gives them menus and a body gadget,
+   and either waits for a title-bar drag (wb.drag=) or for a sequence of menu,
+   gadget and close actions (wb.menu=1 wb.acts=) so the hotplug gate can prove
+   the event path with serial markers and screendump comparisons. */
 #include <crug/types.h>
 #include <crug/string.h>
 #include <crug/kernel.h>
@@ -22,6 +24,19 @@ static u32 g_wait_seconds;
 static int g_wait_given;
 static u32 g_want_drags;
 static u32 g_hold_seconds;
+static int g_menu_mode;
+static u32 g_want_actions;
+static u32 g_actions_seen;
+
+/* Menus of the active window are drawn in the screen-top menu bar. */
+static const struct intuition_menu wb_menus_top[2] = {
+    { "Workbench", 3u, { "About", "Info", "Quit" } },
+    { "Window", 2u, { "Close", "New" } },
+};
+static const struct intuition_menu wb_menus_shell[2] = {
+    { "Shell", 2u, { "New", "Close" } },
+    { "Workbench", 3u, { "About", "Info", "Quit" } },
+};
 
 static int wb_is_space(char c)
 {
@@ -86,6 +101,20 @@ static void wb_cmdline_token(const char *tok, usize len)
         }
         return;
     }
+    used = wb_prefix(tok, len, "wb.menu=");
+    if (used >= 0) {
+        if (wb_parse_u32(tok + used, len - (usize)used, &value) == 0) {
+            g_menu_mode = value ? 1 : 0;
+        }
+        return;
+    }
+    used = wb_prefix(tok, len, "wb.acts=");
+    if (used >= 0) {
+        if (wb_parse_u32(tok + used, len - (usize)used, &value) == 0) {
+            g_want_actions = value > WB_ACTS_MAX ? WB_ACTS_MAX : value;
+        }
+        return;
+    }
     used = wb_prefix(tok, len, "wb.hold=");
     if (used >= 0) {
         if (wb_parse_u32(tok + used, len - (usize)used, &value) == 0) {
@@ -141,8 +170,37 @@ static void wb_console_poll(void)
     gfx_pointer_poll();
 }
 
+/* Drain what intuition.device consumed: the gate counts the same actions the
+   device already validated, and prints them in a fixed numeric form. */
+static void wb_drain_events(void)
+{
+    struct intuition_event event;
+
+    while (intuition_event_poll(&event)) {
+        if (!g_reporting) {
+            continue;
+        }
+        if (event.type == INTUITION_EVENT_MENU) {
+            g_actions_seen++;
+            kprintf("CRUGOS: wb action %u menu window %d item %u\n",
+                    (unsigned)g_actions_seen, event.window,
+                    (unsigned)event.item);
+        } else if (event.type == INTUITION_EVENT_GADGET) {
+            g_actions_seen++;
+            kprintf("CRUGOS: wb action %u gadget window %d index %d\n",
+                    (unsigned)g_actions_seen, event.window, event.index);
+        } else if (event.type == INTUITION_EVENT_CLOSE) {
+            g_actions_seen++;
+            kprintf("CRUGOS: wb action %u close window %d\n",
+                    (unsigned)g_actions_seen, event.window);
+        }
+    }
+}
+
 int wb_init(void)
 {
+    int top;
+    int shell;
     u32 width = 0;
     u32 height = 0;
 
@@ -153,13 +211,16 @@ int wb_init(void)
         kprintf("CRUGOS: wb framebuffer absent\n");
         return -1;
     }
-    g_reporting = g_want_drags > 0u;
+    g_reporting = (g_want_drags > 0u || g_menu_mode) ? 1 : 0;
     fb_set_text_enabled(0);
     intuition_init();
     intuition_set_reporting(g_reporting);
-    intuition_open(80, 90, 360, 220, "Workbench",
-                   "CrugOS Workbench\nphase 6a\nsoftware rendered");
-    intuition_open(480, 300, 320, 200, "Shell", "4.OS\ncrugos>");
+    top = intuition_open(80, 90, 360, 220, "Workbench",
+                         "CrugOS Workbench\nphase 6b\nsoftware rendered");
+    shell = intuition_open(480, 300, 320, 200, "Shell", "4.OS\ncrugos>");
+    intuition_set_menus(top, wb_menus_top, 2u);
+    intuition_add_gadget(top, 12, 60, 96, 22, "Run");
+    intuition_set_menus(shell, wb_menus_shell, 2u);
     gfx_set_pointer_hook(wb_report_cursor);
     gfx_show(1);
     input_set_poll(wb_console_poll);
@@ -182,6 +243,7 @@ int wb_selftest(void)
 {
     u64 deadline;
     u32 want;
+    u32 want_actions;
 
     if (!g_enabled) {
         return 1;
@@ -190,27 +252,36 @@ int wb_selftest(void)
         return 1;
     }
     gfx_show(1);
-    /* wb.wait=0 turns the drag gate off: the interactive demo boots the
+    /* wb.wait=0 turns both gates off: the interactive demo boots the
        desktop and keeps it on screen for wb.hold= seconds instead. */
     if (g_wait_given && g_wait_seconds == 0u) {
         return 1;
     }
-    want = g_want_drags ? g_want_drags : 1u;
+    want = g_want_drags;
+    want_actions = g_menu_mode ? (g_want_actions ? g_want_actions : 1u) : 0u;
     deadline = timer_monotonic_ns() +
                (u64)(g_wait_seconds ? g_wait_seconds : 5u) * 1000000000ull;
-    while (intuition_drag_count() < (u64)want) {
+    while (intuition_drag_count() < (u64)want ||
+           g_actions_seen < want_actions) {
         /* input_poll() runs the console hook, which pumps the USB mouse and
            then drains the pointer state into intuition.device. */
         input_poll();
+        wb_drain_events();
         if (timer_monotonic_ns() >= deadline) {
-            kprintf("CRUGOS: wb pointer timeout (drag %u/%u)\n",
-                    (unsigned)intuition_drag_count(), (unsigned)want);
+            if (intuition_drag_count() < (u64)want) {
+                kprintf("CRUGOS: wb pointer timeout (drag %u/%u)\n",
+                        (unsigned)intuition_drag_count(), (unsigned)want);
+            } else {
+                kprintf("CRUGOS: wb action timeout (%u/%u)\n",
+                        (unsigned)g_actions_seen, (unsigned)want_actions);
+            }
             return 0;
         }
         cpu_wait_for_irq();
     }
-    kprintf("CRUGOS: wb selftest ok (%u drag(s))\n",
-            (unsigned)intuition_drag_count());
+    wb_drain_events();
+    kprintf("CRUGOS: wb selftest ok (%u drag(s), %u action(s))\n",
+            (unsigned)intuition_drag_count(), (unsigned)g_actions_seen);
     /* Keep the finished desktop on screen for a moment so the gate's last
        screendump does not race the rest of the boot to the exit. */
     deadline = timer_monotonic_ns() + 1500000000ull;
@@ -240,6 +311,7 @@ void wb_hold(void)
                (u64)g_hold_seconds * 1000000000ull;
     while (timer_monotonic_ns() < deadline) {
         input_poll();
+        wb_drain_events();
         cpu_wait_for_irq();
     }
     kprintf("CRUGOS: wb hold finished\n");

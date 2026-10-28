@@ -1,7 +1,8 @@
-/* Workbench desktop bring-up (phase 6A): opens the first windows on the
-   framebuffer, installs the intuition pointer hook and waits for a drag in
-   gate mode.  Disabled unless the loader command line carries wb.enable=1, so
-   a normal boot keeps the plain text console. */
+/* Workbench desktop bring-up (phase 6A/6B): opens the first windows on the
+   framebuffer, installs the intuition pointer hook, and waits either for a
+   pointer drag or for a sequence of menu, gadget and close actions in gate
+   mode.  Disabled unless the loader command line carries wb.enable=1, so a
+   normal boot keeps the plain text console. */
 #ifndef CRUG_WORKBENCH_H
 #define CRUG_WORKBENCH_H
 
@@ -10,6 +11,7 @@
 
 #define WB_WAIT_MAX 120u
 #define WB_DRAG_MAX 4u
+#define WB_ACTS_MAX 8u
 #define WB_HOLD_MAX 3600u
 
 int wb_init(void);

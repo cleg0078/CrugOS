@@ -26,7 +26,9 @@ controller and a pointer device; phase 5C adds `audio.device`, a per-channel
 mixer and a USB Audio Class driver with an isochronous xHCI path; phase 5D adds
 `gfx.device`, a pointer-driven sprite composited onto the GOP framebuffer
 console; phase 6A adds `intuition.device`, a software window manager of four
-stacked, draggable windows, and the two-window Workbench desktop. Release
+stacked, draggable windows, and the two-window Workbench desktop; phase 6B adds
+menu bars with popups, body gadgets, a close gadget and a typed event queue.
+Release
 `v0.23.1` adds packaging rather than a spec phase: `make iso` produces a hybrid
 UEFI ISO that boots from a USB stick or a CD-ROM, with the kernel's
 `storage=none` token so an image with no root filesystem still passes the boot
@@ -535,6 +537,41 @@ change for memory management, storage, SMP or drivers.
   `make test-host` reports 2487 checks.
 - All 35 gates pass at `v0.23.0`.
 
+## Phase 6B - menus and gadgets (done)
+
+- `include/crug/intuition.h` gained the 6B limits and API: two menus of six items,
+  four gadgets, a 16-entry event queue, the menu-bar height and the seven menu
+  colours, plus `intuition_set_menus()`, `intuition_add_gadget()`,
+  `intuition_event_poll()` and the `menu_open` / `menu_hover` / counters.
+- `kernel/gfx/intuition.c` draws an 18-pixel menu bar per window, opening a
+  150-pixel popup at (`strip_x`, 18) with 18-pixel rows, highlights the row under
+  the pointer and queues a `MENU` event on selection. Window bodies now hit-test
+  gadgets in insertion order, a press starts a gadget and a release inside the
+  same gadget queues `GADGET`; a 12x12 close gadget at the top right of the
+  title bar closes the window on press and queues `CLOSE`. Window presses queue
+  `ACTIVATE` and drags queue `DRAG`, so the queue carries every interaction, not
+  only the ones that need a decision.
+- Press precedence is popup row, then menu bar, then close gadget, then body
+  gadget, then title-bar drag; a press anywhere in the popup that is not on a row
+  dismisses it. `intuition_event_poll()` drains the FIFO, which drops the newest
+  event when full and counts the drop in `intuition_event_dropped()`.
+- `kernel/gfx/workbench.c` reads `wb.menu=` and `wb.acts=` on top of the 6A
+  tokens and drains the queue into `CRUGOS: wb action N menu|gadget|close ...`
+  lines. The two demo windows carry `Workbench`/`Window` and
+  `Shell`/`Workbench` menus and window 1 a `Run` gadget, and `wb_selftest()` waits
+  for drags and actions before `CRUGOS: wb selftest ok (N drag(s), M action(s))`.
+- `make test-workbench-menu` boots `wb.enable=1 wb.wait=$(WB_MENU_WAIT)
+  wb.menu=1 wb.acts=$(WB_MENU_ACTS)`, hotplugs a `usb-mouse` and clicks
+  `scripts/run-workbench-menu.py` through a menu open, a hover (proved by a
+  screendump of the highlighted row), a selection, the `Run` gadget, the close
+  gadget and a second selection. Every pointer move is at most 100 pixels,
+  because QEMU splits a larger relative motion into 8-bit HID reports and the
+  guest drops some of them.
+- `tests/host/test_intuition.c` gained menu, gadget, close and event-queue
+  groups over the fake framebuffer, including the clamps, the popup dismissal and
+  the 20-click queue overflow. `make test-host` reports 2639 checks.
+- All 37 gates pass at `v0.24.0`.
+
 ## Bootable media - hybrid UEFI ISO (done, `v0.23.1`)
 
 - `kernel/fs/storage.c` gained the `storage=none` command-line token: every
@@ -583,8 +620,9 @@ change for memory management, storage, SMP or drivers.
 - USB HID devices beyond the boot keyboard, mouse and audio function (phase 5A
   delivered the xHCI controller and the keyboard, phase 5B the mouse, phase 5C
   `audio.device`, the mixer and the USB Audio Class driver, phase 5D the
-  pointer-driven cursor on the GOP framebuffer and phase 6A the intuition
-  desktop and window manager on top of it; phase 4A delivered the PS/2
+  pointer-driven cursor on the GOP framebuffer, phase 6A the intuition desktop
+  and window manager on top of it and phase 6B its menus, gadgets and event
+  queue; phase 4A delivered the PS/2
   console input step, phase
   4B the virtio-net/IPv4 slice, phase 4C the TCP/socket slice and phase 4D the
   DNS resolver).
@@ -593,9 +631,10 @@ change for memory management, storage, SMP or drivers.
   phase 4B-4D stack, richer socket semantics (bind, options, non-blocking, more
   than four sockets); IPv6, fragmentation and reassembly.
 - Software framebuffer -> VirtIO-GPU -> vendor GPU drivers, starting with
-  console scrollback in a Workbench window, click handling beyond the title bar
-  drag, gadgets and window resizing on top of the phase 6A desktop, the phase 5D
-  cursor, the phase 5B pointer stack and the phase 5C audio stack.
+  console scrollback in a Workbench window, keyboard navigation and sub-menus on
+  top of the phase 6B menu bar, window resizing and a gadget toolkit on top of
+  its event queue, the phase 5D cursor, the phase 5B pointer stack and the
+  phase 5C audio stack.
 - Workbench userspace, `.app` bundles, `.crpkg` packages, capability model.
 - POSIX-like layer: 64-bit UID/GID, ACLs, process groups, signals.
 

@@ -1,6 +1,6 @@
 # Building CrugOS
 
-This document describes the phase 6A build system: how the kernel, the UEFI
+This document describes the phase 6B build system: how the kernel, the UEFI
 loader, the host crypto tool, the test disk images and the bootable hybrid ISO
 are built, which invariants the link must preserve, and how to diagnose the
 failure modes that are specific to this toolchain.
@@ -36,6 +36,7 @@ make test-usb-mouse    # hotplug a USB mouse into xHCI and move the pointer
 make test-audio        # stream PCM to a USB Audio Class device through the mixer
 make test-gfx          # move a hotplugged USB mouse and verify the framebuffer cursor
 make test-workbench    # drag a window on the software-rendered desktop
+make test-workbench-menu  # open menus, select items and click gadgets
 make iso         # build a bootable hybrid UEFI ISO (build/<arch>/crugos.iso)
 make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
@@ -62,7 +63,7 @@ make test-crypt-keyboard  # type the passphrase on the PS/2 keyboard and boot
 make test-crypt-keyboard-wrong  # three wrong keyboard passphrases must lock the volume
 make crypt-run   # boot the encrypted disk in a QEMU window for real typing
 make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
-make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/USB HID keyboard and mouse descriptors and reports/pointer state/IPv4/TCP/UDP checksums/DHCP parsing/DNS/audio mixer, tone and PCM ring/framebuffer cursor/intuition windows
+make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/USB HID keyboard and mouse descriptors and reports/pointer state/IPv4/TCP/UDP checksums/DHCP parsing/DNS/audio mixer, tone and PCM ring/framebuffer cursor/intuition windows, menus and gadgets
 make disk        # build the GPT/ext4 test disk at build/<arch>/disk.img
 make raid-disks  # build the two GPT/ext4 RAID1 member disks
 make raid10-disks  # build the four GPT/ext4 RAID10 member disks
@@ -134,6 +135,10 @@ options` prints the complete resolved set (including paths derived from
 | `WB_DRAG` | `1` | title-bar drags `make test-workbench` performs and verifies |
 | `WB_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for `make test-workbench` |
 | `WB_QEMU_EXTRA` | `-device qemu-xhci,id=xhci` | QEMU arguments `make test-workbench` boots with (the gate adds its own `-qmp` socket) |
+| `EXPECT_MENU` | `no` | `yes` requires the `wb menu` / `wb gadget` / `wb action` / `wb selftest ok` markers written by `make test-workbench-menu` |
+| `WB_MENU_WAIT` | `30` | seconds the menu gate boots with `wb.wait=` so the mouse can be hotplugged late |
+| `WB_MENU_ACTS` | `4` | menu, gadget and close actions the menu gate performs and verifies |
+| `WB_MENU_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for `make test-workbench-menu` |
 | `DEMO_DISPLAY` | `gtk` | QEMU display `make demo` opens (any `-display` value, for example `sdl` or `none`) |
 | `DEMO_HOLD_SEC` | `600` | seconds `make demo` keeps the desktop on screen before the guest exits by itself |
 | `DEMO_TIMEOUT_SEC` | `900` | wall-clock budget for the whole `make demo` boot |
@@ -461,6 +466,23 @@ markers (`EXPECT_WB=yes`) and a clean `e2fsck`; it prints
 `ok: workbench title-bar drag (1 drag(s), window 2 at (570, 350), exit 33)`.
 See [workbench.md](workbench.md).
 
+`make test-workbench-menu` proves the phase 6B interaction layer on the same
+machine setup, with [scripts/run-workbench-menu.py](../scripts/run-workbench-menu.py)
+in place of the drag driver. It boots with
+`wb.enable=1 wb.wait=$(WB_MENU_WAIT) wb.menu=1 wb.acts=$(WB_MENU_ACTS)`, so the
+desktop also waits for the programmed number of menu and gadget actions. The
+script clicks window 2's `Shell` strip, takes a `screendump` to prove the popup
+row under the pointer is highlighted amber while the next row keeps the menu
+grey, selects `New`, clicks the `Run` gadget of window 1, closes window 2 with
+its close gadget (verified by two pixels of a second `screendump`: desktop
+background where the window was, white frame of window 1), then opens window
+1's `Workbench` strip and selects `Quit`. It requires exit status 33,
+`CRUGOS: wb selftest ok (N drag(s), M action(s))` with at least one action, the
+`menu` markers (`EXPECT_MENU=yes`) and a clean `e2fsck`; it prints
+`ok: workbench menu and gadget actions (4 action(s), exit 33)`. Every pointer
+move is issued in steps of at most 100 pixels, because QEMU splits a larger
+relative motion into 8-bit HID reports and the guest drops some of them.
+
 ## Interactive demo
 
 `make demo` is not a gate but a way to watch the system: it boots
@@ -469,12 +491,12 @@ already plugged in) into a real `DEMO_DISPLAY` window (GTK by default) instead
 of the headless gates. The command line carries
 `wb.enable=1 wb.wait=0 wb.hold=$(DEMO_HOLD_SEC)`:
 
-- `wb.enable=1` hands the framebuffer to the phase 6A desktop and opens the two
+- `wb.enable=1` hands the framebuffer to the phase 6B desktop and opens the two
   demo windows.
 - `wb.wait=0` turns the desktop self-test into a no-op, so the demo does not
   require a title-bar drag before the gate marker; the interactive desktop is
   the point, not the self-test.
-- `wb.hold=<seconds>` keeps the guest alive after `CRUGOS: phase 6a boot ok`
+- `wb.hold=<seconds>` keeps the guest alive after `CRUGOS: phase 6b boot ok`
   (`wb_hold()`), polling input once per timer tick, so the window stays on
   screen until the deadline or until you close it.
 

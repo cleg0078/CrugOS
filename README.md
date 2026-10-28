@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 6A Workbench desktop (`v0.23.1`)
+## Status: phase 6B menus and gadgets (`v0.24.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -22,9 +22,11 @@ adds a caching DNS stub resolver with a TCP fallback and a name syscall, phase
 into the running guest, phase 5B adds a USB HID boot mouse whose reports become
 pointer events, phase 5C adds a USB Audio Class path with a PCM ring and a
 per-channel mixer, phase 5D adds a pointer-driven cursor composited onto the
-GOP framebuffer console, and phase 6A adds the first Workbench slice -- a
-software desktop of intuition windows on that same framebuffer. Release
-`v0.23.1` makes that tree bootable media: `make iso` writes a hybrid UEFI ISO
+GOP framebuffer console, phase 6A adds the first Workbench slice -- a software
+desktop of intuition windows on that same framebuffer -- and phase 6B gives it
+the Intuition interaction model: a shared menu bar with popup menus, gadgets
+inside a window body, the close gadget and a typed event queue. Release
+`v0.23.1` made that tree bootable media: `make iso` writes a hybrid UEFI ISO
 that boots from a USB stick or a CD-ROM, with no disk image and no test
 tokens baked in.
 
@@ -429,11 +431,28 @@ Phase 6A starts the Workbench: a small software window manager in the kernel.
   an `input.device` poll hook that pumps the USB stack, and `wb_selftest()` waits
   for `wb.drag=` title-bar drags within `wb.wait=` seconds. Without the token no
   boot changes at all;
+- phase 6B adds the Intuition menus and gadgets: `intuition_set_menus()` gives a
+  window a strip menu bar (the first window carries `Workbench` and `Window`, the
+  second `Shell` and `Workbench`), a press on a strip opens its popup below it,
+  a hover highlights the row under the pointer and a press on a row selects it;
+  `intuition_add_gadget()` places a body-relative rectangle such as the `Run` and
+  `Stop` gadgets of the first window inside that body; and the 12x12 close
+  gadget at the right end of every title bar closes its window. Every
+  interaction queues a typed `struct intuition_event` (`ACTIVATE`, `CLOSE`,
+  `GADGET`, `MENU`, `DRAG`) that `intuition_event_poll()` drains; the queue holds
+  16 events and counts the ones it had to drop. `wb.menu=1 wb.acts=<n>` make the
+  resident drive a scripted sequence and print one `CRUGOS: wb action N ...`
+  line per event;
 - `make test-workbench` boots `usb=off,i8042=off` with `qemu-xhci`, hotplugs a
   `usb-mouse`, drags window 2 by its title bar with QMP motion events and reads a
   `screendump`: the active title bar must be at the new origin and the old one
   must be idle, so a window that logs a move without drawing it fails. See
   [workbench.md](docs/workbench.md).
+- `make test-workbench-menu` drives the 6B desktop the same way: it opens the
+  `Shell` menu, checks the highlighted row pixel by pixel, selects an item,
+  clicks the `Run` gadget, closes window 2 through its close gadget, opens the
+  `Workbench` menu and selects `Quit`, then requires four action lines, the menu
+  markers and a 33 exit status;
 - `make demo` boots that same desktop in a real QEMU window instead of a
   headless gate: `DEMO_QEMU_EXTRA` plugs a `usb-kbd` and a `usb-mouse` into the
   xHCI controller, `DEMO_DISPLAY` (GTK) opens the window, and the command line
@@ -449,9 +468,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.23.0 (phase 6a) -- Amiga-inspired microkernel bring-up
+CrugOS 0.24.0 (phase 6b) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.23.0
+CRUGOS: version 0.24.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -511,7 +530,7 @@ heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
 boot   : pmm=28552 us cpu=438 us vm=626 us traps=360 us timer=65357 us heap=60 us storage=94487 us sched=354 us syscall=122 us total=190359 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase 6a boot ok
+CRUGOS: phase 6b boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -708,12 +727,13 @@ make test-usb-mouse    # hotplug a USB mouse into xHCI and move the pointer
 make test-audio        # stream PCM to a USB Audio Class device through the mixer
 make test-gfx          # move a hotplugged USB mouse and verify the framebuffer cursor
 make test-workbench    # drag a window on the software-rendered desktop
+make test-workbench-menu  # open menus, select items and click gadgets
 make iso         # build a bootable hybrid UEFI ISO (build/x86_64/crugos.iso)
 make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
 make usb         # write the ISO to a USB block device (USB_DEV=/dev/sdX)
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
-make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows)
+make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows/menus/gadgets)
 make check-disk  # e2fsck + persisted-file checks on the latest test disk
 make disk        # generate the GPT/ext4 test disk
 make raid-disks  # generate the two RAID1 member disks
@@ -737,9 +757,11 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `EXPECT_AVX2`, `EXPECT_RAID`, `EXPECT_NVME`, `EXPECT_REBUILD`, `EXPECT_AHCI`,
 `EXPECT_CRYPT`, `EXPECT_AES`, `EXPECT_NET`, `EXPECT_TCP`, `EXPECT_DNS`,
 `EXPECT_USB`, `EXPECT_MOUSE`, `EXPECT_AUDIO`, `EXPECT_GFX`, `EXPECT_WB`,
+`EXPECT_MENU`,
 `AUDIO_RUN_TIMEOUT_SEC`, `AUDIO_QEMU_EXTRA`, `GFX_WAIT`, `GFX_MOVES`,
 `GFX_RUN_TIMEOUT_SEC`, `GFX_QEMU_EXTRA`, `WB_WAIT`, `WB_DRAG`,
-`WB_RUN_TIMEOUT_SEC`, `WB_QEMU_EXTRA`, `DEMO_DISPLAY`, `DEMO_HOLD_SEC`,
+`WB_RUN_TIMEOUT_SEC`, `WB_QEMU_EXTRA`, `WB_MENU_WAIT`, `WB_MENU_ACTS`,
+`WB_MENU_RUN_TIMEOUT_SEC`, `DEMO_DISPLAY`, `DEMO_HOLD_SEC`,
 `DEMO_TIMEOUT_SEC`, `DEMO_CMDLINE`, `DEMO_MACHINE_EXTRA`, `DEMO_QEMU_EXTRA`,
 `ISO_IMAGE`, `ISO_STAGE`, `ISO_FAT_IMG`, `ISO_SIZE_MB`, `ISO_VOLID`,
 `ISO_CMDLINE`, `ISO_DATE`, `ISO_RUN_TIMEOUT_SEC`, `EXPECT_ISO`, `ISO_IMG`,
@@ -767,7 +789,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/input/` | `input.device`: set-1 scancode decoder, the console byte queue and the pointer state |
 | `kernel/audio/` | `audio.device` PCM ring, the per-channel mixer and the tone generator |
 | `kernel/net/` | `net.device`, Ethernet/ARP/IPv4/ICMP/UDP, TCP, the DHCP client and the DNS resolver |
-| `kernel/gfx/` | `gfx.device` (the pointer-driven framebuffer cursor) and `intuition.device` with the phase 6A desktop |
+| `kernel/gfx/` | `gfx.device` (the pointer-driven framebuffer cursor) and `intuition.device` with the phase 6A desktop and its phase 6B menus, gadgets and event queue |
 | `kernel/mm/` | physical allocator, W^X page tables, kernel heap |
 | `kernel/block/` | block-device registry, partitions, bounds checks, RAID1/RAID10, boot-time rebuild and the AES-256-XTS `crypt.device` |
 | `kernel/fs/` | GPT, writable checksummed ext4, checksummed JBD2 journal and the storage boot policy (including the console passphrase prompt) |
@@ -845,13 +867,15 @@ from a PCM ring, gated with a hermetic QEMU audio function; phase 5D added
 around its text, gated by comparing QEMU screendumps against the guest's own
 coordinates; phase 6A added `intuition.device`, a software window manager of
 four stacked, draggable windows on that framebuffer, and the gated two-window
-desktop bring-up. Remaining phase 3B work is
+desktop bring-up; phase 6B added strip menus with popup selection, body gadgets,
+the close gadget and the typed event queue the shell will consume. Remaining
+phase 3B work is
 online RAID rebuild, hot spare, scrub and a write-intent bitmap, RAID below
 encryption, a redundant ESP, TPM/keyfile keyslots and USB storage; phase 4
 continues with framebuffer (GOP) console input and virtual terminals, plus a
 routing table and richer resolver features on top of the phase 4B-4D stack;
-the next step is Workbench userspace: gadgets, a shell window and console
-scrollback on top of the phase 6A desktop. Later phases cover
+the next step is Workbench userspace: a shell window and console scrollback on
+top of the phase 6B desktop. Later phases cover
 USB storage, graphics, Workbench userspace, SMP/IOMMU and virtualisation. See
 [docs/roadmap.md](docs/roadmap.md) for the full sequence and the known
 specification gaps (Crug syntax, cross-architecture compilers and the OVMF

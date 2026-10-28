@@ -27,6 +27,7 @@
 #   make test-audio  stream PCM to a USB Audio Class device through the mixer
 #   make test-gfx    move a hotplugged USB mouse and verify the framebuffer cursor
 #   make test-workbench  drag a window on the software-rendered desktop
+#   make test-workbench-menu  click menus and gadgets on the Workbench desktop
 #   make crypt-disk  build the AES-256-XTS crypt test disk
 #   make test-crypt  boot from an encrypted root and verify the disk
 #   make test-crypt-recovery  unlock the encrypted root with the recovery keyslot
@@ -89,6 +90,7 @@ EXPECT_MOUSE ?= no
 EXPECT_AUDIO ?= no
 EXPECT_GFX ?= no
 EXPECT_WB ?= no
+EXPECT_MENU ?= no
 
 # QEMU / firmware options.
 MEMORY_MB ?= 512
@@ -121,6 +123,9 @@ WB_WAIT ?= 30
 WB_DRAG ?= 1
 WB_RUN_TIMEOUT_SEC ?= 240
 WB_QEMU_EXTRA ?= -device qemu-xhci,id=xhci
+WB_MENU_WAIT ?= 30
+WB_MENU_ACTS ?= 4
+WB_MENU_RUN_TIMEOUT_SEC ?= 240
 
 # Interactive demo (make demo): a real QEMU window with a USB keyboard and
 # mouse, the Workbench desktop and a hold so the window stays open.
@@ -255,7 +260,7 @@ HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
         test-crypt-prompt test-crypt-prompt-wrong test-crypt-prompt-timeout \
         test-crypt-keyboard test-crypt-keyboard-wrong crypt-run test-net test-tcp \
         test-net-dns test-usb-hotplug test-usb-mouse test-audio test-gfx \
-        test-workbench iso check-iso test-iso usb \
+        test-workbench test-workbench-menu iso check-iso test-iso usb \
         crash-disk \
         check-disk size check-efi repro test-host preflight version options clean distclean help
 
@@ -560,6 +565,21 @@ test-workbench: esp
 	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" no no no no no any no no no no no no no yes
 	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 
+# Menu gate: the guest boots with wb.menu=1, opens its menus and gadgets and
+# waits for a number of actions; the driver hotplugs a usb-mouse over QMP, opens
+# a menu, hovers an item, selects it, clicks a gadget, closes a window with its
+# close gadget and selects another menu item. Screendumps prove the popup
+# highlight and that the closed window area went back to the desktop.
+test-workbench-menu: esp
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(PYTHON) scripts/run-workbench-menu.py --repo $(CURDIR) \
+		--disk $(abspath $(DISK_IMG)) --serial-log $(abspath $(SERIAL_LOG)) \
+		--exit-code $(abspath $(QEMU_EXIT)) --acts $(WB_MENU_ACTS) \
+		--wb-wait $(WB_MENU_WAIT) --run-timeout $(WB_MENU_RUN_TIMEOUT_SEC) \
+		--qemu-extra "$(WB_QEMU_EXTRA)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" no no no no no any no no no no no no no no yes
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
 test:
 	$(Q)rm -f $(DISK_IMG)
 	$(Q)$(MAKE) --no-print-directory run
@@ -770,6 +790,10 @@ options:
 	@printf '  %-16s %s\n' WB_DRAG "$(WB_DRAG)"
 	@printf '  %-16s %s\n' WB_RUN_TIMEOUT_SEC "$(WB_RUN_TIMEOUT_SEC)"
 	@printf '  %-16s %s\n' WB_QEMU_EXTRA "$(WB_QEMU_EXTRA)"
+	@printf '  %-16s %s\n' EXPECT_MENU "$(EXPECT_MENU)"
+	@printf '  %-16s %s\n' WB_MENU_WAIT "$(WB_MENU_WAIT) (seconds)"
+	@printf '  %-16s %s\n' WB_MENU_ACTS "$(WB_MENU_ACTS)"
+	@printf '  %-16s %s\n' WB_MENU_RUN_TIMEOUT_SEC "$(WB_MENU_RUN_TIMEOUT_SEC)"
 	@printf '  %-16s %s\n' MEMORY_MB "$(MEMORY_MB)"
 	@printf '  %-16s %s\n' SMP "$(SMP)"
 	@printf '  %-16s %s\n' TIMEOUT_SEC "$(TIMEOUT_SEC)"

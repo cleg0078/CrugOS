@@ -102,8 +102,9 @@ static void test_intuition_basics(void)
     /* Every open and close repaints the desktop. */
     CHECK(g_fill_calls > 0u);
     /* Each open and close repaints every window bottom to top: 1+2+3+4 on the
-     * four opens, then 3 and 2 as the two windows close. */
-    CHECK(g_frame_calls == 15u);
+     * four opens, then 3 and 2 as the two windows close, so 15 window draws.
+     * Every draw frames the window and its close gadget (phase 6B). */
+    CHECK(g_frame_calls == 30u);
 }
 
 static void test_intuition_no_framebuffer(void)
@@ -243,6 +244,333 @@ static void test_intuition_text_draw(void)
     CHECK(g_fill_calls >= 3u); /* desktop, title bar, body */
 }
 
+/* A menu bar press opens the strip under the pointer, hover highlights a row,
+ * a press on a row selects it and queues a MENU event, and every table is
+ * clamped to the header limits.  Window 1 is at (100, 100) and 300x300, so its
+ * menu strips start at x = 4 ('Workbench', 88 px wide) and x = 92 ('Window').
+ * Item N of a popup is centred at y = 29 + 18 * N. */
+static void test_intuition_menus(void)
+{
+    static const struct intuition_menu menus[2] = {
+        {"Workbench", 3u, {"About", "Info", "Quit"}},
+        {"Window", 2u, {"Close", "New"}},
+    };
+    /* Nine items and five menus are clamped to the INTUITION_MAX_* limits. */
+    static const struct intuition_menu big[2] = {
+        {"Big", 9u, {"a", "b", "c", "d", "e", "f"}},
+        {"More", 2u, {"x", "y"}},
+    };
+    /* A table entry with no title ends the table instead of being drawn. */
+    static const struct intuition_menu untitled[2] = {
+        {"One", 1u, {"a"}},
+        {NULL, 0u, {NULL}},
+    };
+    struct input_pointer ev;
+    struct intuition_event out;
+
+    test_reset(1024, 768);
+    CHECK(intuition_open(100, 100, 300, 300, "One", "body") == 1);
+    CHECK(intuition_open(480, 300, 320, 200, "Two", "body") == 2);
+    CHECK(intuition_set_menus(99, menus, 2u) == -1);
+    CHECK(intuition_set_menus(1, NULL, 2u) == -1);
+    CHECK(intuition_set_menus(1, menus, 2u) == 0);
+    CHECK(intuition_menu_open() == -1);
+    CHECK(intuition_menu_hover() == -1);
+    CHECK(intuition_menu_opens() == 0u);
+
+    /* Window 2 is active and has no menus: a press on the bar does nothing. */
+    move_cursor(30, 9);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_menu_open() == -1);
+    CHECK(intuition_menu_opens() == 0u);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+
+    /* Press on window 1's body: it activates (queued) and owns the bar. */
+    move_cursor(150, 250);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_active() == 1);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.type == INTUITION_EVENT_ACTIVATE);
+    CHECK(out.window == 1);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+
+    /* Pressing between the strips opens no menu. */
+    move_cursor(300, 9);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_menu_open() == -1);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+
+    /* The first strip opens the first menu. */
+    move_cursor(30, 9);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_menu_open() == 0);
+    CHECK(intuition_menu_opens() == 1u);
+    CHECK(intuition_menu_hover() == -1);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+
+    /* Hovering row 1 highlights it; row 1 is at y = 29 + 18 = 47. */
+    move_cursor(40, 47);
+    pointer(&ev, 10, 38, 0x00u, 0x00u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_menu_hover() == 1);
+    /* Moving off the popup clears the highlight. */
+    move_cursor(200, 400);
+    pointer(&ev, 160, 353, 0x00u, 0x00u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_menu_hover() == -1);
+    CHECK(intuition_menu_open() == 0);
+
+    /* A press on a row selects it, closes the popup and queues the event. */
+    move_cursor(40, 29);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_menu_open() == -1);
+    CHECK(intuition_menu_hover() == -1);
+    CHECK(intuition_action_count() == 1u);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.type == INTUITION_EVENT_MENU);
+    CHECK(out.window == 1);
+    CHECK(out.index == 0);
+    CHECK(out.item == 0u);
+    CHECK(intuition_event_poll(&out) == 0);
+    /* The release after the selection is consumed and does nothing. */
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_action_count() == 1u);
+
+    /* The second strip opens the second menu at x = 92. */
+    move_cursor(110, 9);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_menu_open() == 1);
+    CHECK(intuition_menu_opens() == 2u);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    move_cursor(110, 29);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_action_count() == 2u);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.index == 1);
+    CHECK(out.item == 0u);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+
+    /* Counts are clamped: five menus become two and nine items become six. */
+    CHECK(intuition_set_menus(2, big, 5u) == 0);
+    /* Window 2 is not active yet, so raise it before using its menu bar. */
+    move_cursor(600, 400);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_active() == 2);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.type == INTUITION_EVENT_ACTIVATE);
+    CHECK(out.window == 2);
+    CHECK(intuition_event_poll(&out) == 0);
+    move_cursor(30, 9);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_menu_open() == 0);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    /* Row 5 exists (the last of six): y = 29 + 5 * 18 = 119. */
+    move_cursor(30, 119);
+    pointer(&ev, 0, 0, 0x00u, 0x00u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_menu_hover() == 5);
+    /* Row 6 does not: rel = 117 >= 6 * 18, so the press dismisses instead. */
+    move_cursor(30, 137);
+    pointer(&ev, 0, 0, 0x00u, 0x00u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_menu_hover() == -1);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_menu_open() == -1);
+    CHECK(intuition_action_count() == 2u);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_active() == 2);
+
+    /* 'Big' is 3 chars, so 40 px: strip 1 ('More') runs x = 44..84. */
+    move_cursor(60, 9);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_menu_open() == 1);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_action_count() == 2u);
+
+    /* An untitled or empty entry ends the table: only one strip is left, so
+     * a press past it opens nothing instead of crashing on a NULL title. */
+    CHECK(intuition_set_menus(2, untitled, 2u) == 0);
+    move_cursor(110, 9);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_menu_open() == -1);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+}
+
+/* Gadgets are hit in screen coordinates, only count as clicked when the
+ * release happens inside the gadget, and every click queues a GADGET event.
+ * Window 1 is at (100, 100) with a 2 px border and a 20 px title, so a gadget
+ * at body-relative (12, 60) is screen (114, 182). */
+static void test_intuition_gadgets(void)
+{
+    struct input_pointer ev;
+    struct intuition_event out;
+
+    test_reset(1024, 768);
+    CHECK(intuition_open(100, 100, 300, 300, "One", "body") == 1);
+    CHECK(intuition_add_gadget(99, 12, 60, 96, 22, "Run") == -1);
+    CHECK(intuition_add_gadget(1, 12, 60, 0, 22, "Run") == -1);
+    CHECK(intuition_add_gadget(1, 12, 60, 96, 22, "Run") == 0);
+    CHECK(intuition_add_gadget(1, 12, 90, 96, 22, "Stop") == 1);
+    /* A gadget wider than the body is cut down to the body width. */
+    CHECK(intuition_add_gadget(1, 10, 120, 500, 22, "Wide") == 2);
+    CHECK(intuition_add_gadget(1, 10, 150, 96, 22, "Last") == 3);
+    CHECK(intuition_add_gadget(1, 10, 180, 96, 22, "Over") == -1);
+    CHECK(intuition_gadget_clicks() == 0u);
+
+    /* Press and release on Run: one click, one queued event. */
+    move_cursor(162, 193);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_gadget_clicks() == 0u);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_gadget_clicks() == 1u);
+    CHECK(intuition_action_count() == 1u);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.type == INTUITION_EVENT_GADGET);
+    CHECK(out.window == 1);
+    CHECK(out.index == 0);
+    CHECK(intuition_event_poll(&out) == 0);
+
+    /* Press on Run, move off it and release elsewhere: no click. */
+    move_cursor(162, 193);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    move_cursor(162, 300);
+    pointer(&ev, 0, 107, 0x00u, 0x00u);
+    intuition_pointer_event(&ev);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_gadget_clicks() == 1u);
+
+    /* Stop sits at body-relative y = 90, so screen (150, 220). */
+    move_cursor(150, 220);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_gadget_clicks() == 2u);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.index == 1);
+    CHECK(intuition_event_poll(&out) == 0);
+
+    /* A press outside every gadget is a body click and queues nothing. */
+    move_cursor(300, 400);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_gadget_clicks() == 2u);
+}
+
+/* The 12x12 close box at the right end of the title bar closes its window,
+ * queues a CLOSE event, counts as one action and hands activation back to the
+ * top remaining window.  Window 2 at (480, 300) and 320x200 puts it at
+ * (780, 306); window 1 at (100, 100) and 300x300 at (380, 106). */
+static void test_intuition_close_gadget(void)
+{
+    struct input_pointer ev;
+    struct intuition_event out;
+
+    test_reset(1024, 768);
+    CHECK(intuition_open(100, 100, 300, 300, "One", "body") == 1);
+    CHECK(intuition_open(480, 300, 320, 200, "Two", "body") == 2);
+    CHECK(intuition_active() == 2);
+
+    move_cursor(786, 312);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_close_count() == 1u);
+    CHECK(intuition_window_count() == 1u);
+    CHECK(intuition_window_rect(2, NULL, NULL, NULL, NULL) == -1);
+    CHECK(intuition_active() == 1);
+    CHECK(intuition_action_count() == 1u);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.type == INTUITION_EVENT_CLOSE);
+    CHECK(out.window == 2);
+    /* The release after the closing press does nothing. */
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_close_count() == 1u);
+    CHECK(intuition_event_poll(&out) == 0);
+
+    /* A press just outside the box starts a title-bar drag instead. */
+    move_cursor(370, 112);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_close_count() == 1u);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_drag_count() == 1u);
+    CHECK(intuition_window_count() == 1u);
+
+    /* Closing the last window leaves no active window and no window at all. */
+    move_cursor(386, 112);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_close_count() == 2u);
+    CHECK(intuition_window_count() == 0u);
+    CHECK(intuition_active() == -1);
+    CHECK(intuition_action_count() == 2u);
+}
+
+/* The queue is a 16-entry FIFO: actions keep counting after it fills, the
+ * extra events are dropped and reported, and polling drains in order. */
+static void test_intuition_event_queue(void)
+{
+    struct input_pointer ev;
+    struct intuition_event out;
+    u32 i;
+    u32 total = INTUITION_EVENT_QUEUE + 4u;
+
+    test_reset(1024, 768);
+    CHECK(intuition_open(100, 100, 300, 300, "One", "body") == 1);
+    CHECK(intuition_add_gadget(1, 12, 60, 96, 22, "Run") == 0);
+    for (i = 0; i < total; i++) {
+        move_cursor(162, 193);
+        pointer(&ev, 0, 0, 0x01u, 0x01u);
+        intuition_pointer_event(&ev);
+        pointer(&ev, 0, 0, 0x00u, 0x01u);
+        intuition_pointer_event(&ev);
+    }
+    CHECK(intuition_gadget_clicks() == total);
+    CHECK(intuition_action_count() == total);
+    CHECK(intuition_event_count() == INTUITION_EVENT_QUEUE);
+    CHECK(intuition_event_dropped() == total - INTUITION_EVENT_QUEUE);
+    for (i = 0; i < INTUITION_EVENT_QUEUE; i++) {
+        CHECK(intuition_event_poll(&out) == 1);
+        CHECK(out.type == INTUITION_EVENT_GADGET);
+        CHECK(out.window == 1);
+    }
+    CHECK(intuition_event_count() == 0u);
+    CHECK(intuition_event_poll(&out) == 0);
+}
+
 void test_intuition_functions(void)
 {
     printf("- intuition basics / clamping / limits\n");
@@ -257,4 +585,12 @@ void test_intuition_functions(void)
     test_intuition_close_during_drag();
     printf("- intuition text rendering calls\n");
     test_intuition_text_draw();
+    printf("- intuition menus / hover / selection\n");
+    test_intuition_menus();
+    printf("- intuition gadgets\n");
+    test_intuition_gadgets();
+    printf("- intuition close gadget\n");
+    test_intuition_close_gadget();
+    printf("- intuition event queue\n");
+    test_intuition_event_queue();
 }
