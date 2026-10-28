@@ -20,6 +20,7 @@ did not break a valid filesystem.
 """
 
 import argparse
+import re
 import shutil
 import struct
 import subprocess
@@ -54,8 +55,8 @@ CRC32C_POLY = 0x82F63B78
 
 PANIC_MARKERS = ("CRUGOS: panic", "trap   : page fault")
 MOUNT_MARKERS = ("CRUGOS: ext4 ready", "CRUGOS: storage ready")
+CONTROL_PHASE_RE = re.compile(r"CRUGOS: phase [0-9a-z]+ boot ok")
 CONTROL_MARKERS = (
-    "CRUGOS: phase h1 boot ok",
     "CRUGOS: ext4 ready",
     "CRUGOS: storage ready",
     "CRUGOS: writable storage ok",
@@ -325,6 +326,9 @@ def main():
                 return fail("case %s hit %r" % (name, marker) + chr(10) +
                             tail(text))
         if case["patch"] is None:
+            if not CONTROL_PHASE_RE.search(text):
+                return fail("control boot never printed the phase marker"
+                            + chr(10) + tail(text))
             for marker in CONTROL_MARKERS:
                 if marker not in text:
                     return fail("control boot never printed %r" % marker

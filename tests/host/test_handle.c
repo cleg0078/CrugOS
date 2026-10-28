@@ -4,16 +4,6 @@
 #include <crug/kernel.h>
 #include "test.h"
 
-/* process_init needs the kernel allocator; keep the host test freestanding. */
-static u8 g_process_store[8192];
-
-void *kzalloc(usize size)
-{
-    if (size > sizeof(g_process_store))
-        return 0;
-    return g_process_store;
-}
-
 void panic(const char *fmt, ...)
 {
     (void)fmt;

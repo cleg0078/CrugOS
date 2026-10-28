@@ -3,11 +3,6 @@
 #include <crug/argon2.h>
 #include <crug/string.h>
 
-/* The kernel page allocator is not linked into the host test binary;
- * argon2id_hash() is the only user and the tests call argon2id_hash_mem(). */
-u64 pmm_alloc_pages(u64 count) { (void)count; return 0; }
-void pmm_free_pages(u64 pa, u64 count) { (void)pa; (void)count; }
-
 static u8 workspace[128 * 1024];
 
 static usize hex_to_bytes(const char *hex, u8 *out, usize cap)

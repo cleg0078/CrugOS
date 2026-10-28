@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase H1 hardening pass 1 (`v0.31.0`)
+## Status: phase H2 hardened kernel heap (`v0.32.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -45,7 +45,9 @@ body-input hook that hands a window's own presses, motions and releases to a
 handler. Release `v0.23.1`
 made that tree bootable media: `make iso` writes a hybrid UEFI ISO
 that boots from a USB stick or a CD-ROM, with no disk image and no test
-tokens baked in.
+tokens baked in. Phase H1 hardened the boot path against crafted images, and
+phase H2 hardens the kernel heap with address-keyed page cookies, validated
+headers and a read-only integrity checker.
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -781,6 +783,55 @@ attacker can put there.
 - `make test-host` reports 3200 checks; the kernel is 239840 B (234 KiB) on
   disk and the load image 778018 B (759 KiB); all 44 gates pass.
 
+Phase H2 hardens the kernel heap itself: every structure the allocator walks is
+validated before it is trusted, and the kernel can be asked whether the heap is
+still consistent.
+
+- `kernel/mm/heap.c` and `include/crug/heap.h`: every slab page and every large
+  block header starts with a `u64` cookie keyed by the page address
+  (`HEAP_COOKIE_KEY 0x435255474f5348ull` XOR the page XOR `SLAB_COOKIE_SALT`
+  `0x534c4142ull` or `LARGE_COOKIE_SALT` `0x4c415247ull`), so a header forged at
+  the wrong address is rejected;
+- `struct slab_header` keeps its 64-byte footprint but is now checked field by
+  field: the cookie, the class index, the object counts, the used bitmap (no bit
+  past `objects`), every free-list entry (inside the page and unallocated), the
+  listed count against `free_count` and a cycle cap of `objects`. `kmalloc`
+  panics with `heap: corrupt slab header` or `heap: corrupt slab free list`
+  before following a bad pointer;
+- large blocks form a doubly linked list (`struct large_header` with `cookie`,
+  `size`, `pages`, `next`, `prev`) whose links and fields are validated;
+  `large_contains()` detects a pointer inside a block, so `free()` of an
+  interior large pointer panics with `heap: free of interior large pointer`;
+- `heap_check()` walks every slab class and the large list and returns one of
+  nine `HEAP_CHECK_*` codes (`heap_check_name()` prints `ok`, `slab cookie`, ...),
+  cross-checking `g_slab_pages`, `g_large_pages` and `g_large_bytes` against the
+  live structures; the walk masks interrupts with
+  `cpu_irq_save()`/`cpu_irq_restore()`;
+- `heap_stress(ops)` churns 55% allocations and 45% frees over up to 64 live
+  objects of 1..8000 bytes, tags and verifies every object, checks the heap
+  every 64 operations and ends with an exact `heap_used_bytes()` accounting
+  check (capped by `HEAP_STRESS_MAX` 200000); `heap_guard()` plants a bad
+  free-list link, a zeroed slab cookie and a zeroed large-block cookie, proves
+  `heap_check()` reports codes 5, 1 and 6, then repairs them;
+- `heap_cmdline()` parses `heap.stress=<1..200000>` and `heap.guard=1` right
+  after `heap_init()` in `kernel/core/main.c`; `heap_selftest()` prints
+  `CRUGOS: heap check ok (6 slab(s), 8 object(s), 1 large block(s))` and also
+  requires a freed 16-byte object to be reused at the same address;
+- `include/crug/cpu.h` gains a `CRUG_HOST_TEST` branch (`cpu_irq_save()` returns
+  `(1ull << 9)`, restore/disable are no-ops) so `kernel/mm/heap.c` compiles into
+  `tests/host`; `tests/host/test_heap.c` supplies a fake 2048-page 8 MiB `.bss`
+  arena with its own bitmap and mirrors the two kernel structs to corrupt real
+  metadata, covering every check code, the large-block free path,
+  `heap_stress(2000)`, `heap_guard()` and every `heap_check_name()` string. The
+  `pmm_alloc_pages`/`pmm_free_pages` and `kzalloc` stubs moved out of
+  `test_argon2.c` and `test_handle.c` into the new test, and `make test-host`
+  reports 3235 checks;
+- `make test-heap` is the 45th gate: it boots
+  `heap.stress=$(HEAP_STRESS_OPS) heap.guard=1` under a 240-second budget,
+  requires the stress, guard and check markers and a clean `e2fsck`; the kernel
+  is 244264 B (238 KiB) on disk and the load image 783106 B (764 KiB); all 45
+  gates pass.
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -789,9 +840,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.31.0 (phase h1) -- Amiga-inspired microkernel bring-up
+CrugOS 0.32.0 (phase h2) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.31.0
+CRUGOS: version 0.32.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -825,6 +876,7 @@ sched  : per-class run queues ready, boot thread id 0, idle id 1
 CRUGOS: sched ready
 CRUGOS: syscall ready
 trap   : breakpoint handled at rip=0x0000000000100e2b
+CRUGOS: heap check ok (6 slab(s), 8 object(s), 1 large block(s))
 CRUGOS: journal committed 1 block(s) in 1 descriptor(s)
 CRUGOS: journal selftest ok (1 blocks recovered)
 CRUGOS: writable storage ok
@@ -839,7 +891,7 @@ CRUGOS: tcp http served (72 bytes)
 CRUGOS: net selftest ok
 CRUGOS: gfx ready (1024x768, cursor at 512,384)
 CRUGOS: selftest ok
-kernel : 0x0000000000100000 size=234 KiB
+kernel : 0x0000000000100000 size=238 KiB
 boot   : cpu=0 acpi_rsdp=0x1f77e000 fdt=0x0 initrd=0x0
 memory : 36 regions, usable 474080 KiB (462 MiB)
 pmm    : total=118520 free=118462 bitmap=131072 B
@@ -851,7 +903,7 @@ heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
 boot   : pmm=28552 us cpu=438 us vm=626 us traps=360 us timer=65357 us heap=60 us storage=94487 us sched=354 us syscall=122 us total=190359 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase h1 boot ok
+CRUGOS: phase h2 boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -1056,6 +1108,7 @@ make test-workbench-icons  # drag a desktop icon, raise a window by its front ga
 make test-workbench-drawer  # scroll, refresh and resize the System: drawer
 make test-workbench-select  # click drawer rows and drag its scrollbar
 make test-hardening  # craft hostile superblock/inode/crypt images and boot them
+make test-heap   # corrupt the kernel heap and prove the integrity checker catches it
 make iso         # build a bootable hybrid UEFI ISO (build/x86_64/crugos.iso)
 make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
@@ -1086,7 +1139,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `EXPECT_CRYPT`, `EXPECT_AES`, `EXPECT_NET`, `EXPECT_TCP`, `EXPECT_DNS`,
 `EXPECT_USB`, `EXPECT_MOUSE`, `EXPECT_AUDIO`, `EXPECT_GFX`, `EXPECT_WB`,
 `EXPECT_MENU`, `EXPECT_SHELL`, `EXPECT_KEYS`, `EXPECT_DESK`, `EXPECT_ICONS`,
-`EXPECT_DRAWER`, `EXPECT_SELECT`,
+`EXPECT_DRAWER`, `EXPECT_SELECT`, `EXPECT_HEAP`,
 `AUDIO_RUN_TIMEOUT_SEC`, `AUDIO_QEMU_EXTRA`, `GFX_WAIT`, `GFX_MOVES`,
 `GFX_RUN_TIMEOUT_SEC`, `GFX_QEMU_EXTRA`, `WB_WAIT`, `WB_DRAG`,
 `WB_RUN_TIMEOUT_SEC`, `WB_QEMU_EXTRA`, `WB_MENU_WAIT`, `WB_MENU_ACTS`,
@@ -1096,7 +1149,8 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `WB_DESK_RUN_TIMEOUT_SEC`, `WB_ICONS_WAIT`, `WB_ICONS_ACTS`,
 `WB_ICONS_RUN_TIMEOUT_SEC`, `WB_DRAWER_WAIT`, `WB_DRAWER_ACTS`, `WB_DRAWER_FILL`,
 `WB_DRAWER_RUN_TIMEOUT_SEC`, `WB_SELECT_WAIT`, `WB_SELECT_ACTS`,
-`WB_SELECT_FILL`, `WB_SELECT_RUN_TIMEOUT_SEC`, `HARDEN_TIMEOUT_SEC`, `DEMO_DISPLAY`, `DEMO_HOLD_SEC`,
+`WB_SELECT_FILL`, `WB_SELECT_RUN_TIMEOUT_SEC`, `HARDEN_TIMEOUT_SEC`,
+`HEAP_STRESS_OPS`, `HEAP_RUN_TIMEOUT_SEC`, `DEMO_DISPLAY`, `DEMO_HOLD_SEC`,
 `DEMO_TIMEOUT_SEC`, `DEMO_CMDLINE`, `DEMO_MACHINE_EXTRA`, `DEMO_QEMU_EXTRA`,
 `ISO_IMAGE`, `ISO_STAGE`, `ISO_FAT_IMG`, `ISO_SIZE_MB`, `ISO_VOLID`,
 `ISO_CMDLINE`, `ISO_DATE`, `ISO_RUN_TIMEOUT_SEC`, `EXPECT_ISO`, `ISO_IMG`,
@@ -1135,7 +1189,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `tests/host/` | host unit tests for freestanding code |
 | `tools/` | host-side development tools (`gen-font.py`, `mkcrypt.c`, `gen-crc32c.py`) |
 | `docs/` | [build](docs/build.md), [boot](docs/boot.md), [storage](docs/storage.md), [checksums](docs/checksums.md), [crypto](docs/crypto.md), [input](docs/input.md), [network](docs/network.md),
-[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [USB/xHCI](docs/usb.md), [audio](docs/audio.md), [graphics](docs/gfx.md), [Workbench](docs/workbench.md), [bootable ISO](docs/iso.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
+[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [USB/xHCI](docs/usb.md), [audio](docs/audio.md), [graphics](docs/gfx.md), [Workbench](docs/workbench.md), [bootable ISO](docs/iso.md), [kernel heap](docs/heap.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
 
 ## Versioning
 

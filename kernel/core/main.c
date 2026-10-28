@@ -61,6 +61,7 @@ void kernel_main(const boot_info *bi)
     kprintf("CRUGOS: timer ready\n");
 
     heap_init();
+    heap_cmdline(bi);
     t.heap = arch_read_tsc();
     kprintf("CRUGOS: heap ready\n");
 

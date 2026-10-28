@@ -1,6 +1,6 @@
 # Roadmap
 
-The specification defines 44 phases/gates. Phase 0 established the smallest
+The specification defines 45 phases/gates. Phase 0 established the smallest
 end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
 phase 1 makes the kernel own physical memory, page tables, exceptions and
 timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
@@ -962,13 +962,65 @@ change for memory management, storage, SMP or drivers.
   crypto, storage, nvme, workbench and iso.
 - All 44 gates pass at `v0.31.0`.
 
-The next hardening steps are the trap policy and a per-CPU `rsp0` (report item
-3: a non-`#BP` exception still panics), the heap free-list and magic work
-(F7/F8), and host-side fuzzers for ext4, GPT and the crypt format. Those are
-prerequisites for ring 3: a DPL3 process would reach the syscall and trap paths
-that the crafted-image gate only exercises from ring 0, and several of the
-remaining Mediums become Critical once a hostile process can call them
+Phase H2 closed the heap free-list and magic work (report items F7/F8) with
+address-keyed page cookies, validated slab headers and a read-only integrity
+checker. The next hardening steps are the trap policy and a per-CPU `rsp0`
+(report item 3: a non-`#BP` exception still panics), EFI entropy, the AHCI
+timeout bounce reuse, and host-side fuzzers for ext4, GPT and the crypt format.
+Those are prerequisites for ring 3: a DPL3 process would reach the syscall and
+trap paths that the crafted-image gate only exercises from ring 0, and several
+of the remaining Mediums become Critical once a hostile process can call them
 directly.
+
+## Phase H2 - hardened kernel heap (done)
+
+- Phase H2 hardens the kernel heap in `kernel/mm/heap.c` after the H1 pass.
+  Before it, a slab page carried no cookie, the free list was trusted blindly,
+  large blocks were a singly linked list, and there was no way to ask whether
+  the heap was still consistent.
+- Every slab page and every large-block header starts with a `u64` cookie keyed
+  by the page address: `HEAP_COOKIE_KEY 0x435255474f5348ull` XOR the page XOR
+  `SLAB_COOKIE_SALT 0x534c4142ull` for slabs, and XOR
+  `LARGE_COOKIE_SALT 0x4c415247ull` for large blocks. A header forged at the
+  wrong address no longer matches.
+- `struct slab_header` keeps its 64-byte footprint and is validated field by
+  field: cookie, class index, object counts, used bitmap, every free-list entry
+  (inside the page and unallocated), the listed count against `free_count` and
+  a cycle cap of `objects`. `kmalloc` panics with
+  `heap: corrupt slab header` or `heap: corrupt slab free list`.
+- Large blocks form a doubly linked list (`struct large_header` with `cookie`,
+  `size`, `pages`, `next` and `prev`) whose links and fields are checked;
+  `large_contains()` turns a `free()` of an interior large pointer into the
+  panic `heap: free of interior large pointer`.
+- `heap_check()` walks every slab class and the large list and returns one of
+  nine `HEAP_CHECK_*` codes (`heap_check_name()` prints `ok`, `slab cookie`,
+  ...), cross-checking `g_slab_pages`, `g_large_pages` and `g_large_bytes`
+  against the live structures. It masks interrupts around the walk.
+- `heap_stress(ops)` churns 55% allocations and 45% frees over up to 64 live
+  objects of 1..8000 bytes, tags and verifies every object, checks the heap every
+  64 operations and ends with an exact `heap_used_bytes()` accounting check
+  (`HEAP_STRESS_MAX` 200000). `heap_guard()` plants a bad free-list link, a
+  zeroed slab cookie and a zeroed large-block cookie, proves `heap_check()`
+  reports codes 5, 1 and 6, then repairs them.
+- `heap_cmdline()` parses `heap.stress=<1..200000>` and `heap.guard=1` right
+  after `heap_init()`; `heap_selftest()` prints
+  `CRUGOS: heap check ok (6 slab(s), 8 object(s), 1 large block(s))` and
+  requires a freed 16-byte object to be reused at the same address.
+- `tests/host/test_heap.c` supplies a fake 2048-page 8 MiB `.bss` arena with
+  its own bitmap, mirrors the two kernel structs and covers every check code,
+  the large-block free path, `heap_stress(2000)`, `heap_guard()` and every
+  `heap_check_name()` string; the `pmm_alloc_pages`/`pmm_free_pages` and
+  `kzalloc` stubs moved out of `test_argon2.c` and `test_handle.c`.
+  `make test-host` reports 3235 checks.
+- `make test-heap` is the 45th gate: it boots
+  `heap.stress=$(HEAP_STRESS_OPS) heap.guard=1` under `HEAP_RUN_TIMEOUT_SEC`
+  (240 s), requires the stress, guard and check markers and a clean `e2fsck`,
+  and `make size` reports a 244264 B (238 KiB) file and a 783106 B (764 KiB)
+  load image. `HEAP_STRESS_OPS` defaults to 4000 and `EXPECT_HEAP` gates the
+  markers.
+- docs: `docs/heap.md` plus README, roadmap, versioning, build, boot, hardening,
+  workbench and iso.
+- All 45 gates pass at `v0.32.0`.
 
 ## Bootable media - hybrid UEFI ISO (done, `v0.23.1`)
 

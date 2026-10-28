@@ -11,7 +11,7 @@ usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE \
     [EXPECT_AHCI [EXPECT_CRYPT [EXPECT_AES [EXPECT_NET [EXPECT_TCP \
     [EXPECT_DNS [EXPECT_USB [EXPECT_MOUSE [EXPECT_AUDIO \
     [EXPECT_GFX [EXPECT_WB [EXPECT_MENU [EXPECT_SHELL [EXPECT_KEYS [EXPECT_DESK \
-    [EXPECT_ICONS [EXPECT_DRAWER]]]]]]]]]]]]]]]]]]]]]] \
+    [EXPECT_ICONS [EXPECT_DRAWER [EXPECT_HEAP]]]]]]]]]]]]]]]]]]]]]]] \
     [--storage=none]
 """
 
@@ -40,7 +40,7 @@ REQUIRED_MARKERS = (
     "CRUGOS: selftest ok",
     "CRUGOS: nvme ready",
     "CRUGOS: ahci ready",
-    "CRUGOS: phase h1 boot ok",
+    "CRUGOS: phase h2 boot ok",
 )
 # A rejected unlock stops before scheduling, storage mounting and self-tests.
 WRONG_CRYPT_MARKERS = (
@@ -112,7 +112,7 @@ def main() -> int:
             argv.append(arg)
     sys.argv = [sys.argv[0]] + argv
 
-    if len(sys.argv) not in tuple(range(3, 27)):
+    if len(sys.argv) not in tuple(range(3, 28)):
         print("usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE "
               "[VERSION_FILE [EXPECT_AVX2 [EXPECT_RAID [EXPECT_NVME "
               "[EXPECT_REBUILD [EXPECT_AHCI [EXPECT_CRYPT [EXPECT_AES "
@@ -149,6 +149,7 @@ def main() -> int:
     expect_icons = sys.argv[23] if len(sys.argv) >= 24 else "no"
     expect_drawer = sys.argv[24] if len(sys.argv) >= 25 else "no"
     expect_select = sys.argv[25] if len(sys.argv) >= 26 else "no"
+    expect_heap = sys.argv[26] if len(sys.argv) >= 27 else "no"
 
     if not serial_path.exists():
         return fail(f"missing serial log {serial_path}", "")
@@ -195,6 +196,8 @@ def main() -> int:
         return fail(f"invalid EXPECT_DRAWER {expect_drawer!r}", text)
     if expect_select not in ("no", "yes"):
         return fail(f"invalid EXPECT_SELECT {expect_select!r}", text)
+    if expect_heap not in ("no", "yes"):
+        return fail(f"invalid EXPECT_HEAP {expect_heap!r}", text)
 
     required = list(REQUIRED_MARKERS)
     if storage_mode == "none":
@@ -547,6 +550,24 @@ def main() -> int:
         if not re.search(r"CRUGOS: wb select selftest ok \(([1-9]\d*) select\(s\), ([1-9]\d*) scrollbar drag\(s\)\)", text):
             return fail("expected the Workbench to count selections and scrollbar drags", text)
 
+    if expect_heap == "yes":
+        for marker in (
+            "CRUGOS: heap ready",
+            "CRUGOS: heap check ok",
+            "CRUGOS: heap stress ok",
+            "CRUGOS: heap guard ok",
+        ):
+            if marker not in text:
+                return fail(f"missing serial marker: {marker!r}", text)
+        if not re.search(r"CRUGOS: heap check ok \(\d+ slab\(s\), \d+ object\(s\), "
+                         r"\d+ large block\(s\)\)", text):
+            return fail("expected the heap check to report its inventory", text)
+        if not re.search(r"CRUGOS: heap stress ok \(\d+ op\(s\), \d+ alloc\(s\), "
+                         r"\d+ free\(s\)\)", text):
+            return fail("expected the heap stress loop to complete", text)
+        if not re.search(r"CRUGOS: heap guard ok \(3 corruption\(s\) detected\)", text):
+            return fail("expected the heap guard to prove three corruptions are caught", text)
+
     if expect_rebuild == "no" and "CRUGOS: raid rebuilt" in text:
         return fail("unexpected RAID member rebuild during boot", text)
     if expect_rebuild != "no":
@@ -582,7 +603,7 @@ def main() -> int:
           "gfx", expect_gfx, "wb", expect_wb, "menu", expect_menu,
           "shell", expect_shell, "keys", expect_keys, "desk", expect_desk,
           "icons", expect_icons, "drawer", expect_drawer,
-          "select", expect_select,
+          "select", expect_select, "heap", expect_heap,
           "storage", storage_mode,
           "QEMU exit status", status)
     for line in boot_report:

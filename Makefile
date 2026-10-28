@@ -16,6 +16,7 @@
 #   make test-journal-csum  crash-stop after a journal commit, then replay it with e2fsck
 #   make test-journal-replay  reboot after a crash and replay the journal in the kernel
 #   make test-hardening      boot crafted images and prove the kernel rejects them
+#   make test-heap           corrupt the kernel heap and prove the integrity checker catches it
 #   make test-raid  boot RAID1 (two members) and verify member disks
 #   make test-raid10  boot RAID10 (four members) and verify member disks
 #   make test-nvme   boot from an NVMe namespace and verify the disk
@@ -104,6 +105,7 @@ EXPECT_DESK ?= no
 EXPECT_ICONS ?= no
 EXPECT_DRAWER ?= no
 EXPECT_SELECT ?= no
+EXPECT_HEAP ?= no
 
 # QEMU / firmware options.
 MEMORY_MB ?= 512
@@ -162,6 +164,10 @@ WB_SELECT_RUN_TIMEOUT_SEC ?= 240
 
 # Hardening gate (make test-hardening): how long each crafted image may boot.
 HARDEN_TIMEOUT_SEC ?= 120
+
+# Heap gate (make test-heap): random allocation churn plus the corruption probes.
+HEAP_STRESS_OPS ?= 4000
+HEAP_RUN_TIMEOUT_SEC ?= 240
 
 # Interactive demo (make demo): a real QEMU window with a USB keyboard and
 # mouse, the Workbench desktop and a hold so the window stays open.
@@ -293,7 +299,7 @@ HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
         mkcrypt crypt-disk raid-repair-disks raid10-repair-disks run demo test test-compat \
         test-raid test-raid-degraded test-raid10 test-raid10-degraded test-nvme test-ahci \
         test-raid-repair test-raid10-repair test-journal-csum test-journal-replay \
-        test-hardening \
+        test-hardening test-heap \
         test-crypt test-crypt-recovery test-crypt-wrongkey test-crypt-tamper test-crypt-ni \
         test-crypt-prompt test-crypt-prompt-wrong test-crypt-prompt-timeout \
         test-crypt-keyboard test-crypt-keyboard-wrong crypt-run test-net test-tcp \
@@ -852,6 +858,18 @@ test-hardening: esp
 		--exit-code $(abspath $(QEMU_EXIT)) \
 		--timeout $(HARDEN_TIMEOUT_SEC)
 
+# Heap gate: boot with heap.stress= and heap.guard=1 so the kernel churns the
+# allocator and then plants three corruptions (a forged free-list link, a zeroed
+# slab cookie and a zeroed large-block cookie) that heap_check() must catch.
+# No input is scripted, so the gate is a plain boot plus serial markers.
+test-heap: EXPECT_HEAP := yes
+test-heap: esp
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(MAKE) --no-print-directory run TIMEOUT_SEC=$(HEAP_RUN_TIMEOUT_SEC) \
+		CMDLINE_EXTRA="heap.stress=$(HEAP_STRESS_OPS) heap.guard=1"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no $(EXPECT_HEAP)
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
 check-disk:
 	@if [ -n "$(DISK_IMG)" ] && [ ! -f "$(DISK_IMG)" ]; then \
 		$(MAKE) --no-print-directory disk; \
@@ -959,6 +977,9 @@ options:
 	@printf '  %-16s %s\n' WB_SELECT_FILL "$(WB_SELECT_FILL)"
 	@printf '  %-16s %s\n' WB_SELECT_RUN_TIMEOUT_SEC "$(WB_SELECT_RUN_TIMEOUT_SEC)"
 	@printf '  %-16s %s\n' HARDEN_TIMEOUT_SEC "$(HARDEN_TIMEOUT_SEC) (seconds)"
+	@printf '  %-16s %s\n' EXPECT_HEAP "$(EXPECT_HEAP)"
+	@printf '  %-16s %s\n' HEAP_STRESS_OPS "$(HEAP_STRESS_OPS)"
+	@printf '  %-16s %s\n' HEAP_RUN_TIMEOUT_SEC "$(HEAP_RUN_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' MEMORY_MB "$(MEMORY_MB)"
 	@printf '  %-16s %s\n' SMP "$(SMP)"
 	@printf '  %-16s %s\n' TIMEOUT_SEC "$(TIMEOUT_SEC)"

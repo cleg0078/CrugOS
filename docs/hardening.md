@@ -11,7 +11,8 @@ set of pure validators, so a check runs once in the kernel, ships with a host
 test, and is proven end to end by a crafted-image gate. The review that drove
 the pass (`specs/fix-p1/REPORT.md`, tree at `v0.30.0`) counted 6 High, 16
 Medium and 18 Low findings; H1 closes the Highs that are reachable today and
-adds the `secure_zero()` primitive the rest of the pass needed. See
+adds the `secure_zero()` primitive the rest of the pass needed. Phase H2 then
+hardened the kernel heap; see [heap.md](heap.md) for that pass and
 [roadmap.md](roadmap.md) for what remains.
 
 ## The trust boundary
@@ -86,16 +87,21 @@ normal `CRUGOS: syscall selftest ok` line.
 ## Image gate
 
 `make test-hardening` is the 44th gate. It is not a fuzzer: it is a
-reproducible adversarial boot. [`scripts/run-hardening.py`](../scripts/run-hardening.py)
-takes a pristine test image and the pristine encrypted image, copies the pair
-per case, patches exactly one field with `struct.pack_into` (recomputing an
-inode checksum where the case needs a self-consistent inode), boots the patched
+reproducible adversarial boot. Its control case does not hardcode a phase
+string: [`scripts/run-hardening.py`](../scripts/run-hardening.py) matches any
+`CRUGOS: phase <id> boot ok` line with
+`CONTROL_PHASE_RE = re.compile(r"CRUGOS: phase [0-9a-z]+ boot ok")`, alongside
+the unchanged `CRUGOS: ext4 ready`, `CRUGOS: storage ready`,
+`CRUGOS: writable storage ok` and `CRUGOS: selftest ok` markers, so the H1 image
+gate keeps working across phase bumps. The script takes a pristine test image
+and the pristine encrypted image, copies the pair per case, patches exactly
+one field with `struct.pack_into` (recomputing an inode checksum where the case needs a self-consistent inode), boots the patched
 pair under QEMU, and asserts both the exit status and the marker the kernel
 must print.
 
 | Case | Patch | Required marker | Exit |
 | --- | --- | --- | --- |
-| `control` | none | `CRUGOS: phase h1 boot ok`, `CRUGOS: ext4 ready`, `CRUGOS: storage ready`, `CRUGOS: writable storage ok`, `CRUGOS: selftest ok` | 33 |
+| `control` | none | `CRUGOS: phase h2 boot ok` (any phase id matches), `CRUGOS: ext4 ready`, `CRUGOS: storage ready`, `CRUGOS: writable storage ok`, `CRUGOS: selftest ok` | 33 |
 | `geometry-bpg` | superblock `+0x20` (`s_blocks_per_group`) = 100000 | `CRUGOS: ext4 mount rejected (geometry)` | 35 |
 | `geometry-ipg` | superblock `+0x28` (`s_inodes_per_group`) = 100000 | `CRUGOS: ext4 mount rejected (geometry)` | 35 |
 | `root-extent` | root inode `eh_max` (`inode + 44`) = 5, inode checksum recomputed | `CRUGOS: ext4 mount rejected (root extent)` | 35 |
@@ -213,9 +219,11 @@ ok: hardening pass 1 rejected 6 crafted image(s) (control boot exit 33)
   a user/kernel return path and a decision about what a fault from DPL3 may do.
   The crafted-image gate avoids the panic by construction, not by policy; a
   kernel bug that faults on a hostile image still panics.
-- Heap hardening is not in this pass. The allocator's free-list `next` is
-  followed without a range check and the block magic is a 4-byte value without
-  the space or the layout work to authenticate it (report items F7/F8).
+- Heap hardening is now phase H2, not this pass: page cookies, validated slab
+  headers, the doubly linked large-block list and the read-only integrity
+  checker are documented in [heap.md](heap.md), which also lists what the
+  checker does not cover. The allocator's free-list `next` and block magic
+  (report items F7/F8) are addressed there.
 - Weak EFI entropy is only surfaced, not fixed: the loader still trusts the
   firmware's RNG for the entropy it mixes into the boot report, and there is no
   way for the operator to see that a firmware returned a constant.

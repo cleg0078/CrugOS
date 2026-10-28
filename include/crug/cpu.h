@@ -36,6 +36,24 @@ struct cpu {
 };
 
 /* Save RFLAGS and disable interrupts; restore only the IF state. */
+#ifdef CRUG_HOST_TEST
+/* Host unit tests run in user mode, where CLI/STI and PUSHFQ are privileged.
+ * Report interrupts as enabled (IF set) and make the toggles no-ops so the
+ * kernel modules that guard their state still link and run unchanged. */
+static inline u64 cpu_irq_save(void)
+{
+    return (1ull << 9);
+}
+
+static inline void cpu_irq_restore(u64 flags)
+{
+    (void)flags;
+}
+
+static inline void cpu_irq_disable(void)
+{
+}
+#else
 static inline u64 cpu_irq_save(void)
 {
     u64 flags;
@@ -54,6 +72,7 @@ static inline void cpu_irq_disable(void)
 {
     __asm__ volatile("cli" : : : "memory");
 }
+#endif
 
 /* Halt until the next interrupt, preserving the current IF state. Waiting on
  * input with a spin loop pins a whole host core under emulation, so idle

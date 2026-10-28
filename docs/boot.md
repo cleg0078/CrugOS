@@ -50,7 +50,8 @@ adds `wb.shell=1` / `wb.sh=` for the shell window, phase 6D adds
 `wb.ikeys=1` for keyboard focus of the icon table, phase 6G adds `wb.dr=1`
 for drawer scrolling and refresh plus `wb.fill=<n>` to fill the root first, and
 phase 6H adds `wb.dsel=1` for click-selected drawer rows and a draggable
-scrollbar. A boot
+scrollbar, and phase H2 adds `heap.stress=<1..200000>` and `heap.guard=1`,
+parsed by `heap_cmdline()` right after `heap_init()`. A boot
 medium that ships no block device (the hybrid
 ISO) passes `storage=none`, which is the one token that changes the storage
 contract instead of adding work to it. The
@@ -110,7 +111,8 @@ post-snapshot allocations cannot push it over capacity.
    8259 PIC mask. `CRUGOS: cpu ready`.
 6. `timer_init`: TSC frequency, TSC-deadline or LAPIC periodic. Interrupts
    stay disabled until the execution model exists.
-7. `heap_init`: slab caches and large-allocation headers. `CRUGOS: heap ready`.
+7. `heap_init`: slab caches and large-allocation headers; `heap_cmdline()`
+   then reads `heap.stress=` and `heap.guard=`. `CRUGOS: heap ready`.
 8. `input_init` and `keyboard_init`: reset `input.device`, then program the
    i8042 controller (translation on, IRQ1/IRQ12 masked) and enable scanning.
    The boot prints `CRUGOS: input ready (serial + keyboard)`, or
@@ -237,9 +239,11 @@ post-snapshot allocations cannot push it over capacity.
     `wb.dsel=1` it waits for two row clicks and one scrollbar drag and prints
     `CRUGOS: wb select selftest ok (N select(s), M scrollbar drag(s))`, or
     `CRUGOS: wb select timeout (N/M)`. The whole
-    check is silent unless `wb.enable=` enabled it.
+    check is silent unless `wb.enable=` enabled it. `heap_selftest()` prints
+    `CRUGOS: heap check ok (S slab(s), O object(s), L large block(s))` and,
+    when `heap.stress=` or `heap.guard=` was supplied, runs those passes too.
 14. `report_boot`, `storage_lock` (wipes the passphrase, the volume keys and
-    the bounce buffer), `CRUGOS: phase h1 boot ok`, then `wb_hold` (only when
+    the bounce buffer), `CRUGOS: phase h2 boot ok`, then `wb_hold` (only when
     `wb.hold=` was given: the guest stays alive with the desktop on screen until
     the deadline), `arch_exit_qemu(0x10)`.
 
@@ -282,13 +286,15 @@ TSC ticks with quotient/remainder arithmetic so it cannot overflow at 64 bits.
 ## Execution model
 
 **Kernel heap.** `kmalloc`/`kzalloc`/`kfree` use eight slab classes from 16 to
-2048 bytes. Each slab page starts with a 64-byte header (magic, class, object
-and used counts, a 256-bit used map and a free list); objects follow it.
-Allocations larger than 2048 bytes, up to the 1 MiB cap, take contiguous PMM
-pages with a 64-byte large-allocation header. Slab pages are not
-returned to the PMM when they become empty (a phase 2 simplification); large
-allocations are returned immediately. All heap paths run with interrupts
-disabled.
+2048 bytes. Each slab page starts with a 64-byte header (a page cookie, class,
+object and used counts, a validated 256-bit used map and a free list); objects
+follow it. Allocations larger than 2048 bytes, up to the 1 MiB cap, take
+contiguous PMM pages with a 64-byte large-block header carrying a page cookie,
+size, page count and list links. Phase H2 validates every header and free-list
+entry before use and can walk the heap read-only; see [heap.md](heap.md). Slab
+pages are not returned to the PMM when they become empty (a phase 2
+simplification); large allocations are returned immediately. All heap paths run
+with interrupts disabled.
 
 **Threads and scheduler.** A `thread` owns a 16 KiB kernel stack (four pages)
 plus one unmapped guard page, an entry function and argument, a state, a
@@ -440,6 +446,7 @@ CRUGOS: journal ready
 CRUGOS: storage ready
 CRUGOS: sched ready
 CRUGOS: syscall ready
+CRUGOS: heap check ok (6 slab(s), 8 object(s), 1 large block(s))
 CRUGOS: writable storage ok
 CRUGOS: journal selftest ok
 CRUGOS: dhcp lease 10.0.2.15/255.255.255.0 gw 10.0.2.2 dns 10.0.2.3
@@ -503,14 +510,14 @@ CRUGOS: wb window 1 sent to front
 CRUGOS: wb action 6 front window 1
 CRUGOS: wb icons selftest ok (1 move(s), 1 front(s))
 CRUGOS: sh run 'ver'
-CRUGOS: sh out CrugOS 0.31.0 (phase h1), x86_64
+CRUGOS: sh out CrugOS 0.32.0 (phase h2), x86_64
 CRUGOS: wb selftest ok (1 drag(s), 1 action(s))
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb drawer selftest ok (3 scroll(s), 1 refresh(es))
 CRUGOS: wb select selftest ok (2 select(s), 1 scrollbar drag(s))
 CRUGOS: sh selftest ok (1 command(s))
 CRUGOS: selftest ok
-CRUGOS: phase h1 boot ok
+CRUGOS: phase h2 boot ok
 ```
 
 The `virtio : net eth0 mac ...` line, the lease, the ARP resolution, the echo
@@ -599,13 +606,14 @@ replaced by the skip marker, and the USB device the firmware booted from shows
 up in the USB lines as an unsupported mass-storage function:
 
 ```
-CRUGOS: version 0.31.0
+CRUGOS: version 0.32.0
 CRUGOS: usb controller ready (xhci, 8 port(s))
 CRUGOS: usb device 46f4:0001 on port 1 (speed 4)
 CRUGOS: usb device class 8 on port 1 (unsupported)
 CRUGOS: storage skipped (storage=none)
+CRUGOS: heap check ok (6 slab(s), 8 object(s), 1 large block(s))
 CRUGOS: selftest ok
-CRUGOS: phase h1 boot ok
+CRUGOS: phase h2 boot ok
 ```
 
 `kernel/core/report.c` prints the machine description between them: kernel
