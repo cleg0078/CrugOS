@@ -31,6 +31,9 @@ void input_pointer_reset(void);
 u64 input_pointer_count(void);
 /* Optional poll hook run before the queue is read (the USB keyboard uses it). */
 void input_set_poll(void (*fn)(void));
+/* Run the poll hook once without consuming a queued byte; the graphics cursor
+   pumps USB events this way while it waits for pointer motion. */
+void input_poll(void);
 int input_try_getc(void);
 
 #endif /* CRUG_INPUT_H */

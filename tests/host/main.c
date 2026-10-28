@@ -27,6 +27,7 @@ void test_net_functions(void);
 void test_dns_functions(void);
 void test_usb_functions(void);
 void test_audio_functions(void);
+void test_gfx_functions(void);
 
 int main(void)
 {
@@ -48,6 +49,7 @@ int main(void)
     RUN(test_dns_functions);
     RUN(test_usb_functions);
     RUN(test_audio_functions);
+    RUN(test_gfx_functions);
     printf("%d checks, %d failure(s)\n", tests_run, tests_failed);
     return tests_failed == 0 ? 0 : 1;
 }

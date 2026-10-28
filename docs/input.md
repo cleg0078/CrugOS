@@ -10,7 +10,9 @@ Phase 5A adds a second source: a polled xHCI host controller driver and a USB
 HID boot keyboard, decoded into the same queue and drained from the same console
 read path. Phase 5B adds a third: a USB HID boot mouse, decoded into pointer
 events (relative motion, wheel and button edges) that live next to the byte
-queue in `input.device`.
+queue in `input.device`. Phase 5D gives that pointer state its first consumer:
+`gfx.device` (`kernel/gfx/gfx.c`) drains it and moves a sprite on the GOP
+framebuffer (see [gfx.md](gfx.md)).
 
 ```
 i8042 controller (0x60 data, 0x64 status)   xHCI MMIO (HID reports)   COM1 (0x3F8)
@@ -200,7 +202,9 @@ the USB side: descriptor walking (keyboard and mouse), the keyboard boot-report
 decode matrix (letters, Shift, Caps, Ctrl chords, digits, punctuation, named
 keys, held-key suppression) and the mouse decode matrix (idle report, positive
 and negative deltas, button baseline versus edge, wheel, reserved bits).
-`make test-host` reports 1168 checks including these.
+`tests/host/test_gfx.c` then drives `gfx.device` from the real pointer state
+against a fake framebuffer (motion, clamping, buttons, self-test outcomes).
+`make test-host` reports 2426 checks including these.
 
 ## Gates
 
@@ -211,6 +215,7 @@ and negative deltas, button baseline versus edge, wheel, reserved bits).
 | `make test-crypt-keyboard-wrong` | three wrong keyboard passphrases are rejected, the volume stays locked, and boot fails closed |
 | `make test-usb-hotplug` | a USB keyboard hotplugged over QMP while the guest runs is enumerated, decodes the typed keys and delivers them through `input.device` |
 | `make test-usb-mouse` | a USB mouse hotplugged over QMP reports relative motion and a left-button edge into the pointer state |
+| `make test-gfx` | that mouse's motion moves the framebuffer cursor, verified by comparing QEMU screendumps |
 
 `scripts/run-crypt-keyboard.py` drives the keyboard gates. It boots QEMU with
 `CRYPT_PASS=` (so no `crypt.pass=` token is written), adds
@@ -258,10 +263,10 @@ console for the prompt.
 - US layout only, one keyboard, no remapping.
 - Extended keys are decoded as modifiers only; arrow keys and editing keys are
   not delivered yet.
-- No framebuffer/GOP input and no VT switching; the phase 5B mouse has no cursor
-  or acceleration until a graphics stack consumes its pointer events, and phase
-  5C audio consumes the PCM ring rather than the pointer (see
-  [audio.md](audio.md)).
+- No framebuffer/GOP input and no VT switching. The phase 5D cursor consumes the
+  pointer events, but it has no acceleration, no click handling beyond the button
+  mask and no scrolling; phase 5C audio consumes the PCM ring rather than the
+  pointer (see [gfx.md](gfx.md) and [audio.md](audio.md)).
 - USB input is polled from the console read path only: no interrupt handler, no
   key repeat, boot-protocol devices on the first xHCI controller only, at most
   four of them, and no hubs, media keys or extra mouse buttons.

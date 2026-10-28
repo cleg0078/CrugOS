@@ -58,6 +58,15 @@ static inline void cpu_irq_disable(void)
 /* Halt until the next interrupt, preserving the current IF state. Waiting on
  * input with a spin loop pins a whole host core under emulation, so idle
  * paths use HLT and wake on the next timer tick. */
+#ifdef CRUG_HOST_TEST
+/* Host unit tests cannot execute HLT, so the idle wait becomes a stub that
+ * moves the fake clock forward (see tests/host/test_gfx.c). */
+void host_cpu_wait_for_irq(void);
+static inline void cpu_wait_for_irq(void)
+{
+    host_cpu_wait_for_irq();
+}
+#else
 static inline void cpu_wait_for_irq(void)
 {
     u64 flags = cpu_irq_save();
@@ -65,6 +74,7 @@ static inline void cpu_wait_for_irq(void)
     __asm__ volatile("sti; hlt; cli" : : : "memory");
     cpu_irq_restore(flags);
 }
+#endif
 
 struct cpu *cpu_self(void);
 void cpuid(u32 leaf, u32 subleaf, u32 *a, u32 *b, u32 *c, u32 *d);

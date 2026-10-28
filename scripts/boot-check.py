@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Verify a CrugOS boot: serial markers, guest version, CPU policy, storage mode, encryption, networking, TCP, DNS, USB, HID mice and audio, then the exit code.
+"""Verify a CrugOS boot: serial markers, guest version, CPU policy, storage mode, encryption, networking, TCP, DNS, USB, HID mice, audio and the framebuffer cursor, then the exit code.
 
 usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE \
     [VERSION_FILE [EXPECT_AVX2 [EXPECT_RAID [EXPECT_NVME [EXPECT_REBUILD \
     [EXPECT_AHCI [EXPECT_CRYPT [EXPECT_AES [EXPECT_NET [EXPECT_TCP \
-    [EXPECT_DNS [EXPECT_USB [EXPECT_MOUSE [EXPECT_AUDIO]]]]]]]]]]]]]]
+    [EXPECT_DNS [EXPECT_USB [EXPECT_MOUSE [EXPECT_AUDIO \
+    [EXPECT_GFX]]]]]]]]]]]]]]]
 """
 
 import re
@@ -32,7 +33,7 @@ REQUIRED_MARKERS = (
     "CRUGOS: selftest ok",
     "CRUGOS: nvme ready",
     "CRUGOS: ahci ready",
-    "CRUGOS: phase 5c boot ok",
+    "CRUGOS: phase 5d boot ok",
 )
 # A rejected unlock stops before scheduling, storage mounting and self-tests.
 WRONG_CRYPT_MARKERS = (
@@ -79,12 +80,12 @@ def fail(message: str, log: str) -> int:
 
 
 def main() -> int:
-    if len(sys.argv) not in tuple(range(3, 18)):
+    if len(sys.argv) not in tuple(range(3, 19)):
         print("usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE "
               "[VERSION_FILE [EXPECT_AVX2 [EXPECT_RAID [EXPECT_NVME "
               "[EXPECT_REBUILD [EXPECT_AHCI [EXPECT_CRYPT [EXPECT_AES "
               "[EXPECT_NET [EXPECT_TCP [EXPECT_DNS [EXPECT_USB "
-              "[EXPECT_MOUSE [EXPECT_AUDIO]]]]]]]]]]]]]]",
+              "[EXPECT_MOUSE [EXPECT_AUDIO [EXPECT_GFX]]]]]]]]]]]]]]]",
               file=sys.stderr)
         return 2
 
@@ -104,6 +105,7 @@ def main() -> int:
     expect_usb = sys.argv[14] if len(sys.argv) >= 15 else "no"
     expect_mouse = sys.argv[15] if len(sys.argv) >= 16 else "no"
     expect_audio = sys.argv[16] if len(sys.argv) >= 17 else "no"
+    expect_gfx = sys.argv[17] if len(sys.argv) >= 18 else "no"
 
     if not serial_path.exists():
         return fail(f"missing serial log {serial_path}", "")
@@ -132,6 +134,8 @@ def main() -> int:
         return fail(f"invalid EXPECT_MOUSE {expect_mouse!r}", text)
     if expect_audio not in ("no", "yes"):
         return fail(f"invalid EXPECT_AUDIO {expect_audio!r}", text)
+    if expect_gfx not in ("no", "yes"):
+        return fail(f"invalid EXPECT_GFX {expect_gfx!r}", text)
 
     required = list(REQUIRED_MARKERS)
     if expect_crypt == "wrong":
@@ -283,6 +287,18 @@ def main() -> int:
                 "CRUGOS: audio capture unavailable" not in text):
             return fail("expected the audio selftest to report its capture result", text)
 
+    if expect_gfx == "yes":
+        for marker in (
+            "CRUGOS: gfx ready (",
+            "CRUGOS: gfx cursor shown at",
+            "CRUGOS: gfx selftest ok",
+        ):
+            if marker not in text:
+                return fail(f"missing serial marker: {marker!r}", text)
+        positions = re.findall(r"CRUGOS: gfx cursor at \(-?\d+, -?\d+\)", text)
+        if len(positions) < 2:
+            return fail("expected the cursor to move at least once", text)
+
     if expect_rebuild == "no" and "CRUGOS: raid rebuilt" in text:
         return fail("unexpected RAID member rebuild during boot", text)
     if expect_rebuild != "no":
@@ -315,7 +331,7 @@ def main() -> int:
           "ahci", expect_ahci, "crypt", expect_crypt, "aes", expect_aes,
           "net", expect_net, "tcp", expect_tcp, "dns", expect_dns,
           "usb", expect_usb, "mouse", expect_mouse, "audio", expect_audio,
-          "QEMU exit status", status)
+          "gfx", expect_gfx, "QEMU exit status", status)
     for line in boot_report:
         print("  " + line)
     return 0

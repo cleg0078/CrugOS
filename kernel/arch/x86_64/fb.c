@@ -2,6 +2,7 @@
 #include <crug/types.h>
 #include <crug/string.h>
 #include <crug/kernel.h>
+#include <crug/fb.h>
 
 #define FB_GLYPH_W 8
 #define FB_GLYPH_H 16
@@ -23,7 +24,10 @@ static u32 fb_pixel_color(u32 rgb)
     u32 g = (rgb >> 8) & 0xFF;
     u32 b = rgb & 0xFF;
 
-    if (g_fb.format == CRUG_PIXEL_BGRX8888) {
+    /* BGRX8888 stores blue in the lowest byte, so the natural
+       (r << 16) | (g << 8) | b packing already matches it.  RGBX8888
+       stores red there instead and needs the swap. */
+    if (g_fb.format == CRUG_PIXEL_RGBX8888) {
         return (b << 16) | (g << 8) | r;
     }
     return (r << 16) | (g << 8) | b;
@@ -33,6 +37,96 @@ static void fb_store(u32 x, u32 y, u32 color)
 {
     volatile u32 *row = (volatile u32 *)(uintptr)(g_fb.base + (u64)y * g_fb.stride * 4);
     row[x] = color;
+}
+
+static u32 fb_read(u32 x, u32 y)
+{
+    volatile u32 *row = (volatile u32 *)(uintptr)(g_fb.base + (u64)y * g_fb.stride * 4);
+    return row[x];
+}
+
+/* Pointer sprite: '#' is the one-pixel outline, 'O' the body, '.' transparent. */
+#define FB_CURSOR_BORDER 1u
+#define FB_CURSOR_BODY 2u
+#define FB_CURSOR_BORDER_RGB 0x00FFFFFFu
+#define FB_CURSOR_BODY_RGB 0x00FFD040u
+
+static const u8 g_cursor_shape[FB_CURSOR_HEIGHT][FB_CURSOR_WIDTH] = {
+    { 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { 1, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { 1, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0 },
+    { 1, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0, 0 },
+    { 1, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0, 0 },
+    { 1, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0, 0 },
+    { 1, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0, 0 },
+    { 1, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0, 0 },
+    { 1, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0, 0 },
+    { 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 0 },
+    { 1, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1 },
+    { 1, 2, 2, 1, 2, 2, 2, 1, 0, 0, 0, 0 },
+    { 1, 2, 1, 0, 1, 2, 2, 2, 1, 0, 0, 0 },
+    { 1, 1, 0, 0, 1, 2, 2, 2, 1, 0, 0, 0 },
+    { 1, 0, 0, 0, 0, 1, 2, 2, 2, 1, 0, 0 },
+    { 0, 0, 0, 0, 0, 1, 2, 2, 2, 1, 0, 0 },
+    { 0, 0, 0, 0, 0, 0, 1, 2, 2, 1, 0, 0 },
+    { 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0 },
+};
+
+static u32 g_cursor_x;
+static u32 g_cursor_y;
+static u32 g_cursor_saved[FB_CURSOR_HEIGHT][FB_CURSOR_WIDTH];
+static int g_cursor_wanted;  /* the consumer asked for a cursor */
+static int g_cursor_drawn;   /* the sprite is currently in the framebuffer */
+
+static void fb_cursor_composite(void)
+{
+    u32 row, col;
+
+    if (!g_ready || !g_cursor_wanted || g_cursor_drawn) {
+        return;
+    }
+    for (row = 0; row < FB_CURSOR_HEIGHT; row++) {
+        for (col = 0; col < FB_CURSOR_WIDTH; col++) {
+            u32 x = g_cursor_x + col;
+            u32 y = g_cursor_y + row;
+            u8 shape;
+
+            if (x >= g_fb.width || y >= g_fb.height) {
+                continue;
+            }
+            g_cursor_saved[row][col] = fb_read(x, y);
+            shape = g_cursor_shape[row][col];
+            if (shape == FB_CURSOR_BORDER) {
+                fb_store(x, y, fb_pixel_color(FB_CURSOR_BORDER_RGB));
+            } else if (shape == FB_CURSOR_BODY) {
+                fb_store(x, y, fb_pixel_color(FB_CURSOR_BODY_RGB));
+            }
+        }
+    }
+    g_cursor_drawn = 1;
+}
+
+/* Put the saved pixels back before anything else writes over them. */
+static void fb_cursor_restore(void)
+{
+    u32 row, col;
+
+    if (!g_cursor_drawn) {
+        return;
+    }
+    for (row = 0; row < FB_CURSOR_HEIGHT; row++) {
+        for (col = 0; col < FB_CURSOR_WIDTH; col++) {
+            u32 x = g_cursor_x + col;
+            u32 y = g_cursor_y + row;
+
+            if (x >= g_fb.width || y >= g_fb.height) {
+                continue;
+            }
+            fb_store(x, y, g_cursor_saved[row][col]);
+        }
+    }
+    g_cursor_drawn = 0;
 }
 
 static void fb_fill_row(u32 y, u32 color)
@@ -46,16 +140,23 @@ static void fb_fill_row(u32 y, u32 color)
 static void fb_clear(void)
 {
     u32 y;
+
+    fb_cursor_restore();
     for (y = 0; y < g_fb.height; y++) {
         fb_fill_row(y, fb_pixel_color(FB_COLOR_BG));
     }
     g_x = 0;
     g_y = 0;
+    fb_cursor_composite();
 }
 
 void fb_init(const framebuffer_info *fb)
 {
     g_ready = 0;
+    g_cursor_wanted = 0;
+    g_cursor_drawn = 0;
+    g_cursor_x = 0;
+    g_cursor_y = 0;
     if (!fb || fb->base == 0 || fb->width == 0 || fb->height == 0 ||
         fb->stride < fb->width) {
         return;
@@ -80,6 +181,7 @@ static void fb_scroll(void)
     u32 y;
     usize line_bytes = (usize)g_fb.stride * 4;
 
+    fb_cursor_restore();
     for (y = 0; y + FB_GLYPH_H < g_fb.height; y++) {
         memcpy((void *)(uintptr)(g_fb.base + (u64)y * line_bytes),
                (void *)(uintptr)(g_fb.base + (u64)(y + FB_GLYPH_H) * line_bytes),
@@ -88,6 +190,7 @@ static void fb_scroll(void)
     for (; y < g_fb.height; y++) {
         fb_fill_row(y, fb_pixel_color(FB_COLOR_BG));
     }
+    fb_cursor_composite();
 }
 
 static void fb_draw_glyph(u32 cell_x, u32 cell_y, unsigned char c)
@@ -107,7 +210,7 @@ static void fb_draw_glyph(u32 cell_x, u32 cell_y, unsigned char c)
     }
 }
 
-void fb_putc(char ch)
+static void fb_putc_raw(char ch)
 {
     unsigned char c = (unsigned char)ch;
 
@@ -124,7 +227,7 @@ void fb_putc(char ch)
     } else if (c == '\t') {
         u32 i;
         for (i = 0; i < 4; i++) {
-            fb_putc(' ');
+            fb_putc_raw(' ');
         }
         return;
     } else {
@@ -140,4 +243,59 @@ void fb_putc(char ch)
         fb_scroll();
         g_y--;
     }
+}
+
+void fb_putc(char ch)
+{
+    if (!g_ready) {
+        return;
+    }
+    /* Take the sprite out of the framebuffer before the glyph (or a scroll)
+       overwrites the pixels it saved, then put it back on top. */
+    fb_cursor_restore();
+    fb_putc_raw(ch);
+    fb_cursor_composite();
+}
+
+int fb_dimensions(u32 *width, u32 *height)
+{
+    if (!g_ready || !width || !height) {
+        return -1;
+    }
+    *width = g_fb.width;
+    *height = g_fb.height;
+    return 0;
+}
+
+void fb_cursor_show_at(u32 x, u32 y)
+{
+    if (!g_ready) {
+        return;
+    }
+    fb_cursor_restore();
+    g_cursor_x = x;
+    g_cursor_y = y;
+    g_cursor_wanted = 1;
+    fb_cursor_composite();
+}
+
+void fb_cursor_hide(void)
+{
+    fb_cursor_restore();
+    g_cursor_wanted = 0;
+}
+
+int fb_cursor_visible(void)
+{
+    return g_cursor_drawn;
+}
+
+u32 fb_cursor_x(void)
+{
+    return g_cursor_x;
+}
+
+u32 fb_cursor_y(void)
+{
+    return g_cursor_y;
 }

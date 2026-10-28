@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 5C USB audio (`v0.21.0`)
+## Status: phase 5D framebuffer cursor (`v0.22.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -20,8 +20,9 @@ with TCP, an HTTP exchange in both directions and six socket syscalls, phase 4D
 adds a caching DNS stub resolver with a TCP fallback and a name syscall, phase
 5A adds an xHCI host controller with a USB HID boot keyboard that can be plugged
 into the running guest, phase 5B adds a USB HID boot mouse whose reports become
-pointer events, and phase 5C adds a USB Audio Class path with a PCM ring and a
-per-channel mixer:
+pointer events, phase 5C adds a USB Audio Class path with a PCM ring and a
+per-channel mixer, and phase 5D adds a pointer-driven cursor composited onto the
+GOP framebuffer console:
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -388,6 +389,23 @@ Phase 5C adds sound: a PCM ring, a mixer and a USB audio function.
   `-audiodev none` backend, then requires the audio markers, a clean `e2fsck`
   and exit 33. See [audio.md](docs/audio.md).
 
+Phase 5D gives the pointer state a consumer: a cursor on the framebuffer.
+
+- `kernel/arch/x86_64/fb.c` owns a 12x19 sprite. `fb_cursor_show_at()` saves the
+  pixels it covers, draws the white outline and amber body, and every text path
+  (`fb_putc()`, `fb_clear()`, `fb_scroll()`) restores, writes and recomposites,
+  so text never eats the cursor and a scrolling console never smears it;
+- `gfx.device` (`kernel/gfx/gfx.c`) drains `input_pointer_read()`, moves the
+  cursor by the raw delta with `GFX_CURSOR_STEP`, clamps it to the screen, tracks
+  button transitions and prints one `CRUGOS: gfx cursor at (X, Y)` marker per
+  move when a gate asked for motion. `gfx.wait=` and `gfx.moves=` bound the boot
+  check, and the self-test is silent without them, so no existing gate changed;
+- `make test-gfx` boots `usb=off,i8042=off` with `qemu-xhci`, hotplugs a
+  `usb-mouse` over QMP, injects relative motion, and compares QEMU screendumps:
+  the amber sprite centroid must move by the delta the guest reported (2.0 pixel
+  tolerance), which also pins the framebuffer pixel packing. See
+  [gfx.md](docs/gfx.md).
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -396,9 +414,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.21.0 (phase 5c) -- Amiga-inspired microkernel bring-up
+CrugOS 0.22.0 (phase 5d) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.21.0
+CRUGOS: version 0.22.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -444,8 +462,9 @@ CRUGOS: tcp http ok (53 bytes)
 CRUGOS: tcp socket syscall ok
 CRUGOS: tcp http served (72 bytes)
 CRUGOS: net selftest ok
+CRUGOS: gfx ready (1024x768, cursor at 512,384)
 CRUGOS: selftest ok
-kernel : 0x0000000000100000 size=712 KiB
+kernel : 0x0000000000100000 size=716 KiB
 boot   : cpu=0 acpi_rsdp=0x1f77e000 fdt=0x0 initrd=0x0
 memory : 36 regions, usable 474080 KiB (462 MiB)
 pmm    : total=118520 free=118462 bitmap=131072 B
@@ -457,7 +476,7 @@ heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
 boot   : pmm=28552 us cpu=438 us vm=626 us traps=360 us timer=65357 us heap=60 us storage=94487 us sched=354 us syscall=122 us total=190359 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase 5c boot ok
+CRUGOS: phase 5d boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -535,6 +554,27 @@ mixer is the source of truth, so both are non-fatal. Capture is parsed and
 streamed by the driver too, but this QEMU build only exposes playback, which is
 why the gate accepts the "capture unavailable" marker.
 
+The graphics gate (`make test-gfx`) uses the same machine and QMP setup to move
+the mouse and prove the sprite really moves in the framebuffer:
+
+```
+CRUGOS: input ready (serial only)
+CRUGOS: gfx ready (1024x768, cursor at 512,384)
+CRUGOS: usb controller ready (xhci, 8 port(s))
+CRUGOS: usb device 0627:0001 on port 5 (speed 3)
+CRUGOS: usb mouse ready (endpoint 0x81, 4 byte reports)
+CRUGOS: gfx cursor shown at (512, 384)
+CRUGOS: gfx cursor at (572, 424)
+CRUGOS: gfx cursor at (547, 414)
+CRUGOS: gfx cursor at (647, 344)
+CRUGOS: gfx selftest ok (3 move(s), buttons 0x00)
+```
+
+Between those markers the gate takes `screendump` images and checks that the
+amber sprite centroid moved by `+60,+40`, `-25,-10` and `+100,-70` pixels, so a
+cursor that reports coordinates without drawing them fails. The self-test lingers
+for 1.5 s after the last move so the final dump cannot race the QEMU exit.
+
 With no xHCI function in the default machine the driver prints
 `CRUGOS: usb controller absent` (as in the excerpt above) and the PS/2 keyboard
 stays in charge; the USB gates are the only ones that install the controller and
@@ -575,8 +615,9 @@ make test-net-dns  # resolve a name against a host DNS server over TCP
 make test-usb-hotplug  # hotplug a USB keyboard into xHCI and type at it
 make test-usb-mouse    # hotplug a USB mouse into xHCI and move the pointer
 make test-audio        # stream PCM to a USB Audio Class device through the mixer
+make test-gfx          # move a hotplugged USB mouse and verify the framebuffer cursor
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
-make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring)
+make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor)
 make check-disk  # e2fsck + persisted-file checks on the latest test disk
 make disk        # generate the GPT/ext4 test disk
 make raid-disks  # generate the two RAID1 member disks
@@ -599,8 +640,9 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `QEMU_DISPLAY`, `QEMU_EXTRA`, `OVMF_CODE`, `OVMF_VARS`, `REQUIRE_AVX2`,
 `EXPECT_AVX2`, `EXPECT_RAID`, `EXPECT_NVME`, `EXPECT_REBUILD`, `EXPECT_AHCI`,
 `EXPECT_CRYPT`, `EXPECT_AES`, `EXPECT_NET`, `EXPECT_TCP`, `EXPECT_DNS`,
-`EXPECT_USB`, `EXPECT_MOUSE`, `EXPECT_AUDIO`, `AUDIO_RUN_TIMEOUT_SEC`,
-`AUDIO_QEMU_EXTRA`, `NET_MODE`, `NET_HOSTFWD`, `TCP_SERVE_SEC`,
+`EXPECT_USB`, `EXPECT_MOUSE`, `EXPECT_AUDIO`, `EXPECT_GFX`,
+`AUDIO_RUN_TIMEOUT_SEC`, `AUDIO_QEMU_EXTRA`, `GFX_WAIT`, `GFX_MOVES`,
+`GFX_RUN_TIMEOUT_SEC`, `GFX_QEMU_EXTRA`, `NET_MODE`, `NET_HOSTFWD`, `TCP_SERVE_SEC`,
 `TCP_RUN_TIMEOUT_SEC`, `DNS_NAME`, `DNS_ADDRESS`, `DNS_TTL`,
 `DNS_RUN_TIMEOUT_SEC`, `USB_WAIT`, `USB_KEYS`, `USB_RUN_TIMEOUT_SEC`,
 `MOUSE_MOVES`, `MOUSE_WAIT`, `MOUSE_RUN_TIMEOUT_SEC`, `MACHINE_EXTRA`,
@@ -623,16 +665,17 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/input/` | `input.device`: set-1 scancode decoder, the console byte queue and the pointer state |
 | `kernel/audio/` | `audio.device` PCM ring, the per-channel mixer and the tone generator |
 | `kernel/net/` | `net.device`, Ethernet/ARP/IPv4/ICMP/UDP, TCP, the DHCP client and the DNS resolver |
+| `kernel/gfx/` | `gfx.device`: the pointer-driven framebuffer cursor |
 | `kernel/mm/` | physical allocator, W^X page tables, kernel heap |
 | `kernel/block/` | block-device registry, partitions, bounds checks, RAID1/RAID10, boot-time rebuild and the AES-256-XTS `crypt.device` |
 | `kernel/fs/` | GPT, writable checksummed ext4, checksummed JBD2 journal and the storage boot policy (including the console passphrase prompt) |
 | `kernel/crypto/` | AES, XTS, AES-NI, BLAKE2b and Argon2id (shared with the host tools) |
-| `drivers/` | PCI, legacy virtio-blk, NVMe and AHCI/SATA block device drivers, legacy virtio-net, and the xHCI controller with its USB HID keyboard, mouse and Audio Class decoders |
+| `drivers/` | PCI, legacy virtio-blk, NVMe and AHCI/SATA block device drivers, legacy virtio-net, and the xHCI controller with its USB HID keyboard, mouse and Audio Class decoders (audio frames flow into `kernel/audio/`) |
 | `scripts/` | QEMU runner, disk/RAID1/RAID10/crypt image builders, boot/PE/disk/RAID/journal/crypt checks, the serial and keyboard prompt drivers, tamper helper, size and reproducibility gates |
 | `tests/host/` | host unit tests for freestanding code |
 | `tools/` | host-side development tools (`gen-font.py`, `mkcrypt.c`, `gen-crc32c.py`) |
 | `docs/` | [build](docs/build.md), [boot](docs/boot.md), [storage](docs/storage.md), [checksums](docs/checksums.md), [crypto](docs/crypto.md), [input](docs/input.md), [network](docs/network.md),
-[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [USB/xHCI](docs/usb.md), [audio](docs/audio.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
+[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [USB/xHCI](docs/usb.md), [audio](docs/audio.md), [graphics](docs/gfx.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
 
 ## Versioning
 
@@ -695,13 +738,16 @@ queue and can be hotplugged into the running guest; phase 5B widened that
 driver to a device table of boot keyboards and mice and gave `input.device` a
 pointer state driven by a boot-mouse decoder; phase 5C added `audio.device`, a
 per-channel mixer and a USB Audio Class driver that streams isochronous packets
-from a PCM ring, gated with a hermetic QEMU audio function. Remaining phase 3B work is
+from a PCM ring, gated with a hermetic QEMU audio function; phase 5D added
+`gfx.device`, a 12x19 cursor the framebuffer console saves and recomposites
+around its text, gated by comparing QEMU screendumps against the guest's own
+coordinates. Remaining phase 3B work is
 online RAID rebuild, hot spare, scrub and a write-intent bitmap, RAID below
 encryption, a redundant ESP, TPM/keyfile keyslots and USB storage; phase 4
 continues with framebuffer (GOP) console input and virtual terminals, plus a
 routing table and richer resolver features on top of the phase 4B-4D stack;
-the next phase adds a pointer-driven graphics consumer on top of that stack.
-Later phases cover
+the next step is console scrollback and click handling on top of the phase 5D
+cursor. Later phases cover
 USB storage, graphics, Workbench userspace, SMP/IOMMU and virtualisation. See
 [docs/roadmap.md](docs/roadmap.md) for the full sequence and the known
 specification gaps (Crug syntax, cross-architecture compilers and the OVMF

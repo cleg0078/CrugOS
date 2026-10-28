@@ -43,6 +43,12 @@ u64 timer_monotonic_ns(void)
     return g_now;
 }
 
+/* Shared with the gfx host tests so an idle stub can advance the clock. */
+void test_clock_advance_ns(u64 delta)
+{
+    g_now += delta;
+}
+
 void net_poll(void)
 {
     g_now += 1000000ull; /* 1 ms per poll, so timeout loops always end */

@@ -35,13 +35,14 @@ OVMF (UEFI firmware)
 `include/crug/bootinfo.h` is the single contract between loader and kernel.
 The structure is versioned (`magic = 0x43524731`, `version = 1`) and the kernel
 refuses to boot if either does not match or if required fields are invalid.
-Phases 1 through 5C did not change the layout; phase 3B-9 is the first
+Phases 1 through 5D did not change the layout; phase 3B-9 is the first
 kernel to consume the `command_line` field, phase 3B-10 falls back to an
 interactive serial passphrase prompt when no token is present, phases 4C and 4D
 read the non-secret `net.tcp=` / `net.serve=` / `net.dns=` /
 `net.dns-tcp=` / `net.name=` tokens from the same field, phase 5A adds
-`usb.wait=` / `usb.keys=`, phase 5B adds `usb.mouse=` / `usb.moves=`, and phase
-5C adds `audio.rate=` / `audio.volume=` / `audio.seconds=`. The
+`usb.wait=` / `usb.keys=`, phase 5B adds `usb.mouse=` / `usb.moves=`, phase
+5C adds `audio.rate=` / `audio.volume=` / `audio.seconds=`, and phase 5D adds
+`gfx.wait=` / `gfx.moves=`. The
 loader caps
 the command line at 511 bytes and the kernel wipes the page after it copies the
 `crypt.pass=` value.
@@ -114,7 +115,11 @@ post-snapshot allocations cannot push it over capacity.
    `audio.seconds=`, and `audio_init` resets the mixer and the PCM ring:
    `CRUGOS: audio device absent` when no USB audio function was enumerated, or
    `CRUGOS: audio device ready (usb uac1|uac2, 2 ch, 16-bit, 48000 Hz)` after
-   the driver attached to interface class 0x01.
+   the driver attached to interface class 0x01. `gfx_init` then requires a GOP
+   framebuffer and centres the pointer sprite, and `gfx_cmdline` reads
+   `gfx.wait=<seconds>` and `gfx.moves=<n>`: the boot prints
+   `CRUGOS: gfx framebuffer absent` or
+   `CRUGOS: gfx ready (1024x768, cursor at 512,384)`.
 9. `net_init`: reset `net.device` and `tcp_init`, then probe legacy virtio-net
    PCI functions (up to four `eth0`..`eth3`) and register them, bind the DHCP
    client to UDP port 68 and read the `net.tcp=<port>` / `net.serve=<seconds>`
@@ -179,9 +184,11 @@ post-snapshot allocations cannot push it over capacity.
     for a mouse only when `usb.mouse=` or `usb.moves=` did; then the audio
     check, which streams a 440 Hz tone for `audio.seconds=` (0.5 s by default)
     through the mixer when a USB audio function is present and is silent
-    otherwise.
+    otherwise; then the graphics check, which shows the cursor and waits for
+    `gfx.moves=` pointer reports within `gfx.wait=` seconds when those tokens
+    were supplied and is silent otherwise.
 14. `report_boot`, `storage_lock` (wipes the passphrase, the volume keys and
-    the bounce buffer), `CRUGOS: phase 5c boot ok`, `arch_exit_qemu(0x10)`.
+    the bounce buffer), `CRUGOS: phase 5d boot ok`, `arch_exit_qemu(0x10)`.
 
 Storage is still brought up with interrupts disabled: the virtio driver polls
 its used ring, the NVMe driver polls completion queues and the AHCI driver polls
@@ -387,8 +394,11 @@ CRUGOS: audio stream started (48000 Hz, 2 ch)   # only with a USB audio function
 CRUGOS: audio streamed 24144 frame(s) in 498 ms
 CRUGOS: audio capture unavailable (no input endpoint)
 CRUGOS: audio selftest ok
+CRUGOS: gfx cursor shown at (512, 384)     # only with gfx.wait=/gfx.moves=
+CRUGOS: gfx cursor at (572, 424)
+CRUGOS: gfx selftest ok (3 move(s), buttons 0x00)
 CRUGOS: selftest ok
-CRUGOS: phase 5c boot ok
+CRUGOS: phase 5d boot ok
 ```
 
 The `virtio : net eth0 mac ...` line, the lease, the ARP resolution, the echo
@@ -411,6 +421,11 @@ controller, the enumerated device and one `usb key` line per typed character.
 `make test-usb-mouse` does the same with `usb-mouse` and prints `usb mouse
 ready`, one `usb mouse move` line per report and a `usb mouse button` line for
 the button edge. See [usb.md](usb.md).
+
+The `gfx` lines appear only in gate mode: `make test-gfx` boots with
+`gfx.wait=`/`gfx.moves=`, hotplugs a USB mouse and compares QEMU screendumps
+before and after each injected move. A normal boot prints neither those lines
+nor `CRUGOS: gfx cursor shown at`. See [gfx.md](gfx.md).
 
 The `audio` lines appear only on machines with a USB audio function: a default
 `q35` boot prints `CRUGOS: audio device absent`, while `make test-audio` adds

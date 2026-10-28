@@ -14,6 +14,7 @@
 #include <crug/storage.h>
 #include <crug/usb.h>
 #include <crug/audio.h>
+#include <crug/gfx.h>
 #include <crug/net.h>
 
 static handle_table g_handle_test;
@@ -83,4 +84,6 @@ void selftest_run(void)
         panic("selftest: usb input");
     if (!audio_selftest())
         panic("selftest: audio");
+    if (!gfx_selftest())
+        panic("selftest: gfx");
 }

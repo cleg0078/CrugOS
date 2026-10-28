@@ -87,6 +87,12 @@ void input_set_poll(void (*fn)(void))
     g_poll = fn;
 }
 
+void input_poll(void)
+{
+    if (g_poll)
+        g_poll();
+}
+
 void input_init(void)
 {
     g_head = 0;

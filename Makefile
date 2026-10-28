@@ -20,6 +20,7 @@
 #   make test-usb-hotplug  hotplug a USB keyboard into xHCI and type at it
 #   make test-usb-mouse    hotplug a USB mouse into xHCI and move the pointer
 #   make test-audio  stream PCM to a USB Audio Class device through the mixer
+#   make test-gfx    move a hotplugged USB mouse and verify the framebuffer cursor
 #   make crypt-disk  build the AES-256-XTS crypt test disk
 #   make test-crypt  boot from an encrypted root and verify the disk
 #   make test-crypt-recovery  unlock the encrypted root with the recovery keyslot
@@ -80,6 +81,7 @@ EXPECT_DNS ?= no
 EXPECT_USB ?= no
 EXPECT_MOUSE ?= no
 EXPECT_AUDIO ?= no
+EXPECT_GFX ?= no
 
 # QEMU / firmware options.
 MEMORY_MB ?= 512
@@ -104,6 +106,10 @@ MOUSE_WAIT ?= 20
 MOUSE_RUN_TIMEOUT_SEC ?= 240
 AUDIO_RUN_TIMEOUT_SEC ?= 240
 AUDIO_QEMU_EXTRA ?= -device qemu-xhci,id=xhci -device usb-audio,audiodev=audio0 -audiodev none,id=audio0
+GFX_WAIT ?= 40
+GFX_MOVES ?= 3
+GFX_RUN_TIMEOUT_SEC ?= 240
+GFX_QEMU_EXTRA ?= -device qemu-xhci,id=xhci
 NET_MODE ?=
 NET_HOSTFWD ?=
 OVMF_CODE ?= /usr/share/OVMF/OVMF_CODE_4M.fd
@@ -189,6 +195,7 @@ KERNEL_SOURCES := $(wildcard kernel/arch/$(ARCH)/*.c) $(wildcard kernel/arch/$(A
                   $(wildcard kernel/mm/*.c) $(wildcard kernel/block/*.c) \
                   $(wildcard kernel/fs/*.c) $(wildcard kernel/input/*.c) \
                   $(wildcard kernel/net/*.c) $(wildcard kernel/audio/*.c) \
+                  $(wildcard kernel/gfx/*.c) \
                   $(wildcard drivers/*/*.c) \
                   $(wildcard kernel/crypto/*.c) $(wildcard kernel/crypto/*.S)
 KERNEL_OBJECTS := $(patsubst %,$(OBJ)/%.o,$(basename $(KERNEL_SOURCES)))
@@ -208,7 +215,7 @@ HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
         test-crypt test-crypt-recovery test-crypt-wrongkey test-crypt-tamper test-crypt-ni \
         test-crypt-prompt test-crypt-prompt-wrong test-crypt-prompt-timeout \
         test-crypt-keyboard test-crypt-keyboard-wrong crypt-run test-net test-tcp \
-        test-net-dns test-usb-hotplug test-usb-mouse test-audio \
+        test-net-dns test-usb-hotplug test-usb-mouse test-audio test-gfx \
         crash-disk \
         check-disk size check-efi repro test-host preflight version options clean distclean help
 
@@ -413,6 +420,20 @@ test-audio: esp
 	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" no no no no no any no no no no no yes
 	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 
+# Graphics gate: the guest boots with an xHCI controller and no pointer, the
+# driver hotplugs a usb-mouse over QMP, then moves it with relative events.
+# Each move is verified twice: the guest's own cursor marker and the amber
+# sprite centroid in a QEMU screendump of the GOP framebuffer.
+test-gfx: esp
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(PYTHON) scripts/run-gfx-cursor.py --repo $(CURDIR) \
+		--disk $(abspath $(DISK_IMG)) --serial-log $(abspath $(SERIAL_LOG)) \
+		--exit-code $(abspath $(QEMU_EXIT)) --moves $(GFX_MOVES) \
+		--gfx-wait $(GFX_WAIT) --run-timeout $(GFX_RUN_TIMEOUT_SEC) \
+		--qemu-extra "$(GFX_QEMU_EXTRA)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" no no no no no any no no no no no no yes
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
 test:
 	$(Q)rm -f $(DISK_IMG)
 	$(Q)$(MAKE) --no-print-directory run
@@ -597,6 +618,7 @@ options:
 	@printf '  %-16s %s\n' EXPECT_USB "$(EXPECT_USB)"
 	@printf '  %-16s %s\n' EXPECT_MOUSE "$(EXPECT_MOUSE)"
 	@printf '  %-16s %s\n' EXPECT_AUDIO "$(EXPECT_AUDIO)"
+	@printf '  %-16s %s\n' EXPECT_GFX "$(EXPECT_GFX)"
 	@printf '  %-16s %s\n' NET_MODE "$(NET_MODE)"
 	@printf '  %-16s %s\n' NET_HOSTFWD "$(NET_HOSTFWD)"
 	@printf '  %-16s %s\n' TCP_SERVE_SEC "$(TCP_SERVE_SEC)"
@@ -613,6 +635,10 @@ options:
 	@printf '  %-16s %s\n' MOUSE_RUN_TIMEOUT_SEC "$(MOUSE_RUN_TIMEOUT_SEC)"
 	@printf '  %-16s %s\n' AUDIO_RUN_TIMEOUT_SEC "$(AUDIO_RUN_TIMEOUT_SEC)"
 	@printf '  %-16s %s\n' AUDIO_QEMU_EXTRA "$(AUDIO_QEMU_EXTRA)"
+	@printf '  %-16s %s\n' GFX_WAIT "$(GFX_WAIT) (seconds)"
+	@printf '  %-16s %s\n' GFX_MOVES "$(GFX_MOVES)"
+	@printf '  %-16s %s\n' GFX_RUN_TIMEOUT_SEC "$(GFX_RUN_TIMEOUT_SEC)"
+	@printf '  %-16s %s\n' GFX_QEMU_EXTRA "$(GFX_QEMU_EXTRA)"
 	@printf '  %-16s %s\n' MEMORY_MB "$(MEMORY_MB)"
 	@printf '  %-16s %s\n' SMP "$(SMP)"
 	@printf '  %-16s %s\n' TIMEOUT_SEC "$(TIMEOUT_SEC)"

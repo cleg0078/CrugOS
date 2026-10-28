@@ -23,7 +23,9 @@ caching DNS stub resolver with a UDP query, a TCP fallback and a name syscall;
 phase 5A adds a polled xHCI host controller, a USB HID boot keyboard and a
 hotplug gate; phase 5B adds a USB HID boot mouse, a four-device table on that
 controller and a pointer device; phase 5C adds `audio.device`, a per-channel
-mixer and a USB Audio Class driver with an isochronous xHCI path.
+mixer and a USB Audio Class driver with an isochronous xHCI path; phase 5D adds
+`gfx.device`, a pointer-driven sprite composited onto the GOP framebuffer
+console.
 Every later phase keeps the same BootInfo contract, so the loader does not
 change for memory management, storage, SMP or drivers.
 
@@ -460,6 +462,37 @@ change for memory management, storage, SMP or drivers.
   `make test-host` covers the UAC1 descriptor, the mixer table, the tone and the
   PCM ring (2372 checks).
 - All 33 gates pass at `v0.21.0`.
+
+## Phase 5D - Pointer-driven framebuffer cursor (done)
+
+- `kernel/arch/x86_64/fb.c` now owns a 12x19 sprite: `fb_cursor_show_at()`
+  saves the pixels it covers, draws the white outline and amber body, and every
+  text path (`fb_putc()`, `fb_clear()`, `fb_scroll()`) restores, writes and
+  recomposites so neither the text nor the cursor damages the other. The
+  `fb_pixel_color` packing was inverted for `CRUG_PIXEL_BGRX8888` since phase 0
+  and only the coloured sprite exposed it; the gate compares framebuffer colour,
+  not just coordinates, so the encoding stays honest.
+- `gfx.device` (`kernel/gfx/gfx.c`, `include/crug/gfx.h`) drains
+  `input_pointer_read()`, moves the cursor by the raw delta with
+  `GFX_CURSOR_STEP`, clamps to the screen, tracks button transitions and prints
+  one `CRUGOS: gfx cursor at (X, Y)` marker per move in gate mode.
+  `gfx.wait=` and `gfx.moves=` bound the boot check, and `gfx_selftest()` is
+  silent unless those tokens asked for work, so no existing gate changed
+  behaviour.
+- `CRUGOS: gfx cursor shown at` is printed before the wait and
+  `CRUGOS: gfx selftest ok (N move(s), buttons 0xNN)` after it, followed by a
+  1.5 s linger so the gate's final screendump cannot race the QEMU exit.
+- `make test-gfx` boots `usb=off,i8042=off` with `qemu-xhci`, hotplugs a
+  `usb-mouse` over QMP, injects relative motion three times, and compares QEMU
+  screendumps: the amber sprite centroid must move by the same delta the guest
+  reported (2.0 pixel tolerance). It requires the `gfx` markers, exit 33 and a
+  clean `e2fsck`.
+- `tests/host/test_gfx.c` stubs the framebuffer and drives the real pointer
+  state; under `CRUG_HOST_TEST` the `sti; hlt; cli` idle becomes a stub that
+  advances the shared fake clock, so the self-test linger and timeout loops
+  terminate. `make test-host` reports 2426 checks.
+- All 34 gates pass at `v0.22.0`.
+
 ## Phase 3B - remaining storage work
 
 - Journal wrapping, revoke records and orphan-file recovery.
@@ -478,18 +511,18 @@ change for memory management, storage, SMP or drivers.
 
 - USB HID devices beyond the boot keyboard, mouse and audio function (phase 5A
   delivered the xHCI controller and the keyboard, phase 5B the mouse, phase 5C
-  `audio.device`, the mixer and the USB Audio Class driver; the next step is a
-  pointer-driven graphics consumer that renders a cursor from the pointer state
-  on the GOP framebuffer; phase 4A delivered the PS/2 console input step, phase
+  `audio.device`, the mixer and the USB Audio Class driver, phase 5D the
+  pointer-driven cursor on the GOP framebuffer; phase 4A delivered the PS/2
+  console input step, phase
   4B the virtio-net/IPv4 slice, phase 4C the TCP/socket slice and phase 4D the
   DNS resolver).
 - A routing table and richer resolver features (multiple servers, DNSSEC
   validation, AAAA/PTR/SRV, search domains, negative caching) on top of the
   phase 4B-4D stack, richer socket semantics (bind, options, non-blocking, more
   than four sockets); IPv6, fragmentation and reassembly.
-- Software framebuffer -> VirtIO-GPU -> vendor GPU drivers, starting with the
-  pointer-driven cursor and console scrollback on top of the phase 5C audio and
-  phase 5B pointer stacks.
+- Software framebuffer -> VirtIO-GPU -> vendor GPU drivers, starting with
+  console scrollback, click handling and acceleration on top of the phase 5D
+  cursor, the phase 5B pointer stack and the phase 5C audio stack.
 - Workbench userspace, `.app` bundles, `.crpkg` packages, capability model.
 - POSIX-like layer: 64-bit UID/GID, ACLs, process groups, signals.
 
