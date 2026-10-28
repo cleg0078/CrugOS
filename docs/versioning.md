@@ -1,20 +1,32 @@
 # Versioning
 
 CrugOS uses [Semantic Versioning 2.0.0](https://semver.org/) with annotated
-`vMAJOR.MINOR.PATCH` Git tags. The current release is `v0.24.0`, phase 6B:
-menu bars with popups, body gadgets, a close gadget and a typed event queue on
-top of the phase 6A desktop. `intuition.device` gained
-`intuition_set_menus()` / `intuition_add_gadget()` / `intuition_event_poll()`
-with two menus of six items and four gadgets per window, a 150-pixel popup with
-18-pixel rows that highlights the row under the pointer, a 12x12 close gadget
-that closes a window on press, `ACTIVATE` / `DRAG` / `MENU` / `GADGET` / `CLOSE`
-events in a 16-entry FIFO that drops the newest on overflow, and press
-precedence `popup row > menu bar > close gadget > body gadget > title drag`.
-`workbench.c` reads `wb.menu=` / `wb.acts=`, drains the queue into
-`wb action N menu|gadget|close ...` lines and waits for both drags and actions,
-`make test-workbench-menu` drives six clicks over QMP and verifies a highlighted
-popup row, the desktop background after a close and the white frame of the
-surviving window in screendumps, and `make test-host` reports 2639 checks -- on
+`vMAJOR.MINOR.PATCH` Git tags. The current release is `v0.25.0`, phase 6C: a
+live shell in the Workbench's second window. `include/crug/textgrid.h` +
+`kernel/lib/textgrid.c` add a scrollback of 96 lines of 38 columns (37 usable)
+with a wrap, a backspace, tail-preserving overwrites, oldest-line eviction and a
+clipped inverse-video cursor cell; `include/crug/shell.h` +
+`kernel/shell/shell.c` add a 79-character line editor with `Ctrl-U`, `Ctrl-C`
+and an eight-entry `Ctrl-P`/`Ctrl-N` history, a tokenizer that folds extra words
+into the last argument and the command table `help`, `ver`, `mem`, `uptime`,
+`ps`, `ls`, `cat`, `echo`, `write`, `sync`, `cls` over a five-call
+`struct shell_io`, which `kernel/shell/shell_ops.c` binds to the mounted ext4
+root, the heap counters and the scheduler; `intuition_set_paint()` /
+`intuition_redraw_window()` let a window body be painted by a callback, so the
+grid redraws on every keystroke; `workbench.c` reads `wb.shell=1` / `wb.sh=`,
+routes every keystroke to the shell, prints `sh run` / `sh out` lines and
+`CRUGOS: wb shell ready (window 2, 37x8 text)`, and `make test-workbench-shell`
+types four commands through a hotplugged `usb-kbd` and verifies them against
+two `screendump`s and the boot markers. `make test-host` reports 2792 checks --
+on top of `v0.24.0`, phase 6B: menu bars with popups, body gadgets, a close
+gadget and a typed event queue on the phase 6A desktop
+(`intuition_set_menus()` / `intuition_add_gadget()` / `intuition_event_poll()`,
+two menus of six items, four gadgets per window, a 150-pixel popup with 18-pixel
+rows, a 12x12 close gadget, `ACTIVATE` / `DRAG` / `MENU` / `GADGET` / `CLOSE` in
+a 16-entry FIFO that drops the newest, press precedence `popup row > menu bar >
+close gadget > body gadget > title drag`, `wb.menu=` / `wb.acts=`,
+`make test-workbench-menu` driving six QMP clicks and checking the highlighted
+row, the desktop background after a close and the surviving white frame) -- on
 top of `v0.23.1`, a packaging
 release on top of phase 6A: `make iso` assembles a hybrid UEFI ISO that boots
 from a USB stick and from a CD-ROM (`scripts/mkiso.sh` driving `xorriso`, a
@@ -124,6 +136,7 @@ make test-audio                  # stream PCM to a USB Audio Class device
 make test-gfx                    # move a hotplugged USB mouse and verify the cursor
 make test-workbench              # drag a window on the software-rendered desktop
 make test-workbench-menu         # open menus, select items and click gadgets
+make test-workbench-shell        # type commands into the Workbench shell window
 make test-iso                    # boot the hybrid ISO from USB and from CD-ROM
 make size check-efi test-host repro
 make check-disk                  # e2fsck + persisted files on the test disk
@@ -151,6 +164,7 @@ git push origin main vX.Y.Z
 | `v0.13.0` | 2026-10-27 | phase 3B-9: `crypt.device` (GPT type `8f1c7d2e-...`, 16 KiB header, eight keyslots, AES-256-XTS data area with data-relative tweaks), Argon2id (RFC 9106) key derivation, 64-byte master key wrapped per slot with a keyed BLAKE2b-256 MAC and a recovery passphrase, AES-NI/software dispatch pinned to IEEE 1619 vector 10, loader `\crugos\cmdline.txt` with `crypt.pass=` plus redaction and key zeroization, `mkcrypt` host tool, `mkdisk.sh crypt` mode, and five encrypted-root gates; BootInfo stays v1 and the kernel ABI is unchanged |
 | `v0.14.0` | 2026-10-27 | phase 3B-10: masked serial-console passphrase prompt when the ESP carries no `crypt.pass=`, shared line editor (`kernel/lib/lineedit.c`) with CR/LF, backspace, Ctrl-C and overflow handling, three attempts bounded by `crypt.prompt_timeout=`, fail-closed `crypt locked` markers, `SERIAL_TCP` serial capture and the `run-crypt-prompt.py` driver behind three new gates (correct, wrong, timeout); BootInfo stays v1 and the kernel ABI is unchanged |
 | `v0.15.0` | 2026-10-27 | phase 4A: `input.device` (set-1 scancode decoder, Shift/Ctrl/Alt/Caps state, US layout, control-code mapping, 64-byte queue), polled i8042 keyboard driver, `console_try_getc()` merging serial and keyboard input, `CRUGOS: input ready (serial + keyboard)` marker and console prompt wording, QMP `send-key` driver (`run-crypt-keyboard.py`) behind two new keyboard gates and 903 host checks; BootInfo stays v1 and the kernel ABI is unchanged |
+| `v0.25.0` | 2026-10-28 | phase 6C: the Workbench shell (`include/crug/textgrid.h` + `kernel/lib/textgrid.c`: `TG_LINES` 96-line ring of `TG_COLS` 38-column NUL-terminated lines (37 usable), `\n`/`\r`/backspace/`.` control mapping, tail-preserving overwrite, oldest-line eviction on overflow, `tg_draw()` painting `min((h-6)/20, 8)` lines at a 20-pixel pitch with a clipped inverse-video cursor cell; `include/crug/shell.h` + `kernel/shell/shell.c`: 79-character line editor, `Ctrl-U`/`Ctrl-C`/`Ctrl-P`/`Ctrl-N` with an eight-entry history that restores the draft, a tokenizer folding extra words into the last argument, the command table `help`/`ver`/`mem`/`uptime`/`ps`/`ls`/`cat`/`echo`/`write`/`sync`/`cls` over a five-call `struct shell_io`; `kernel/shell/shell_ops.c` binding `list`/`read`/`write`/`sync`/`info` to `ext4_list`/`ext4_read_file`/`ext4_lookup`+`ext4_create`+`ext4_write_file`/`ext4_fsync` on `storage_root()`, the heap counters, `sched_current()` and `sched_switches()`; `intuition_set_paint()`/`intuition_redraw_window()` body painters; `kernel/gfx/workbench.c` + `include/crug/workbench.h`: `wb.shell=1`/`wb.sh=` tokens, grid banner, keyboard routing through `input_try_getc()`, `CRUGOS: wb shell ready (window 2, 37x8 text)`, `CRUGOS: sh run '<line>'`/`CRUGOS: sh out <text>` markers, `sh command timeout`, `sh selftest ok`; `scripts/run-workbench-shell.py` typing four commands through a hotplugged `usb-kbd` with screendump body checks behind `make test-workbench-shell`, `EXPECT_SHELL`/`WB_SHELL_WAIT`/`WB_SHELL_CMDS`/`WB_SHELL_RUN_TIMEOUT_SEC` make options, `tests/host/test_textgrid.c` + `tests/host/test_shell.c` (2792 host checks) and docs/workbench.md; BootInfo stays v1 and the kernel ABI is unchanged |
 | `v0.24.0` | 2026-10-28 | phase 6B: menus, gadgets and the Intuition event queue (`include/crug/intuition.h` + `kernel/gfx/intuition.c`: `intuition_set_menus()` with two menus of six items, an 18 px menu bar at `x = 4`, 150-px popups at `(strip_x, 18)` with 18-px rows, hover highlight and selection, `intuition_add_gadget()` body-relative gadgets clamped to the body with a 16x16 minimum, a 12x12 close gadget that closes on press, press precedence popup row > menu bar > close gadget > body gadget > title drag, `ACTIVATE`/`DRAG`/`MENU`/`GADGET`/`CLOSE` events in a 16-entry FIFO dropping the newest with `intuition_event_dropped()`, `intuition_event_poll()`/`menu_open()`/`menu_hover()`/`menu_opens()`/`gadget_clicks()`/`close_count()`/`action_count()`/`event_count()`, an untitled menu entry ends the table instead of crashing the bar; `kernel/gfx/workbench.c` + `include/crug/workbench.h`: `wb.menu=` / `wb.acts=` tokens, two menu tables and a `Run` gadget, queue drain into `wb action N menu|gadget|close ...`, `wb_selftest` waits for drags and actions, `wb.wait=0` disables both; `scripts/run-workbench-menu.py` driving six QMP clicks with screendump checks of the highlighted popup row, the desktop background after a close and the white frame of the surviving window, `EXPECT_MENU`/`WB_MENU_WAIT`/`WB_MENU_ACTS`/`WB_MENU_RUN_TIMEOUT_SEC` make options, `tests/host/test_intuition.c` menu/gadget/close/event-queue groups (2639 host checks) and docs/workbench.md; BootInfo stays v1 and the kernel ABI is unchanged |
 | `v0.23.1` | 2026-10-28 | packaging: bootable hybrid UEFI ISO (`scripts/mkiso.sh` + `scripts/mkfat.py` + `xorriso`: El Torito no-emulation entry, deterministic FAT16 ESP image with 8.3 enforcement and `--list`/`--read`, `ISO_CMDLINE` rewritten into the staged ESP, protective MBR with a type-`0xEF` entry, `ISO_IMAGE`/`ISO_STAGE`/`ISO_FAT_IMG`/`ISO_SIZE_MB`/`ISO_VOLID`/`ISO_CMDLINE`/`ISO_DATE`/`ISO_RUN_TIMEOUT_SEC`/`EXPECT_ISO`/`ISO_IMG`/`USB_IMG`/`USB_STICK`/`USB_DEV`/`USB_CONFIRM` make options), kernel `storage=none` command-line token (`CRUGOS: storage skipped (storage=none)`, storage self-tests soft-skipped, still fail-closed without the token), `scripts/check-iso.py` (ISO 9660 PVD, El Torito boot record and catalog checksum, FAT16 BPB, protective MBR, `xorriso -osirrox` extraction compared with the catalog range, `fsck.vfat -n`, file set and command line), `make test-iso` booting the ISO as `usb-storage` on `qemu-xhci` and as a CD-ROM with `boot-check.py --storage=none`, `make usb` with `USB_DEV`/`USB_CONFIRM` guards, optional `xorriso`/`fsck.vfat` preflight notes and docs/iso.md; BootInfo stays v1 and the kernel ABI is unchanged |
 | `v0.23.0` | 2026-10-28 | phase 6A: Workbench desktop foundation (`kernel/gfx/intuition.c` + `include/crug/intuition.h`: four window slots with a stacking order, top-down title-bar hit tests, raise/activate, grab-offset dragging with screen clamping, close gadget, 47-char body lines, full-desktop repaint, gate-mode `wb window N opened` / `active` / `drag start` / `drag to` / `moved to` markers; `kernel/gfx/workbench.c` + `include/crug/workbench.h`: `wb.enable=` / `wb.wait=` / `wb.drag=` tokens, text console released through `fb_set_text_enabled(0)`, two demo windows, `usb_poll` + `gfx_pointer_poll` as the console poll hook, silent `wb_selftest` unless enabled, 1.5 s capture linger; `gfx.device` `gfx_set_pointer_hook()` so the desktop sees the same deltas as the sprite; `kernel/arch/x86_64/fb.c` + `include/crug/fb.h`: `fb_fill_rect`, `fb_frame_rect`, `fb_draw_text` and the `fb_cursor_begin`/`fb_cursor_end` save-under bracket; `scripts/run-workbench.py` driving QMP hotplug, a title-bar drag and screendump title-bar colour checks behind `make test-workbench`, `EXPECT_WB`/`WB_WAIT`/`WB_DRAG`/`WB_RUN_TIMEOUT_SEC`/`WB_QEMU_EXTRA` make options, `tests/host/test_intuition.c` with a fake framebuffer, docs/workbench.md and 2487 host checks; BootInfo stays v1 and the kernel ABI is unchanged |

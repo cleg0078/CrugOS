@@ -143,7 +143,7 @@ both self-test outcomes.
 - No GPU driver and no 2D acceleration: the framebuffer has one text console,
   one sprite and, from phase 6A, the software desktop described in
   [workbench.md](workbench.md) (menus, gadgets and the event queue since
-  phase 6B).
+  phase 6B, and the shell window since phase 6C).
 - Relative motion only, no acceleration curve, no wheel scrolling of the
   console, no click handling beyond recording the button mask.
 - The sprite is clipped at the screen edge; there is no wrap-around.

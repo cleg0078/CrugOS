@@ -36,7 +36,7 @@ void kernel_main(const boot_info *bi)
     trace("K:console");
 
     console_write("\n");
-    console_write("CrugOS " CRUG_VERSION_STR " (phase 6b) -- Amiga-inspired microkernel bring-up\n");
+    console_write("CrugOS " CRUG_VERSION_STR " (phase 6c) -- Amiga-inspired microkernel bring-up\n");
     console_write("CRUGOS: hello\n");
     kprintf("CRUGOS: version %s\n", CRUG_VERSION_STR);
 
@@ -106,7 +106,7 @@ void kernel_main(const boot_info *bi)
     report_boot(bi, &t);
 
     storage_lock();
-    kprintf("CRUGOS: phase 6b boot ok\n");
+    kprintf("CRUGOS: phase 6c boot ok\n");
     /* Interactive demo (make demo): keep the desktop on screen while the
        mouse and keyboard stay live.  Silent unless wb.hold= was supplied. */
     wb_hold();

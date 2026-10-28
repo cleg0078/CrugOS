@@ -1,10 +1,13 @@
-/* Workbench desktop bring-up (phase 6A/6B).
+/* Workbench desktop bring-up (phase 6A/6B/6C).
    The desktop is a gate-only mode for now: wb.enable=1 takes the framebuffer
    away from the text console (which keeps writing to the serial port), opens
    two windows through intuition.device, gives them menus and a body gadget,
    and either waits for a title-bar drag (wb.drag=) or for a sequence of menu,
    gadget and close actions (wb.menu=1 wb.acts=) so the hotplug gate can prove
-   the event path with serial markers and screendump comparisons. */
+   the event path with serial markers and screendump comparisons.  Phase 6C
+   adds the live shell: wb.shell=1 paints the shell's text grid into the Shell
+   window body and routes every key there, and wb.sh=<n> waits for n typed
+   commands before the boot finishes. */
 #include <crug/types.h>
 #include <crug/string.h>
 #include <crug/kernel.h>
@@ -15,6 +18,8 @@
 #include <crug/timer.h>
 #include <crug/cpu.h>
 #include <crug/usb.h>
+#include <crug/shell.h>
+#include <crug/textgrid.h>
 #include <crug/workbench.h>
 
 static int g_enabled;
@@ -27,6 +32,14 @@ static u32 g_hold_seconds;
 static int g_menu_mode;
 static u32 g_want_actions;
 static u32 g_actions_seen;
+
+/* Phase 6C: the Shell window hosts the live shell. */
+static int g_shell_mode;
+static u32 g_want_commands;
+static u32 g_commands_seen;
+static int g_shell_window;
+static struct textgrid g_grid;
+static struct shell g_shell;
 
 /* Menus of the active window are drawn in the screen-top menu bar. */
 static const struct intuition_menu wb_menus_top[2] = {
@@ -115,6 +128,21 @@ static void wb_cmdline_token(const char *tok, usize len)
         }
         return;
     }
+    used = wb_prefix(tok, len, "wb.shell=");
+    if (used >= 0) {
+        if (wb_parse_u32(tok + used, len - (usize)used, &value) == 0) {
+            g_shell_mode = value ? 1 : 0;
+        }
+        return;
+    }
+    used = wb_prefix(tok, len, "wb.sh=");
+    if (used >= 0) {
+        if (wb_parse_u32(tok + used, len - (usize)used, &value) == 0) {
+            g_want_commands = value > WB_SHELL_CMDS_MAX ? WB_SHELL_CMDS_MAX
+                                                        : value;
+        }
+        return;
+    }
     used = wb_prefix(tok, len, "wb.hold=");
     if (used >= 0) {
         if (wb_parse_u32(tok + used, len - (usize)used, &value) == 0) {
@@ -197,10 +225,60 @@ static void wb_drain_events(void)
     }
 }
 
+/* ---- phase 6C: the live shell -------------------------------------- */
+
+/* Body painter: the shell's grid owns the Shell window body. */
+static void wb_shell_paint(int id, i32 x, i32 y, u32 w, u32 h, void *ctx)
+{
+    (void)id;
+    (void)ctx;
+    tg_draw(&g_grid, (u32)x, (u32)y, w, h, INTUITION_BODY_TEXT_RGB,
+            INTUITION_WINDOW_RGB);
+}
+
+/* Every command output line becomes one serial marker, so the gate can read
+   the shell's answers without OCR. */
+static void wb_shell_sink(const char *text, void *ctx)
+{
+    (void)ctx;
+    if (g_reporting) {
+        kprintf("CRUGOS: sh out %s\n", text);
+    }
+}
+
+static void wb_shell_run(const char *line, void *ctx)
+{
+    (void)ctx;
+    if (g_reporting) {
+        kprintf("CRUGOS: sh run '%s'\n", line);
+    }
+}
+
+/* Drain whatever input.device has queued into the shell and repaint the Shell
+   window.  In shell mode every key goes to the shell, whatever window is
+   active; the pointer path is unchanged.  Returns 1 when a line executed. */
+static int wb_shell_pump(void)
+{
+    int ch;
+    int executed = 0;
+
+    if (!g_shell_mode || !g_ready) {
+        return 0;
+    }
+    while ((ch = input_try_getc()) >= 0) {
+        if (shell_feed(&g_shell, (u8)ch) == 1) {
+            g_commands_seen++;
+            executed = 1;
+        }
+        intuition_redraw_window(g_shell_window);
+    }
+    return executed;
+}
+
 int wb_init(void)
 {
     int top;
-    int shell;
+    int shell_id;
     u32 width = 0;
     u32 height = 0;
 
@@ -211,16 +289,26 @@ int wb_init(void)
         kprintf("CRUGOS: wb framebuffer absent\n");
         return -1;
     }
-    g_reporting = (g_want_drags > 0u || g_menu_mode) ? 1 : 0;
+    g_reporting = (g_want_drags > 0u || g_menu_mode || g_shell_mode) ? 1 : 0;
     fb_set_text_enabled(0);
     intuition_init();
     intuition_set_reporting(g_reporting);
     top = intuition_open(80, 90, 360, 220, "Workbench",
-                         "CrugOS Workbench\nphase 6b\nsoftware rendered");
-    shell = intuition_open(480, 300, 320, 200, "Shell", "4.OS\ncrugos>");
+                         "CrugOS Workbench\nphase 6c\nsoftware rendered");
+    shell_id = intuition_open(480, 300, 320, 200, "Shell", "4.OS\ncrugos>");
     intuition_set_menus(top, wb_menus_top, 2u);
     intuition_add_gadget(top, 12, 60, 96, 22, "Run");
-    intuition_set_menus(shell, wb_menus_shell, 2u);
+    intuition_set_menus(shell_id, wb_menus_shell, 2u);
+    if (g_shell_mode) {
+        g_shell_window = shell_id;
+        tg_init(&g_grid);
+        tg_puts(&g_grid, "CrugOS Workbench shell");
+        tg_putc(&g_grid, '\n');
+        shell_init(&g_shell, &g_grid, shell_kernel_io());
+        shell_set_sink(&g_shell, wb_shell_sink, 0);
+        shell_set_run_hook(&g_shell, wb_shell_run, 0);
+        intuition_set_paint(shell_id, wb_shell_paint, 0);
+    }
     gfx_set_pointer_hook(wb_report_cursor);
     gfx_show(1);
     input_set_poll(wb_console_poll);
@@ -228,6 +316,11 @@ int wb_init(void)
     kprintf("CRUGOS: wb desktop ready (%ux%u, %u window(s))\n",
             (unsigned)width, (unsigned)height,
             (unsigned)intuition_window_count());
+    if (g_shell_mode) {
+        kprintf("CRUGOS: wb shell ready (window %d, %ux%u text)\n",
+                g_shell_window, (unsigned)(TG_COLS - 1u),
+                (unsigned)TG_ROWS_VISIBLE);
+    }
     return 0;
 }
 
@@ -237,6 +330,7 @@ void wb_poll(void)
         return;
     }
     gfx_pointer_poll();
+    wb_shell_pump();
 }
 
 int wb_selftest(void)
@@ -244,6 +338,7 @@ int wb_selftest(void)
     u64 deadline;
     u32 want;
     u32 want_actions;
+    u32 want_commands;
 
     if (!g_enabled) {
         return 1;
@@ -259,29 +354,41 @@ int wb_selftest(void)
     }
     want = g_want_drags;
     want_actions = g_menu_mode ? (g_want_actions ? g_want_actions : 1u) : 0u;
+    want_commands = g_shell_mode ? (g_want_commands ? g_want_commands : 1u) : 0u;
     deadline = timer_monotonic_ns() +
                (u64)(g_wait_seconds ? g_wait_seconds : 5u) * 1000000000ull;
     while (intuition_drag_count() < (u64)want ||
-           g_actions_seen < want_actions) {
+           g_actions_seen < want_actions ||
+           g_commands_seen < want_commands) {
         /* input_poll() runs the console hook, which pumps the USB mouse and
-           then drains the pointer state into intuition.device. */
+           then drains the pointer state into intuition.device; the shell pump
+           then feeds whatever the keyboard queued into the Shell window. */
         input_poll();
         wb_drain_events();
+        wb_shell_pump();
         if (timer_monotonic_ns() >= deadline) {
             if (intuition_drag_count() < (u64)want) {
                 kprintf("CRUGOS: wb pointer timeout (drag %u/%u)\n",
                         (unsigned)intuition_drag_count(), (unsigned)want);
-            } else {
+            } else if (g_actions_seen < want_actions) {
                 kprintf("CRUGOS: wb action timeout (%u/%u)\n",
                         (unsigned)g_actions_seen, (unsigned)want_actions);
+            } else {
+                kprintf("CRUGOS: sh command timeout (%u/%u)\n",
+                        (unsigned)g_commands_seen, (unsigned)want_commands);
             }
             return 0;
         }
         cpu_wait_for_irq();
     }
     wb_drain_events();
+    wb_shell_pump();
     kprintf("CRUGOS: wb selftest ok (%u drag(s), %u action(s))\n",
             (unsigned)intuition_drag_count(), (unsigned)g_actions_seen);
+    if (g_shell_mode) {
+        kprintf("CRUGOS: sh selftest ok (%u command(s))\n",
+                (unsigned)g_commands_seen);
+    }
     /* Keep the finished desktop on screen for a moment so the gate's last
        screendump does not race the rest of the boot to the exit. */
     deadline = timer_monotonic_ns() + 1500000000ull;
@@ -312,6 +419,7 @@ void wb_hold(void)
     while (timer_monotonic_ns() < deadline) {
         input_poll();
         wb_drain_events();
+        wb_shell_pump();
         cpu_wait_for_irq();
     }
     kprintf("CRUGOS: wb hold finished\n");

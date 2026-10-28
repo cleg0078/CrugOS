@@ -1,6 +1,6 @@
 # Building CrugOS
 
-This document describes the phase 6B build system: how the kernel, the UEFI
+This document describes the phase 6C build system: how the kernel, the UEFI
 loader, the host crypto tool, the test disk images and the bootable hybrid ISO
 are built, which invariants the link must preserve, and how to diagnose the
 failure modes that are specific to this toolchain.
@@ -37,6 +37,7 @@ make test-audio        # stream PCM to a USB Audio Class device through the mixe
 make test-gfx          # move a hotplugged USB mouse and verify the framebuffer cursor
 make test-workbench    # drag a window on the software-rendered desktop
 make test-workbench-menu  # open menus, select items and click gadgets
+make test-workbench-shell  # type commands into the Workbench shell window
 make iso         # build a bootable hybrid UEFI ISO (build/<arch>/crugos.iso)
 make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
@@ -139,6 +140,10 @@ options` prints the complete resolved set (including paths derived from
 | `WB_MENU_WAIT` | `30` | seconds the menu gate boots with `wb.wait=` so the mouse can be hotplugged late |
 | `WB_MENU_ACTS` | `4` | menu, gadget and close actions the menu gate performs and verifies |
 | `WB_MENU_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for `make test-workbench-menu` |
+| `EXPECT_SHELL` | `no` | `yes` requires the `wb shell ready` / `sh run` / `sh out` / `sh selftest ok` markers written by `make test-workbench-shell` |
+| `WB_SHELL_WAIT` | `30` | seconds the shell gate boots with `wb.wait=` so the keyboard can be hotplugged late |
+| `WB_SHELL_CMDS` | `4` | shell commands the gate types and verifies |
+| `WB_SHELL_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for `make test-workbench-shell` |
 | `DEMO_DISPLAY` | `gtk` | QEMU display `make demo` opens (any `-display` value, for example `sdl` or `none`) |
 | `DEMO_HOLD_SEC` | `600` | seconds `make demo` keeps the desktop on screen before the guest exits by itself |
 | `DEMO_TIMEOUT_SEC` | `900` | wall-clock budget for the whole `make demo` boot |
@@ -483,6 +488,20 @@ background where the window was, white frame of window 1), then opens window
 move is issued in steps of at most 100 pixels, because QEMU splits a larger
 relative motion into 8-bit HID reports and the guest drops some of them.
 
+`make test-workbench-shell` proves the phase 6C shell on the same machine setup,
+with [scripts/run-workbench-shell.py](../scripts/run-workbench-shell.py) in
+place of the click driver and a hotplugged `usb-kbd` instead of a mouse. It
+boots with `wb.enable=1 wb.wait=$(WB_SHELL_WAIT) wb.shell=1
+wb.sh=$(WB_SHELL_CMDS)` and types four commands, one QMP `send-key` per
+character 60 ms apart: `help`, `ls /`, `ver` and `echo hi`. A boot report line
+per command (`CRUGOS: sh run '<line>'`) keeps the driver in step with the
+guest, so a dropped HID report cannot silently shorten a line. The gate
+requires the version string and `hi` in the `sh out` lines, two `screendump`s
+of the shell body that differ by at least 200 pixels (with `0xE0E0E0` text
+pixels), `CRUGOS: sh selftest ok (4 command(s))`, exit status 33, the `shell`
+markers (`EXPECT_SHELL=yes`) and a clean `e2fsck`; it prints
+`ok: workbench shell commands (4 command(s), exit 33)`.
+
 ## Interactive demo
 
 `make demo` is not a gate but a way to watch the system: it boots
@@ -491,12 +510,13 @@ already plugged in) into a real `DEMO_DISPLAY` window (GTK by default) instead
 of the headless gates. The command line carries
 `wb.enable=1 wb.wait=0 wb.hold=$(DEMO_HOLD_SEC)`:
 
-- `wb.enable=1` hands the framebuffer to the phase 6B desktop and opens the two
-  demo windows.
+- `wb.enable=1` hands the framebuffer to the phase 6C desktop and opens the two
+  demo windows; adding `wb.shell=1` through `DEMO_CMDLINE` gives window 2 the
+  shell.
 - `wb.wait=0` turns the desktop self-test into a no-op, so the demo does not
   require a title-bar drag before the gate marker; the interactive desktop is
   the point, not the self-test.
-- `wb.hold=<seconds>` keeps the guest alive after `CRUGOS: phase 6b boot ok`
+- `wb.hold=<seconds>` keeps the guest alive after `CRUGOS: phase 6c boot ok`
   (`wb_hold()`), polling input once per timer tick, so the window stays on
   screen until the deadline or until you close it.
 

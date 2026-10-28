@@ -1,4 +1,4 @@
-# Workbench: intuition.device, menus and gadgets
+# Workbench: intuition.device, menus, gadgets and the shell
 
 Phase 6A starts the Workbench: a small software window manager in the kernel,
 `intuition.device`, that owns up to four windows on the GOP framebuffer.
@@ -7,10 +7,12 @@ and repainted straight into the linear framebuffer with the primitives in
 `fb.h`. Phase 6B adds the interaction model on top: a screen-top menu bar with
 popup menus, labelled gadgets inside a window body, a close gadget at the right
 end of every title bar, and a typed event queue that reports what the user
-did. There are no application tasks behind the desktop yet -- the kernel-side
-device is what the Workbench userspace will sit on -- so the only resident is
-the bring-up module itself, which opens two demo windows when the loader
-command line asks for it.
+did. Phase 6C fills the second window with a live shell -- a scrollback text
+grid, a line editor with history and a command set over the mounted ext4 root.
+There are no application tasks behind the desktop yet -- the kernel-side device
+is what the Workbench userspace will sit on -- so the only residents are the
+bring-up module and its shell, which appear when the loader command line asks
+for them.
 
 ```
   USB HID boot mouse (drivers/usb/xhci.c)
@@ -237,13 +239,15 @@ queue is empty. `intuition_init()` resets the queue and both counters.
 
    | id | rectangle | title | body |
    | --- | --- | --- | --- |
-   | 1 | (80, 90) 360x220 | `Workbench` | `CrugOS Workbench` / `phase 6b` / `software rendered` |
-   | 2 | (480, 300) 320x200 | `Shell` | `4.OS` / `crugos>` |
+   | 1 | (80, 90) 360x220 | `Workbench` | `CrugOS Workbench` / `phase 6c` / `software rendered` |
+   | 2 | (480, 300) 320x200 | `Shell` | `4.OS` / `crugos>`, or the shell grid when `wb.shell=1` |
 
    Window 1 carries the `Workbench` (About/Info/Quit) and `Window`
    (Close/New) menus plus a 96x22 `Run` gadget at body (12, 60); window 2
    carries `Shell` (New/Close) and `Workbench` and no gadget. Both tables go
-   in through phase 6B's `intuition_set_menus()`.
+   in through phase 6B's `intuition_set_menus()`. With `wb.shell=1` window 2
+   also gets a body painter through `intuition_set_paint()`, and that painter
+   draws the shell's text grid instead of the static body lines.
 
 4. installs `wb_report_cursor()` as the `gfx.device` pointer hook, shows the
    sprite and installs `wb_console_poll()` as the `input.device` poll hook, so
@@ -308,7 +312,7 @@ CRUGOS: wb window 2 drag start (512, 312)
 CRUGOS: wb window 2 drag to (557, 337)
 CRUGOS: wb window 2 moved to (570, 350)
 CRUGOS: wb selftest ok (1 drag(s), 0 action(s))
-CRUGOS: phase 6b boot ok
+CRUGOS: phase 6c boot ok
 ```
 
 The menu gate is a second boot and adds the action lines:
@@ -326,8 +330,14 @@ CRUGOS: wb menu 'Workbench' open (window 1)
 CRUGOS: wb menu 'Workbench' selected ('Quit')
 CRUGOS: wb action 4 menu window 1 item 2
 CRUGOS: wb selftest ok (0 drag(s), 4 action(s))
-CRUGOS: phase 6b boot ok
+CRUGOS: phase 6c boot ok
 ```
+
+The shell gate is a third boot: it adds `CRUGOS: wb shell ready (window 2,
+37x8 text)` after the desktop line and one `CRUGOS: sh run '<line>'` plus the
+`CRUGOS: sh out <text>` lines of that command per command, followed by
+`CRUGOS: wb selftest ok (0 drag(s), 0 action(s))` and
+`CRUGOS: sh selftest ok (4 command(s))` before the phase marker.
 
 | marker | when |
 | --- | --- |
@@ -344,6 +354,11 @@ CRUGOS: phase 6b boot ok
 | `CRUGOS: wb gadget '<label>' clicked in window N` | a gadget click completed |
 | `CRUGOS: wb window N closed (gadget)` | the close gadget closed the window |
 | `CRUGOS: wb action K menu\|gadget\|close ...` | one event was drained from the queue |
+| `CRUGOS: wb shell ready (window N, CxR text)` | `wb.shell=1` installed the shell painter |
+| `CRUGOS: sh run '<line>'` | a shell line was executed |
+| `CRUGOS: sh out <text>` | one output line of that command |
+| `CRUGOS: sh command timeout (N/M)` | the wait expired with commands missing |
+| `CRUGOS: sh selftest ok (N command(s))` | the requested commands ran |
 | `CRUGOS: wb cursor at (x, y)` | pointer motion with reporting on |
 | `CRUGOS: wb pointer timeout (drag N/M)` | the self-test wait expired with drags missing |
 | `CRUGOS: wb action timeout (K/N)` | the self-test wait expired with actions missing |
@@ -351,12 +366,64 @@ CRUGOS: phase 6b boot ok
 | `CRUGOS: wb holding desktop for S s` | `wb.hold=` was given and `wb_hold()` started |
 | `CRUGOS: wb hold finished` | the hold deadline expired, so the guest exits |
 
+## The shell window
+
+Phase 6C puts a working shell in window 2 so the desktop has something to type
+at. Three pieces carry it:
+
+| file | role |
+| --- | --- |
+| `include/crug/textgrid.h`, `kernel/lib/textgrid.c` | the scrollback buffer and its drawing |
+| `include/crug/shell.h`, `kernel/shell/shell.c` | the line editor, the history and the command table |
+| `kernel/shell/shell_ops.c` | the kernel `struct shell_io` over the mounted ext4 root |
+
+The grid keeps `TG_LINES` (96) lines of `TG_COLS` (38) characters -- 37 usable
+ones, because every line stays NUL-terminated -- and remembers `first`, `count`,
+`row` and `col`. `tg_putc()` maps `\n` to a new line, `\r` to a carriage
+return, `0x08`/`0x7f` to a backspace and stores any other control byte as `.`;
+a character written over an existing tail keeps the rest of the tail, so
+overwriting a finished line only replaces the cells that were typed. A full
+grid evicts the oldest line. `tg_draw()` paints the last
+`min((h - 6) / 20, 8)` lines at a 20-pixel pitch, clips every line to the body
+width and draws the cell under the cursor in inverse video -- that is the whole
+cursor story, there is no blinking and no separate sprite.
+
+`struct shell` edits one 79-character line. Printable bytes are inserted at the
+cursor, `\n`/`\r` executes, `0x08`/`0x7f` backspaces, `Ctrl-U` (`0x15`) erases
+the line, `Ctrl-C` (`0x03`) cancels it and prints `^C`, and `Ctrl-P` (`0x10`) /
+`Ctrl-N` (`0x0e`) walk the eight-entry history (the draft line comes back after
+the newest entry). Arrow keys are not decoded yet, which is why the history
+uses the classic Emacs control keys. `shell_feed()` returns 0 while editing,
+1 when a line executed and 2 when the line was cancelled; `shell_run()` returns
+0 for a known command, 1 for an unknown one and -1 for an empty line.
+
+The command table is `help`, `ver`, `mem`, `uptime`, `ps`, `ls [path]`,
+`cat <path>`, `echo <text>`, `write <path> <text>`, `sync` and `cls`; an
+unknown word prints `sh: <word>: unknown command`. Every command reaches the
+outside world through `struct shell_io` (`list`, `read`, `write`, `sync`,
+`info`), so the host tests drive the real shell against an in-memory fake, while
+`kernel/shell/shell_ops.c` supplies the kernel version: `ext4_list()`,
+`ext4_read_file()`, `ext4_lookup()` + `ext4_create()` + `ext4_write_file()` and
+`ext4_fsync()` on `storage_root()`, plus the heap counters, `sched_current()`
+and `sched_switches()`.
+
+`kernel/gfx/workbench.c` reads `wb.shell=1` (and `wb.sh=<n>`, the number of
+commands the self-test waits for) on top of the 6A/6B tokens. It initialises the
+grid, prints a one-line banner, calls `shell_init()`, installs the body painter
+with `intuition_set_paint()` on window 2 -- so every repaint of that window
+redraws the grid -- and prints `CRUGOS: wb shell ready (window 2, 37x8 text)`.
+In shell mode `wb_selftest()` runs `wb_shell_pump()` in its wait loop: every
+byte from `input_try_getc()` goes to the shell, each executed line prints
+`CRUGOS: sh run '<line>'`, every output line prints `CRUGOS: sh out <text>`, and
+the window is repainted after each keystroke. `wb_hold()` pumps the same loop,
+so the interactive demo has a working shell as well.
+
 ## Host tests
 
-`make test-host` links the real `kernel/gfx/intuition.c` and
-`kernel/gfx/workbench.c` and reports 2639 checks. `tests/host/test_intuition.c`
-replaces the framebuffer primitives with counting stubs and the cursor
-accessors with a settable fake (`test_fb_fake_reset()` /
+`make test-host` links the real `kernel/gfx/intuition.c`,
+`kernel/lib/textgrid.c` and `kernel/shell/shell.c` and reports 2792 checks.
+`tests/host/test_intuition.c` replaces the framebuffer primitives with counting
+stubs and the cursor accessors with a settable fake (`test_fb_fake_reset()` /
 `test_fb_cursor_set()` from `tests/host/test_gfx.c`), then checks:
 
 - clamping of undersized windows (120x80) and of windows that would fall off
@@ -381,6 +448,17 @@ accessors with a settable fake (`test_fb_fake_reset()` /
   -1, and a press just outside the box starting a drag.
 - the event queue: a 16-event FIFO, the drop counter on overflow, the action
   count still growing past the queue depth, and the FIFO drain order.
+
+`tests/host/test_textgrid.c` covers the grid on its own, and
+`tests/host/test_shell.c` runs the command table against a fake `shell_io`:
+
+- the text grid: the 38-column wrap, the 96-line ring with eviction, backspace
+  and carriage return, the tail-preserving overwrite, `tg_line()` truncation and
+  the row clamp of `tg_draw()` (8 rows in a 176-pixel body, 3 in 66, 1 in 26)
+  plus the inverse-video cursor cell.
+- the shell: help/ver/echo/ls/cat/write/sync/mem/uptime/ps, unknown and empty
+  lines, the 79-character overflow, Ctrl-U, Ctrl-C, the eight-entry
+  Ctrl-P/Ctrl-N history and the fold of extra arguments into the last one.
 
 ## Gate
 
@@ -418,7 +496,7 @@ anything else. The script then:
    `ok: workbench title-bar drag (N drag(s), window 2 at (x, y), exit 33)`.
 
 `make test-workbench` then runs `scripts/boot-check.py` with `EXPECT_WB=yes`
-(the phase 6b boot marker, the desktop marker, a `wb selftest ok`, at least one
+(the phase 6c boot marker, the desktop marker, a `wb selftest ok`, at least one
 `wb window N opened`, one `wb window N moved to`, and one `wb cursor at` with
 numeric coordinates) and `scripts/check-disk.py` for the ext4 root.
 
@@ -453,11 +531,30 @@ larger relative motion into several 8-bit HID reports and the guest drops some
 of them, so a single jump of 644 pixels landed 136 pixels short when the gate
 was first written.
 
-`boot-check.py` then runs with `EXPECT_MENU=yes`, which requires the phase 6b
+`boot-check.py` then runs with `EXPECT_MENU=yes`, which requires the phase 6c
 marker, the desktop marker, the menu open and selected markers, the gadget
 click marker, the close marker, at least one `wb action N ...` line and a
 `wb selftest ok (N drag(s), M action(s))` with at least one action, and
 `scripts/check-disk.py` proves the ext4 root is still clean.
+
+### Shell gate
+
+`make test-workbench-shell` runs `scripts/run-workbench-shell.py` on the same
+machine (`usb=off,i8042=off`, an `xhci` controller) with a hotplugged `usb-kbd`
+and no pointer at all. It boots with `wb.enable=1 wb.wait=$(WB_SHELL_WAIT)
+wb.shell=1 wb.sh=$(WB_SHELL_CMDS)`, waits for `CRUGOS: wb shell ready`,
+`device_add`s a `usb-kbd` on `xhci.0`, and then types four commands one key at a
+time (60 ms apart, because a HID report carries a single key and QEMU drops
+bursts): `help`, `ls /`, `ver` and `echo hi`. Each command must add exactly one
+`CRUGOS: sh run '<line>'` line, the `ver` output must contain the version
+string, the `echo` output must contain `hi`, and two `screendump`s of the shell
+body (`482,322 316x176`) must differ by at least 200 pixels while the later one
+carries `0xE0E0E0` text pixels. The gate then requires
+`CRUGOS: sh selftest ok (4 command(s))`, exit status 33 and a clean `e2fsck`,
+and `boot-check.py` runs with `EXPECT_SHELL=yes` (the shell and desktop markers,
+a `sh run`, a `CRUGOS: sh out CrugOS ` line and at least one command in the
+`sh selftest ok`). It prints `ok: workbench shell commands (4 command(s), exit
+33)`.
 
 ## Interactive demo
 
@@ -481,8 +578,12 @@ guest prints `CRUGOS: wb hold finished`, exits with status 33 and leaves
 - Four windows, two menus of six items and four gadgets per window, one open
   popup at a time. No window resize, no sub-menus, no keyboard navigation of
   the menu bar, no icons, no clipboard and no double-click semantics; a menu
-  selection or gadget click queues an event, but no program is attached to it
-  yet, so the shell will have to consume that queue.
+  selection or gadget click queues an event, but only the bring-up module
+  drains that queue and no other program is attached to it yet.
+- The shell has no quoting, no globs and no redirection: arguments are split on
+  spaces and the extra ones fold into the last argument, `write` creates a
+  regular `0644` file but never a directory, `cat` reads at most 4 KiB and
+  stops after 24 lines, and there is no `cd` -- every path must be absolute.
 - A popup always opens left-aligned on its strip, so a strip near the right
   edge can run its popup off screen, where the clipping primitives cut it. Menu
   and gadget tables are copied, but their strings stay caller-owned and must
@@ -490,9 +591,13 @@ guest prints `CRUGOS: wb hold finished`, exits with status 33 and leaves
 - A full desktop repaint per state change, and a polled pointer path: the
   latency is the 10 ms `usb.poll` tick until interrupts or a compositor make
   it cheaper.
-- Text is 8x16 with a 20-pixel line pitch and a 47-character line cap; there
-  is no word wrapping, no scrollback inside a window and no fonts.
-- The keyboard still reaches the serial console, not a Workbench window, so
-  there is no keyboard accelerator for the menu bar.
+- Text is 8x16 with a 20-pixel line pitch and a 47-character line cap on the
+  static body path; there is no word wrapping and no fonts. Only the shell
+  window scrolls, over 96 lines of 37 usable columns, and it has a single
+  window: `wb.shell=1` binds the keyboard to window 2 and keeps the serial
+  console for diagnostics.
+- Outside shell mode the keyboard still reaches the serial console, so there
+  is no keyboard accelerator for the menu bar; shell mode routes every byte to
+  window 2 regardless of which window is active.
 - No clipping stack: `fb_fill_rect()` and `fb_draw_text()` clip to the screen,
   so a window cannot draw outside itself into another window's area.

@@ -1,4 +1,4 @@
-/* Workbench desktop bring-up (phase 6A/6B): opens the first windows on the
+/* Workbench desktop bring-up (phase 6A/6B/6C): opens the first windows on the
    framebuffer, installs the intuition pointer hook, and waits either for a
    pointer drag or for a sequence of menu, gadget and close actions in gate
    mode.  Disabled unless the loader command line carries wb.enable=1, so a
@@ -13,6 +13,7 @@
 #define WB_DRAG_MAX 4u
 #define WB_ACTS_MAX 8u
 #define WB_HOLD_MAX 3600u
+#define WB_SHELL_CMDS_MAX 8u
 
 int wb_init(void);
 void wb_cmdline(const boot_info *bi);

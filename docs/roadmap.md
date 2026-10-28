@@ -27,8 +27,9 @@ mixer and a USB Audio Class driver with an isochronous xHCI path; phase 5D adds
 `gfx.device`, a pointer-driven sprite composited onto the GOP framebuffer
 console; phase 6A adds `intuition.device`, a software window manager of four
 stacked, draggable windows, and the two-window Workbench desktop; phase 6B adds
-menu bars with popups, body gadgets, a close gadget and a typed event queue.
-Release
+menu bars with popups, body gadgets, a close gadget and a typed event queue;
+phase 6C adds a live shell window with a scrollback text grid, a line editor and
+a command set over the mounted ext4 root. Release
 `v0.23.1` adds packaging rather than a spec phase: `make iso` produces a hybrid
 UEFI ISO that boots from a USB stick or a CD-ROM, with the kernel's
 `storage=none` token so an image with no root filesystem still passes the boot
@@ -572,6 +573,46 @@ change for memory management, storage, SMP or drivers.
   the 20-click queue overflow. `make test-host` reports 2639 checks.
 - All 37 gates pass at `v0.24.0`.
 
+## Phase 6C - the Workbench shell (done)
+
+- `include/crug/textgrid.h` + `kernel/lib/textgrid.c`: a scrollback buffer of
+  `TG_LINES` (96) lines of `TG_COLS` (38) characters -- 37 usable, every line
+  stays NUL-terminated -- with `first` / `count` / `row` / `col`, `\n` for a new
+  line, `\r` for a carriage return, `0x08`/`0x7f` for backspace and `.` for any
+  other control byte, an overwrite that keeps the rest of the tail, oldest-line
+  eviction on overflow, and `tg_draw()` painting the last
+  `min((h - 6) / 20, 8)` lines at a 20-pixel pitch with a clipped
+  inverse-video cursor cell.
+- `include/crug/shell.h` + `kernel/shell/shell.c`: a 79-character line editor
+  with `Ctrl-U` (erase), `Ctrl-C` (cancel and print `^C`), an eight-entry
+  `Ctrl-P`/`Ctrl-N` history that restores the draft line, a tokenizer that folds
+  extra words into the last argument, and the command table `help`, `ver`,
+  `mem`, `uptime`, `ps`, `ls`, `cat`, `echo`, `write`, `sync`, `cls` over a
+  five-call `struct shell_io` (`list`, `read`, `write`, `sync`, `info`).
+- `kernel/shell/shell_ops.c` binds that interface to `ext4_list()`,
+  `ext4_read_file()`, `ext4_lookup()` + `ext4_create()` + `ext4_write_file()`
+  and `ext4_fsync()` on `storage_root()`, plus the heap counters,
+  `sched_current()` and `sched_switches()`; a failing operation prints an
+  `sh:` diagnostic instead of panicking.
+- `intuition_set_paint()` and `intuition_redraw_window()` let a window body be
+  painted by a callback, so the shell grid redraws on every keystroke while the
+  static body-text path of the other windows is unchanged.
+- `kernel/gfx/workbench.c` reads `wb.shell=1` / `wb.sh=`, initialises the grid
+  and the shell, installs the painter on window 2, routes every `input_try_getc()`
+  byte to the shell, prints `CRUGOS: sh run '<line>'` per executed line and
+  `CRUGOS: sh out <text>` per output line, and prints
+  `CRUGOS: wb shell ready (window 2, 37x8 text)`; `wb_selftest()` and `wb_hold()`
+  both pump the shell.
+- `make test-workbench-shell` boots `wb.enable=1 wb.shell=1 wb.sh=4`, hotplugs a
+  `usb-kbd` and types `help`, `ls /`, `ver` and `echo hi` one key at a time;
+  `scripts/run-workbench-shell.py` keeps in step with the `sh run` markers,
+  requires the version string and `hi` in the output, compares two
+  `screendump`s of the shell body (at least 200 changed pixels and `0xE0E0E0`
+  text) and requires `CRUGOS: sh selftest ok (4 command(s))` plus exit status 33.
+- `tests/host/test_textgrid.c` and `tests/host/test_shell.c` cover the wrap, the
+  ring, the cursor cell and the whole command table against a fake `shell_io`.
+  `make test-host` reports 2792 checks.
+- All 38 gates pass at `v0.25.0`.
 ## Bootable media - hybrid UEFI ISO (done, `v0.23.1`)
 
 - `kernel/fs/storage.c` gained the `storage=none` command-line token: every
@@ -621,8 +662,8 @@ change for memory management, storage, SMP or drivers.
   delivered the xHCI controller and the keyboard, phase 5B the mouse, phase 5C
   `audio.device`, the mixer and the USB Audio Class driver, phase 5D the
   pointer-driven cursor on the GOP framebuffer, phase 6A the intuition desktop
-  and window manager on top of it and phase 6B its menus, gadgets and event
-  queue; phase 4A delivered the PS/2
+  and window manager on top of it, phase 6B its menus, gadgets and event queue
+  and phase 6C the shell window; phase 4A delivered the PS/2
   console input step, phase
   4B the virtio-net/IPv4 slice, phase 4C the TCP/socket slice and phase 4D the
   DNS resolver).
@@ -630,11 +671,12 @@ change for memory management, storage, SMP or drivers.
   validation, AAAA/PTR/SRV, search domains, negative caching) on top of the
   phase 4B-4D stack, richer socket semantics (bind, options, non-blocking, more
   than four sockets); IPv6, fragmentation and reassembly.
-- Software framebuffer -> VirtIO-GPU -> vendor GPU drivers, starting with
-  console scrollback in a Workbench window, keyboard navigation and sub-menus on
-  top of the phase 6B menu bar, window resizing and a gadget toolkit on top of
-  its event queue, the phase 5D cursor, the phase 5B pointer stack and the
-  phase 5C audio stack.
+- Software framebuffer -> VirtIO-GPU -> vendor GPU drivers: with the phase 6C
+  shell window and scrollback in place, keyboard navigation and sub-menus on top
+  of the phase 6B menu bar, window resizing, a gadget toolkit on top of its event
+  queue and richer shell semantics (quoting, a working directory) on top of the
+  shell, the phase 5D cursor, the phase 5B pointer stack and the phase 5C audio
+  stack.
 - Workbench userspace, `.app` bundles, `.crpkg` packages, capability model.
 - POSIX-like layer: 64-bit UID/GID, ACLs, process groups, signals.
 

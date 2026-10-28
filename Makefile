@@ -28,6 +28,7 @@
 #   make test-gfx    move a hotplugged USB mouse and verify the framebuffer cursor
 #   make test-workbench  drag a window on the software-rendered desktop
 #   make test-workbench-menu  click menus and gadgets on the Workbench desktop
+#   make test-workbench-shell  type commands into the Workbench shell window
 #   make crypt-disk  build the AES-256-XTS crypt test disk
 #   make test-crypt  boot from an encrypted root and verify the disk
 #   make test-crypt-recovery  unlock the encrypted root with the recovery keyslot
@@ -91,6 +92,7 @@ EXPECT_AUDIO ?= no
 EXPECT_GFX ?= no
 EXPECT_WB ?= no
 EXPECT_MENU ?= no
+EXPECT_SHELL ?= no
 
 # QEMU / firmware options.
 MEMORY_MB ?= 512
@@ -126,6 +128,9 @@ WB_QEMU_EXTRA ?= -device qemu-xhci,id=xhci
 WB_MENU_WAIT ?= 30
 WB_MENU_ACTS ?= 4
 WB_MENU_RUN_TIMEOUT_SEC ?= 240
+WB_SHELL_WAIT ?= 30
+WB_SHELL_CMDS ?= 4
+WB_SHELL_RUN_TIMEOUT_SEC ?= 240
 
 # Interactive demo (make demo): a real QEMU window with a USB keyboard and
 # mouse, the Workbench desktop and a hold so the window stays open.
@@ -240,6 +245,7 @@ KERNEL_SOURCES := $(wildcard kernel/arch/$(ARCH)/*.c) $(wildcard kernel/arch/$(A
                   $(wildcard kernel/fs/*.c) $(wildcard kernel/input/*.c) \
                   $(wildcard kernel/net/*.c) $(wildcard kernel/audio/*.c) \
                   $(wildcard kernel/gfx/*.c) \
+                  $(wildcard kernel/shell/*.c) \
                   $(wildcard drivers/*/*.c) \
                   $(wildcard kernel/crypto/*.c) $(wildcard kernel/crypto/*.S)
 KERNEL_OBJECTS := $(patsubst %,$(OBJ)/%.o,$(basename $(KERNEL_SOURCES)))
@@ -260,7 +266,8 @@ HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
         test-crypt-prompt test-crypt-prompt-wrong test-crypt-prompt-timeout \
         test-crypt-keyboard test-crypt-keyboard-wrong crypt-run test-net test-tcp \
         test-net-dns test-usb-hotplug test-usb-mouse test-audio test-gfx \
-        test-workbench test-workbench-menu iso check-iso test-iso usb \
+        test-workbench test-workbench-menu test-workbench-shell \
+        iso check-iso test-iso usb \
         crash-disk \
         check-disk size check-efi repro test-host preflight version options clean distclean help
 
@@ -579,6 +586,20 @@ test-workbench-menu: esp
 		--qemu-extra "$(WB_QEMU_EXTRA)"
 	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" no no no no no any no no no no no no no no yes
 	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+# Shell gate: the guest boots with wb.shell=1, opens the shell window on the
+# Workbench desktop and waits for shell commands; the driver hotplugs a usb-kbd
+# over QMP and types four commands at it. Serial markers prove each line ran and
+# a screendump proves the scrollback area repainted.
+test-workbench-shell: EXPECT_SHELL := yes
+test-workbench-shell: esp
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(PYTHON) scripts/run-workbench-shell.py --repo $(CURDIR) \
+		--disk $(abspath $(DISK_IMG)) --serial-log $(abspath $(SERIAL_LOG)) \
+		--exit-code $(abspath $(QEMU_EXIT)) --cmds $(WB_SHELL_CMDS) \
+		--wb-wait $(WB_SHELL_WAIT) --run-timeout $(WB_SHELL_RUN_TIMEOUT_SEC) \
+		--qemu-extra "$(WB_QEMU_EXTRA)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" no no no no no any no no no no no no no no no "$(EXPECT_SHELL)"
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 
 test:
 	$(Q)rm -f $(DISK_IMG)
@@ -794,6 +815,10 @@ options:
 	@printf '  %-16s %s\n' WB_MENU_WAIT "$(WB_MENU_WAIT) (seconds)"
 	@printf '  %-16s %s\n' WB_MENU_ACTS "$(WB_MENU_ACTS)"
 	@printf '  %-16s %s\n' WB_MENU_RUN_TIMEOUT_SEC "$(WB_MENU_RUN_TIMEOUT_SEC)"
+	@printf '  %-16s %s\n' EXPECT_SHELL "$(EXPECT_SHELL)"
+	@printf '  %-16s %s\n' WB_SHELL_WAIT "$(WB_SHELL_WAIT) (seconds)"
+	@printf '  %-16s %s\n' WB_SHELL_CMDS "$(WB_SHELL_CMDS)"
+	@printf '  %-16s %s\n' WB_SHELL_RUN_TIMEOUT_SEC "$(WB_SHELL_RUN_TIMEOUT_SEC)"
 	@printf '  %-16s %s\n' MEMORY_MB "$(MEMORY_MB)"
 	@printf '  %-16s %s\n' SMP "$(SMP)"
 	@printf '  %-16s %s\n' TIMEOUT_SEC "$(TIMEOUT_SEC)"

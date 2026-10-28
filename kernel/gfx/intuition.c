@@ -35,6 +35,10 @@ struct window {
     u32 menu_count;
     struct gadget gadgets[INTUITION_MAX_GADGETS];
     u32 gadget_count;
+    /* Optional body painter (phase 6C): the shell renders its text grid here
+       instead of the static body string. */
+    void (*paint)(int id, i32 x, i32 y, u32 w, u32 h, void *ctx);
+    void *paint_ctx;
 };
 
 static struct window g_win[INTUITION_MAX_WINDOWS];
@@ -312,6 +316,11 @@ static void win_draw_body(struct window *w)
         return;
     }
     fb_fill_rect(bx, by, bw, bh, INTUITION_WINDOW_RGB);
+    if (w->paint) {
+        w->paint(w->id, (i32)bx, (i32)by, bw, bh, w->paint_ctx);
+        win_draw_gadgets(w);
+        return;
+    }
     while (line && *line && line_y + 16u <= by + bh) {
         char text[48];
         u32 n = 0;
@@ -918,6 +927,38 @@ int intuition_active(void)
 void intuition_set_reporting(int on)
 {
     g_reporting = on ? 1 : 0;
+}
+
+/* Install a body painter for one window.  The painter receives the body
+   rectangle in screen coordinates and owns every pixel inside it; gadgets
+   are drawn on top afterwards.  Passing a NULL painter restores the static
+   body text. */
+int intuition_set_paint(int id,
+                        void (*fn)(int id, i32 x, i32 y, u32 w, u32 h,
+                                   void *ctx),
+                        void *ctx)
+{
+    struct window *w = win_find(id);
+
+    if (!w) {
+        return -1;
+    }
+    w->paint = fn;
+    w->paint_ctx = ctx;
+    return 0;
+}
+
+/* Repaint one window without touching the rest of the desktop: the shell
+   calls this after every keystroke instead of a full intuition_redraw(),
+   which would repaint every window and the menu bar on each keypress. */
+void intuition_redraw_window(int id)
+{
+    struct window *w = win_find(id);
+
+    if (!w) {
+        return;
+    }
+    win_draw(w);
 }
 
 u64 intuition_drag_count(void)

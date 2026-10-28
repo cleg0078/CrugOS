@@ -79,8 +79,17 @@ int intuition_set_menus(int id, const struct intuition_menu *menus, u32 count);
    returns the gadget index or -1. */
 int intuition_add_gadget(int id, i32 x, i32 y, u32 w, u32 h,
                          const char *label);
+/* Install a body painter: the callback receives the body rectangle in screen
+   coordinates and owns every pixel inside it (phase 6C renders the shell text
+   grid this way).  A NULL callback restores the static body text. */
+int intuition_set_paint(int id,
+                        void (*fn)(int id, i32 x, i32 y, u32 w, u32 h,
+                                   void *ctx),
+                        void *ctx);
 /* Repaint the whole desktop: background, windows, menu bar, open menu. */
 void intuition_redraw(void);
+/* Repaint one window only; cheap enough for a keystroke. */
+void intuition_redraw_window(int id);
 /* Consume one pointer report: menus, gadgets, close gadget, activation and
    title-bar dragging. */
 void intuition_pointer_event(const struct input_pointer *event);
