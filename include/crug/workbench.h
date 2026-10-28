@@ -18,6 +18,12 @@
 /* Two presses on the same desktop object within this window open it: the gate
    driver clicks twice in quick succession on the volume icon. */
 #define WB_DOUBLE_CLICK_NS 600000000ull
+/* Phase 6G: the drawer parses its listing into this table so it can scroll,
+   refresh and reflow; wb.fill= creates files so the table has rows to scroll. */
+#define WB_DRAWER_MAX 40u
+#define WB_DRAWER_NAME_MAX 32u
+#define WB_FILL_MAX 24u
+#define WB_DRAWER_ROW_H 20u
 
 int wb_init(void);
 void wb_cmdline(const boot_info *bi);

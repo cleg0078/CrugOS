@@ -9,7 +9,9 @@
    background and a double click opens a drawer window listing the root.
    Phase 6C adds the live shell: wb.shell=1 paints the shell's text grid into the Shell
    window body and routes every key there, and wb.sh=<n> waits for n typed
-   commands before the boot finishes. */
+   commands before the boot finishes.  Phase 6G makes the drawer scroll, refresh
+   and reflow on resize: wb.dr=1 gives the open drawer the arrow keys and 'r',
+   and wb.fill=<n> creates files first so there is something to scroll. */
 #include <crug/types.h>
 #include <crug/string.h>
 #include <crug/kernel.h>
@@ -49,9 +51,20 @@ static int g_drawer_window;
 static u32 g_drawers;
 static int g_icon_last = -1;
 static u64 g_icon_last_ns;
-static char g_drawer_list[512];
+/* Phase 6G: the drawer's parsed listing and its view over it. */
+static int g_drawer_mode;
+static u32 g_fill_count;
+static int g_filled;
+static char g_drawer_names[WB_DRAWER_MAX][WB_DRAWER_NAME_MAX];
+static u32 g_drawer_count;
+static u32 g_drawer_top;
+static u32 g_drawer_rows;
+static u32 g_drawer_scrolls;
+static u32 g_drawer_refreshes;
+static u32 g_drawer_ops_seen;
 
 static void wb_open_drawer(void);
+static void wb_icon_keyboard_activate(void);
 
 /* Phase 6C: the Shell window hosts the live shell. */
 static int g_shell_mode;
@@ -166,6 +179,20 @@ static void wb_cmdline_token(const char *tok, usize len)
     if (used >= 0) {
         if (wb_parse_u32(tok + used, len - (usize)used, &value) == 0) {
             g_desk_mode = value ? 1 : 0;
+        }
+        return;
+    }
+    used = wb_prefix(tok, len, "wb.dr=");
+    if (used >= 0) {
+        if (wb_parse_u32(tok + used, len - (usize)used, &value) == 0) {
+            g_drawer_mode = value ? 1 : 0;
+        }
+        return;
+    }
+    used = wb_prefix(tok, len, "wb.fill=");
+    if (used >= 0) {
+        if (wb_parse_u32(tok + used, len - (usize)used, &value) == 0) {
+            g_fill_count = value > WB_FILL_MAX ? WB_FILL_MAX : value;
         }
         return;
     }
@@ -299,79 +326,225 @@ static void wb_drain_events(void)
     }
 }
 
-/* ---- phase 6E: desktop objects and the drawer ----------------------- */
+/* ---- phase 6E/6G: desktop objects and the scrollable drawer --------- */
 
-/* Read the mounted root one entry per line into the painter buffer and count
-   them; an absent volume leaves the buffer empty. */
-static u32 wb_drawer_entries(void)
+/* Fill the mounted root with empty files first so the drawer has rows to
+   scroll through: wb.fill=<n> creates /f00../fNN once, right before it opens. */
+static void wb_fill_root(void)
+{
+    struct ext4_fs *fs;
+    u32 i;
+    u32 made = 0u;
+
+    if (g_fill_count == 0u || g_filled) {
+        return;
+    }
+    g_filled = 1;
+    fs = storage_root();
+    if (!fs) {
+        kprintf("CRUGOS: wb fill skipped (no volume)\n");
+        return;
+    }
+    /* The boot mounts the root read-only, so the fill needs a short
+       read-write remount; the unmount in storage_remount_ro() commits it. */
+    if (storage_remount_rw() != 0) {
+        kprintf("CRUGOS: wb fill skipped (read-only volume)\n");
+        return;
+    }
+    for (i = 0u; i < g_fill_count; i++) {
+        char path[8];
+        u32 n = 0u;
+
+        path[n++] = '/';
+        path[n++] = 'f';
+        path[n++] = (char)('0' + (char)((i / 10u) % 10u));
+        path[n++] = (char)('0' + (char)(i % 10u));
+        path[n] = 0;
+        if (ext4_create(fs, path, 0644u) == 0) {
+            made++;
+        }
+    }
+    (void)storage_remount_ro();
+    if (g_reporting) {
+        kprintf("CRUGOS: wb fill %u file(s)\n", (unsigned)made);
+    }
+}
+
+/* Parse the newline separated root listing into the drawer name table.  Names
+   longer than the table are truncated, entries past the table are dropped. */
+static u32 wb_drawer_load(void)
 {
     struct ext4_fs *fs = storage_root();
+    static char listing[1024];
+    u32 count = 0u;
     int n;
     int i = 0;
-    u32 count = 0;
 
-    g_drawer_list[0] = 0;
+    g_drawer_count = 0u;
     if (!fs) {
         return 0u;
     }
-    n = ext4_list(fs, "/", g_drawer_list, sizeof(g_drawer_list));
-    if (n <= 0) {
-        return 0u;
-    }
+    listing[0] = 0;
+    n = ext4_list(fs, "/", listing, sizeof(listing));
     while (i < n) {
-        if (g_drawer_list[i] != '\n') {
+        u32 len = 0u;
+
+        if (listing[i] == '\n') {
+            i++;
+            continue;
+        }
+        if (count < WB_DRAWER_MAX) {
+            while (i < n && listing[i] != '\n' &&
+                   len + 1u < WB_DRAWER_NAME_MAX) {
+                g_drawer_names[count][len++] = listing[i++];
+            }
+            g_drawer_names[count][len] = 0;
             count++;
         }
-        while (i < n && g_drawer_list[i] != '\n') {
+        while (i < n && listing[i] != '\n') {
             i++;
         }
-        i++;
+        if (i < n) {
+            i++;
+        }
     }
+    g_drawer_count = count;
     return count;
 }
 
-/* Body painter of the drawer window: the root listing, one name per line. */
+/* Visible rows of a drawer body h pixels tall: the first row starts 6 px below
+   the body edge, glyphs are 16 px tall and rows are WB_DRAWER_ROW_H apart. */
+static u32 wb_drawer_rows(u32 h)
+{
+    if (h <= 22u) {
+        return 0u;
+    }
+    return (h - 22u) / WB_DRAWER_ROW_H + 1u;
+}
+
+static u32 wb_drawer_max_top(void)
+{
+    if (g_drawer_rows == 0u) {
+        return 0u;
+    }
+    return g_drawer_count > g_drawer_rows ? g_drawer_count - g_drawer_rows
+                                          : 0u;
+}
+
+static void wb_drawer_clamp_top(void)
+{
+    u32 max_top = wb_drawer_max_top();
+
+    if (g_drawer_top > max_top) {
+        g_drawer_top = max_top;
+    }
+}
+
+/* Body painter of the drawer window: the visible slice of the listing and,
+   while the listing is longer than the body, a scrollbar on the right edge. */
 static void wb_drawer_paint(int id, i32 x, i32 y, u32 w, u32 h, void *ctx)
 {
-    u32 line_y = (u32)y + 6u;
-    u32 max_chars = w > 12u ? (w - 12u) / 8u : 0u;
-    int i = 0;
-    u32 drawn = 0;
+    u32 max_chars = w > 20u ? (w - 20u) / 8u : 0u;
+    u32 rows = wb_drawer_rows(h);
+    u32 i;
 
     (void)id;
     (void)ctx;
-    if (max_chars > 0u && max_chars > 47u) {
+    if (max_chars > 47u) {
         max_chars = 47u;
     }
+    g_drawer_rows = rows;
+    wb_drawer_clamp_top();
     fb_fill_rect((u32)x, (u32)y, w, h, INTUITION_WINDOW_RGB);
-    if (g_drawer_list[0] == 0) {
-        fb_draw_text((u32)x + 6u, line_y, "no volume", INTUITION_BODY_TEXT_RGB,
-                     INTUITION_WINDOW_RGB);
+    if (g_drawer_count == 0u) {
+        fb_draw_text((u32)x + 6u, (u32)y + 6u, "no volume",
+                     INTUITION_BODY_TEXT_RGB, INTUITION_WINDOW_RGB);
         return;
     }
-    while (i < (int)sizeof(g_drawer_list) && g_drawer_list[i] &&
-           line_y + 16u <= (u32)y + h) {
-        char text[48];
-        u32 n = 0;
+    for (i = 0u; i < rows; i++) {
+        u32 index = g_drawer_top + i;
+        char text[WB_DRAWER_NAME_MAX];
+        u32 n = 0u;
 
-        while (g_drawer_list[i] && g_drawer_list[i] != '\n' &&
-               n + 1u < sizeof(text)) {
-            text[n++] = g_drawer_list[i++];
+        if (index >= g_drawer_count) {
+            break;
+        }
+        while (n + 1u < sizeof(text) && g_drawer_names[index][n]) {
+            text[n] = g_drawer_names[index][n];
+            n++;
         }
         text[n] = 0;
-        if (g_drawer_list[i] == '\n') {
-            i++;
-        }
         if (max_chars != 0u && n > max_chars) {
             text[max_chars] = 0;
         }
-        fb_draw_text((u32)x + 6u, line_y, text, INTUITION_BODY_TEXT_RGB,
-                     INTUITION_WINDOW_RGB);
-        line_y += 20u;
-        drawn++;
-        if (drawn >= 10u) {
-            break;
+        fb_draw_text((u32)x + 6u, (u32)y + 6u + i * WB_DRAWER_ROW_H, text,
+                     INTUITION_BODY_TEXT_RGB, INTUITION_WINDOW_RGB);
+    }
+    if (g_drawer_count > rows && w > 12u && h > 12u) {
+        u32 track_x = (u32)x + w - 8u;
+        u32 track_y = (u32)y + 6u;
+        u32 track_h = h - 12u;
+        u32 thumb_h = track_h * rows / g_drawer_count;
+        u32 max_top = wb_drawer_max_top();
+        u32 thumb_y = track_y;
+
+        if (thumb_h < 12u) {
+            thumb_h = 12u;
         }
+        if (max_top != 0u) {
+            thumb_y = track_y + (track_h - thumb_h) * g_drawer_top / max_top;
+        }
+        fb_fill_rect(track_x, track_y, 4u, track_h, 0x00404040u);
+        fb_fill_rect(track_x, thumb_y, 4u, thumb_h, INTUITION_MENU_BG_RGB);
+    }
+}
+
+/* Move the drawer view by one row; returns 1 only when the view changed, so a
+   press against either end of the listing is not counted as an action. */
+static int wb_drawer_scroll(int delta)
+{
+    u32 top = g_drawer_top;
+    u32 max_top = wb_drawer_max_top();
+
+    if (g_drawer_window <= 0 || g_drawer_rows == 0u) {
+        return 0;
+    }
+    if (delta < 0) {
+        if (top > 0u) {
+            top--;
+        }
+    } else if (top < max_top) {
+        top++;
+    }
+    if (top == g_drawer_top) {
+        return 0;
+    }
+    g_drawer_top = top;
+    g_drawer_scrolls++;
+    g_drawer_ops_seen++;
+    intuition_redraw_window(g_drawer_window);
+    if (g_reporting) {
+        kprintf("CRUGOS: wb drawer scrolled (top %u of %u)\n",
+                (unsigned)g_drawer_top, (unsigned)g_drawer_count);
+    }
+    return 1;
+}
+
+/* Re-read the volume so files created elsewhere appear, keeping the view
+   unless the listing got shorter than the body can show. */
+static void wb_drawer_refresh(void)
+{
+    if (g_drawer_window <= 0) {
+        return;
+    }
+    (void)wb_drawer_load();
+    wb_drawer_clamp_top();
+    g_drawer_refreshes++;
+    g_drawer_ops_seen++;
+    intuition_redraw_window(g_drawer_window);
+    if (g_reporting) {
+        kprintf("CRUGOS: wb drawer refreshed (%u entries)\n",
+                (unsigned)g_drawer_count);
     }
 }
 
@@ -382,16 +555,54 @@ static void wb_open_drawer(void)
     if (g_drawer_window > 0) {
         return;
     }
-    entries = wb_drawer_entries();
+    if (g_fill_count != 0u) {
+        wb_fill_root();
+    }
+    entries = wb_drawer_load();
+    g_drawer_top = 0u;
     g_drawer_window = intuition_open(560, 60, 360, 260, "System:", NULL);
     if (g_drawer_window < 0) {
         return;
     }
     intuition_set_paint(g_drawer_window, wb_drawer_paint, 0);
+    intuition_redraw_window(g_drawer_window);
     g_drawers++;
     if (g_reporting) {
         kprintf("CRUGOS: wb drawer 'System:' opened (%u entries)\n",
                 (unsigned)entries);
+        if (g_drawer_mode) {
+            kprintf("CRUGOS: wb drawer ready (%u entries, %u row(s))\n",
+                    (unsigned)entries, (unsigned)g_drawer_rows);
+        }
+    }
+}
+
+/* Phase 6G: the open drawer owns the arrow keys and 'r'; while it is closed
+   the desktop object table keeps the keyboard. */
+static void wb_drawer_pump(void)
+{
+    int ch;
+
+    if (!g_drawer_mode || g_shell_mode || !g_ready) {
+        return;
+    }
+    while ((ch = input_try_getc()) >= 0) {
+        if (g_drawer_window > 0) {
+            if (ch == (int)INPUT_KEY_UP) {
+                wb_drawer_scroll(-1);
+            } else if (ch == (int)INPUT_KEY_DOWN) {
+                wb_drawer_scroll(1);
+            } else if (ch == 'r' || ch == 'R') {
+                wb_drawer_refresh();
+            }
+            continue;
+        }
+        if (ch >= (int)INPUT_KEY_UP || ch == '\t' || ch == '\n' ||
+            ch == '\r' || ch == 0x1b) {
+            if (intuition_icon_key((u8)ch)) {
+                wb_icon_keyboard_activate();
+            }
+        }
     }
 }
 
@@ -470,7 +681,8 @@ static void wb_key_pump(void)
 {
     int ch;
 
-    if ((!g_keys_mode && !g_icon_keys_mode) || g_shell_mode || !g_ready) {
+    if ((!g_keys_mode && !g_icon_keys_mode) || g_shell_mode || g_drawer_mode ||
+        !g_ready) {
         return;
     }
     while ((ch = input_try_getc()) >= 0) {
@@ -505,14 +717,15 @@ int wb_init(void)
         return -1;
     }
     g_reporting = (g_want_drags > 0u || g_menu_mode || g_keys_mode ||
-                   g_shell_mode || g_desk_mode || g_icon_keys_mode)
+                   g_shell_mode || g_desk_mode || g_icon_keys_mode ||
+                   g_drawer_mode)
                       ? 1
                       : 0;
     fb_set_text_enabled(0);
     intuition_init();
     intuition_set_reporting(g_reporting);
     top = intuition_open(80, 90, 360, 220, "Workbench",
-                         "CrugOS Workbench\nphase 6f\nsoftware rendered");
+                         "CrugOS Workbench\nphase 6g\nsoftware rendered");
     shell_id = intuition_open(480, 300, 320, 200, "Shell", "4.OS\ncrugos>");
     intuition_set_menus(top, wb_menus_top, 2u);
     intuition_add_gadget(top, 12, 60, 96, 22, "Run");
@@ -556,6 +769,9 @@ int wb_init(void)
         kprintf("CRUGOS: wb icons ready (%u object(s), keyboard focus)\n",
                 (unsigned)intuition_icon_count());
     }
+    if (g_drawer_mode) {
+        kprintf("CRUGOS: wb drawer mode (arrow keys scroll, r refreshes)\n");
+    }
     return 0;
 }
 
@@ -566,6 +782,7 @@ void wb_poll(void)
     }
     gfx_pointer_poll();
     wb_key_pump();
+    wb_drawer_pump();
     wb_shell_pump();
 }
 
@@ -575,6 +792,7 @@ int wb_selftest(void)
     u32 want;
     u32 want_actions;
     u32 want_commands;
+    u32 want_drawer;
 
     if (!g_enabled) {
         return 1;
@@ -589,15 +807,19 @@ int wb_selftest(void)
         return 1;
     }
     want = g_want_drags;
-    want_actions = (g_menu_mode || g_keys_mode || g_desk_mode ||
-                    g_icon_keys_mode)
+    want_actions = (g_menu_mode || g_keys_mode || g_icon_keys_mode ||
+                    (g_desk_mode && !g_drawer_mode))
                        ? (g_want_actions ? g_want_actions : 1u)
                        : 0u;
     want_commands = g_shell_mode ? (g_want_commands ? g_want_commands : 1u) : 0u;
+    /* Drawer mode counts scrolls and refreshes instead of desktop actions, so
+       the gate waits for exactly the view moves its driver scripts. */
+    want_drawer = g_drawer_mode ? (g_want_actions ? g_want_actions : 1u) : 0u;
     deadline = timer_monotonic_ns() +
                (u64)(g_wait_seconds ? g_wait_seconds : 5u) * 1000000000ull;
     while (intuition_drag_count() < (u64)want ||
            g_actions_seen < want_actions ||
+           g_drawer_ops_seen < want_drawer ||
            g_commands_seen < want_commands) {
         /* input_poll() runs the console hook, which pumps the USB mouse and
            then drains the pointer state into intuition.device; the shell pump
@@ -605,6 +827,7 @@ int wb_selftest(void)
         input_poll();
         wb_drain_events();
         wb_key_pump();
+        wb_drawer_pump();
         wb_shell_pump();
         if (timer_monotonic_ns() >= deadline) {
             if (intuition_drag_count() < (u64)want) {
@@ -613,6 +836,9 @@ int wb_selftest(void)
             } else if (g_actions_seen < want_actions) {
                 kprintf("CRUGOS: wb action timeout (%u/%u)\n",
                         (unsigned)g_actions_seen, (unsigned)want_actions);
+            } else if (g_drawer_ops_seen < want_drawer) {
+                kprintf("CRUGOS: wb drawer timeout (%u/%u)\n",
+                        (unsigned)g_drawer_ops_seen, (unsigned)want_drawer);
             } else {
                 kprintf("CRUGOS: sh command timeout (%u/%u)\n",
                         (unsigned)g_commands_seen, (unsigned)want_commands);
@@ -638,6 +864,10 @@ int wb_selftest(void)
         kprintf("CRUGOS: wb icons selftest ok (%u move(s), %u front(s))\n",
                 (unsigned)intuition_icon_moves(),
                 (unsigned)intuition_front_count());
+    }
+    if (g_drawer_mode) {
+        kprintf("CRUGOS: wb drawer selftest ok (%u scroll(s), %u refresh(es))\n",
+                (unsigned)g_drawer_scrolls, (unsigned)g_drawer_refreshes);
     }
     /* Keep the finished desktop on screen for a moment so the gate's last
        screendump does not race the rest of the boot to the exit. */
@@ -670,6 +900,7 @@ void wb_hold(void)
         input_poll();
         wb_drain_events();
         wb_key_pump();
+        wb_drawer_pump();
         wb_shell_pump();
         cpu_wait_for_irq();
     }

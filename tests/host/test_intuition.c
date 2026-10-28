@@ -620,6 +620,90 @@ static void test_intuition_resize(void)
     CHECK(intuition_drag_count() == 0u);
 }
 
+/* Phase 6G: a body painter replaces the static text of one window, receives
+ * the current body rect on every repaint, follows a resize and can be removed
+ * again.  intuition_redraw_window() repaints only the named window. */
+struct paint_probe {
+    u32 calls;
+    int id;
+    i32 x;
+    i32 y;
+    u32 w;
+    u32 h;
+};
+
+static void paint_probe_fn(int id, i32 x, i32 y, u32 w, u32 h, void *ctx)
+{
+    struct paint_probe *p = (struct paint_probe *)ctx;
+
+    p->calls++;
+    p->id = id;
+    p->x = x;
+    p->y = y;
+    p->w = w;
+    p->h = h;
+}
+
+static void test_intuition_paint(void)
+{
+    struct paint_probe probe;
+    struct input_pointer ev;
+    i32 x = 0;
+    i32 y = 0;
+    u32 w = 0;
+    u32 h = 0;
+    u32 paints;
+
+    memset(&probe, 0, sizeof(probe));
+    test_reset(1024, 768);
+    CHECK(intuition_open(100, 100, 300, 300, "One", "body") == 1);
+    /* No painter is installed yet, so a repaint runs the static text path. */
+    g_text_calls = 0;
+    intuition_redraw_window(1);
+    CHECK(probe.calls == 0u);
+    CHECK(g_text_calls >= 1u); /* the body line is drawn with the static path */
+    CHECK(intuition_set_paint(1, paint_probe_fn, &probe) == 0);
+    CHECK(probe.calls == 0u);
+    intuition_redraw_window(1);
+    CHECK(probe.calls == 1u);
+    CHECK(probe.id == 1);
+    /* Body rect of the 300x300 window at (100, 100): the painter gets the
+       inner rectangle below the title bar. */
+    CHECK(probe.x == 102 && probe.y == 122);
+    CHECK(probe.w == 296u && probe.h == 276u);
+    /* The body fill happens before the painter and the title bar is untouched. */
+    CHECK(g_fill_calls >= 1u);
+    /* Growing the window hands the painter the larger body on the next paint. */
+    move_cursor(390, 390); /* grip of the 300x300 window at (384, 384) */
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    move_cursor(420, 420);
+    pointer(&ev, 30, 30, 0x01u, 0x00u);
+    intuition_pointer_event(&ev);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_window_rect(1, &x, &y, &w, &h) == 0);
+    CHECK(w == 330u && h == 330u);
+    /* The release already repainted the window, so count from here. */
+    paints = probe.calls;
+    CHECK(paints >= 2u);
+    intuition_redraw_window(1);
+    CHECK(probe.calls == paints + 1u);
+    CHECK(probe.x == 102 && probe.y == 122);
+    CHECK(probe.w == 326u && probe.h == 306u);
+    /* Removing the painter restores the static text path. */
+    CHECK(intuition_set_paint(1, 0, 0) == 0);
+    paints = probe.calls;
+    g_text_calls = 0;
+    intuition_redraw_window(1);
+    CHECK(probe.calls == paints);
+    CHECK(g_text_calls >= 1u);
+    /* Unknown windows are refused instead of crashing. */
+    CHECK(intuition_set_paint(99, paint_probe_fn, &probe) == -1);
+    intuition_redraw_window(99);
+    CHECK(probe.calls == paints);
+}
+
 /* Phase 6D keyboard navigation: Tab cycles the focus (and raises the window),
  * the arrow keys move the active window by INTUITION_KEY_STEP pixels, and
  * Enter/Escape/Down/Up drive the menu popup of the active window. */
@@ -1138,6 +1222,8 @@ void test_intuition_functions(void)
     test_intuition_close_gadget();
     printf("- intuition resize grip\n");
     test_intuition_resize();
+    printf("- intuition body painters\n");
+    test_intuition_paint();
     printf("- intuition keyboard focus / keys / menu popup\n");
     test_intuition_keys();
     printf("- intuition event queue\n");

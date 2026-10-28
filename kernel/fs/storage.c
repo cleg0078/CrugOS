@@ -523,6 +523,40 @@ void storage_lock(void)
     }
 }
 
+/* Phase 6G: the boot mounts the root read-only, so a writable consumer (the
+   drawer fill, the shell's write command) asks for a short read-write remount
+   instead of mounting the same volume a second time.  Both helpers are no-ops
+   when the volume is already in the requested mode. */
+int storage_remount_rw(void)
+{
+    if (!g_present || !g_root_part)
+        return -1;
+    if (g_root_fs.flags & EXT4_MOUNT_RW)
+        return 0;
+    if (ext4_umount(&g_root_fs) != 0)
+        return -1;
+    if (ext4_mount(&g_root_fs, g_root_part, EXT4_MOUNT_RW) != 0) {
+        (void)ext4_mount(&g_root_fs, g_root_part, 0);
+        return -1;
+    }
+    kprintf("CRUGOS: storage remounted read-write\n");
+    return 0;
+}
+
+int storage_remount_ro(void)
+{
+    if (!g_present || !g_root_part)
+        return -1;
+    if (!(g_root_fs.flags & EXT4_MOUNT_RW))
+        return 0;
+    if (ext4_umount(&g_root_fs) != 0)
+        return -1;
+    if (ext4_mount(&g_root_fs, g_root_part, 0) != 0)
+        return -1;
+    kprintf("CRUGOS: storage remounted read-only\n");
+    return 0;
+}
+
 static int storage_cleanup(struct ext4_fs *fs)
 {
     ext4_unlink(fs, "/selftest/b.txt");

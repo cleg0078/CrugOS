@@ -17,8 +17,11 @@ the depth gadget, which sends a window to the back of the stacking order. Phase
 6F makes the objects themselves interactive: a press selects and grabs a tile,
 a motion drags it across the desktop, a send-to-front gadget joined the depth
 gadget in every title bar, and the icon table can be driven from the keyboard.
-There are no application tasks behind the desktop yet -- the kernel-side device
-is what the Workbench userspace will sit on -- so the only residents are the
+Phase 6G turns the `System:` drawer into a scrolling list: the arrow keys move
+the viewport, `r` re-reads the volume, a 4-pixel scrollbar tracks the position
+and a resize reflows the rows. There are no application tasks behind the
+desktop yet -- the kernel-side device is what the Workbench userspace will sit
+on -- so the only residents are the
 bring-up module and its shell, which appear when the loader command line asks
 for them.
 
@@ -251,9 +254,10 @@ labelled `System:` at (16,240), prints
 `CRUGOS: wb icon ready ('System:', volume)` after the desktop, shell and keys
 markers, and opens a normal Intuition window titled `System:` at (560,60),
 360x260 whose painter lists the root directory entries of the mounted ext4
-root, one name per line, at most 10 lines, clipped to the body width, printing
+root, one name per line, clipped to the body width, printing
 `CRUGOS: wb drawer 'System:' opened (N entries)`. An empty or unmounted root
-prints `no volume` instead.
+prints `no volume` instead. Since phase 6G the body is a scrolling viewport
+over that listing; see [The drawer window](#the-drawer-window).
 
 ### Dragging an icon
 
@@ -282,6 +286,64 @@ painter never has to know about them. `intuition_redraw_window(id)` repaints
 that one window after its content changed, and a NULL callback restores the
 static body text. There is a single painter slot, so a second call replaces the
 first. The shell window uses this from phase 6C and the drawer from phase 6E.
+
+## The drawer window
+
+The `System:` drawer opened by double-clicking the volume icon is a scrolling
+viewport over the root directory listing since phase 6G. The body is the
+window height less the 20-pixel title bar and the two 2-pixel borders
+(`h - 24`), and the painter walks it as 20-pixel rows of 8x16 glyphs, so the
+number of visible rows is
+
+    rows = body > 22 ? (body - 22) / 20 + 1 : 0
+
+A 360x260 drawer has a 236-pixel body and shows 11 rows; resized to 460x360
+the 336-pixel body shows 16. `g_drawer_top` is the index of the topmost visible
+entry; entry `top + i` is painted at `y + 6 + i*20`, clipped to
+`(w - 20) / 8` characters (at most 47) starting at `x + 6`.
+
+| item | value |
+|---|---|
+| entries held | `WB_DRAWER_MAX` (40) |
+| name bytes held | `WB_DRAWER_NAME_MAX` (32) |
+| row pitch | `WB_DRAWER_ROW_H` (20) |
+| scrollbar track | 4 px wide at `x + w - 8`, from `y + 6`, height `h - 12`, colour `0x00404040` |
+| scrollbar thumb | height `max(12, track_h * rows / entries)`, offset `(track_h - thumb_h) * top / max_top`, colour `0x00c0c0c0` |
+| scrollbar painted | only while `entries > rows` |
+
+`wb_drawer_scroll(delta)` clamps the top row to `[0, max_top]` with
+`max_top = entries > rows ? entries - rows : 0`, repaints the window and prints
+`CRUGOS: wb drawer scrolled (top N of M)` while counting `g_drawer_scrolls` and
+`g_drawer_ops_seen`. A press at either end returns 0 and counts nothing, so the
+list never scrolls past its ends. `wb_drawer_refresh()` re-reads the listing,
+clamps the top row against the new entry count, repaints and prints
+`CRUGOS: wb drawer refreshed (N entries)`. Only one drawer window exists at a
+time: a second open is ignored.
+
+With `wb.dr=1` (and `wb.desk=1`) the shared key pump feeds the drawer: Up and
+Down move the viewport by one entry and `r`/`R` refresh the listing. The pump
+is not installed when `wb.shell=1`, and while the drawer is closed the same
+keys drive the icon table. `wb.dr=1` also prints
+`CRUGOS: wb drawer mode (arrow keys scroll, r refreshes)` and makes the
+Workbench self-test wait for `wb.acts=` drawer operations, printing
+`CRUGOS: wb drawer selftest ok (N scroll(s), M refresh(es))` or
+`CRUGOS: wb drawer timeout (N/M)`.
+
+`wb.fill=N` (0..24) creates `/f00` .. `/f(N-1)` in the root once, before the
+drawer reads the listing, and prints `CRUGOS: wb fill N file(s)`. The kernel
+mounts the ext4 root read-only at boot, so the fill brackets the writes with
+`storage_remount_rw()` / `storage_remount_ro()` from `kernel/fs/storage.c`
+(declared in `include/crug/storage.h`), which umount and remount the volume and
+print `CRUGOS: storage remounted read-write` / `CRUGOS: storage remounted
+read-only`. If the remount is refused the fill is skipped with
+`CRUGOS: wb fill skipped (read-only volume)`. The shell's `write` command uses
+the same helpers: before phase 6G it wrote into the read-only boot mount and
+failed silently; it now remounts read-write around the create and write and
+remounts read-only again, and `sync` returns 0 only while the volume is
+mounted read-write.
+
+The gate that proves all of this is `make test-workbench-drawer`, gate 42;
+its six steps are described under [Drawer gate](#drawer-gate).
 
 ## Menus
 
@@ -406,7 +468,7 @@ index and the new tile origin.
 
    | id | rectangle | title | body |
    | --- | --- | --- | --- |
-   | 1 | (80, 90) 360x220 | `Workbench` | `CrugOS Workbench` / `phase 6f` / `software rendered` |
+   | 1 | (80, 90) 360x220 | `Workbench` | `CrugOS Workbench` / `phase 6g` / `software rendered` |
    | 2 | (480, 300) 320x200 | `Shell` | `4.OS` / `crugos>`, or the shell grid when `wb.shell=1` |
 
    Window 1 carries the `Workbench` (About/Info/Quit) and `Window`
@@ -453,6 +515,8 @@ tokens do. Values are decimal, capped, and ignored when malformed:
 | `wb.keys=1` | 0/1 | hand decoded key bytes to `intuition_key_event()` (ignored when `wb.shell=1`) |
 | `wb.desk=1` | 0/1 | create the `System:` desktop object and count desktop actions (reporting mode) |
 | `wb.ikeys=1` | 0/1 | give the icon table the keyboard: Tab/arrows move the selection, Enter selects then activates, Escape clears it (parsed before `wb.desk=`, ignored when `wb.shell=1`) |
+| `wb.dr=1` | 0/1 | give the `System:` drawer the arrow keys and `r`, and make the self-test wait for `wb.acts=` drawer operations (ignored when `wb.shell=1`) |
+| `wb.fill=N` | 0..24 | create `/f00` .. `/f(N-1)` in the root once before the drawer opens |
 | `wb.hold=S` | 0..3600 | seconds `wb_hold()` keeps the desktop on screen after the boot marker |
 
 `make test-workbench` boots with `wb.enable=1 wb.wait=30 wb.drag=1`,
@@ -460,7 +524,8 @@ tokens do. Values are decimal, capped, and ignored when malformed:
 `make test-workbench-keys` with `wb.enable=1 wb.wait=30 wb.keys=1
 wb.acts=2`, and `make test-workbench-desk` with `wb.enable=1 wb.wait=30
 wb.desk=1 wb.acts=3`, and `make test-workbench-icons` with `wb.enable=1
-wb.wait=30 wb.desk=1 wb.ikeys=1 wb.acts=5`. `make demo` boots
+wb.wait=30 wb.desk=1 wb.ikeys=1 wb.acts=5`, and `make test-workbench-drawer`
+with `wb.enable=1 wb.wait=30 wb.desk=1 wb.dr=1 wb.fill=24 wb.acts=4`. `make demo` boots
 `wb.enable=1 wb.wait=0 wb.hold=<seconds>` instead: `wb.wait=0` turns both
 self-tests into no-ops, so the interactive desktop needs neither a drag nor an
 action before the boot marker, and `wb.hold=` keeps the guest alive
@@ -485,7 +550,7 @@ CRUGOS: wb window 2 drag start (512, 312)
 CRUGOS: wb window 2 drag to (557, 337)
 CRUGOS: wb window 2 moved to (570, 350)
 CRUGOS: wb selftest ok (1 drag(s), 0 action(s))
-CRUGOS: phase 6f boot ok
+CRUGOS: phase 6g boot ok
 ```
 
 The menu gate is a second boot and adds the action lines:
@@ -503,7 +568,7 @@ CRUGOS: wb menu 'Workbench' open (window 1)
 CRUGOS: wb menu 'Workbench' selected ('Quit')
 CRUGOS: wb action 4 menu window 1 item 2
 CRUGOS: wb selftest ok (0 drag(s), 4 action(s))
-CRUGOS: phase 6f boot ok
+CRUGOS: phase 6g boot ok
 ```
 
 The shell gate is a third boot: it adds `CRUGOS: wb shell ready (window 2,
@@ -530,7 +595,7 @@ CRUGOS: wb menu 'Workbench' item 1 highlighted ('Info')
 CRUGOS: wb menu 'Workbench' selected ('Info')
 CRUGOS: wb action 2 menu window 1 item 1
 CRUGOS: wb selftest ok (0 drag(s), 2 action(s))
-CRUGOS: phase 6f boot ok
+CRUGOS: phase 6g boot ok
 ```
 
 The desktop gate is a fifth boot: it selects the `System:` object, opens its
@@ -548,7 +613,7 @@ CRUGOS: wb window 3 sent to back
 CRUGOS: wb action 3 depth window 3
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb selftest ok (0 drag(s), 3 action(s))
-CRUGOS: phase 6f boot ok
+CRUGOS: phase 6g boot ok
 ```
 
 The icon gate is a sixth boot: it focuses the `System:` object from the
@@ -572,7 +637,33 @@ CRUGOS: wb window 1 sent to front
 CRUGOS: wb action 5 front window 1
 CRUGOS: wb icons selftest ok (1 move(s), 1 front(s))
 CRUGOS: wb selftest ok (0 drag(s), 5 action(s))
-CRUGOS: phase 6f boot ok
+CRUGOS: phase 6g boot ok
+```
+
+The drawer gate is a seventh boot, the only one that fills the volume first:
+it opens the drawer, scrolls it, resizes it by the grip so the rows reflow,
+refreshes it with `r` and checks the framebuffer between steps:
+
+```
+CRUGOS: wb desktop ready (1024x768, 2 window(s))
+CRUGOS: wb icon ready ('System:', volume)
+CRUGOS: wb drawer mode (arrow keys scroll, r refreshes)
+CRUGOS: wb icon 'System:' selected
+CRUGOS: wb icon 'System:' selected
+CRUGOS: storage remounted read-write
+CRUGOS: wb fill 24 file(s)
+CRUGOS: storage remounted read-only
+CRUGOS: wb drawer 'System:' opened (29 entries)
+CRUGOS: wb drawer ready (29 entries, 11 row(s))
+CRUGOS: wb drawer scrolled (top 1 of 29)
+CRUGOS: wb drawer scrolled (top 2 of 29)
+CRUGOS: wb drawer scrolled (top 3 of 29)
+CRUGOS: wb window 3 resized to 460x360
+CRUGOS: wb drawer refreshed (29 entries)
+CRUGOS: wb selftest ok (0 drag(s), 0 action(s))
+CRUGOS: wb desk selftest ok (1 drawer(s))
+CRUGOS: wb drawer selftest ok (3 scroll(s), 1 refresh(es))
+CRUGOS: phase 6g boot ok
 ```
 
 | marker | when |
@@ -583,6 +674,16 @@ CRUGOS: phase 6f boot ok
 | `CRUGOS: wb icon '<label>' selected` | a press selected a desktop object |
 | `CRUGOS: wb drawer '<label>' opened (N entries)` | a double click opened the drawer |
 | `CRUGOS: wb drawer '<label>' no volume` | the drawer found no mounted root |
+| `CRUGOS: wb drawer mode (arrow keys scroll, r refreshes)` | `wb.dr=1` gave the drawer the keys |
+| `CRUGOS: wb drawer ready (N entries, R row(s))` | drawer mode opened the drawer and wrapped its listing |
+| `CRUGOS: wb fill N file(s)` | `wb.fill=N` created its files before the drawer read the root |
+| `CRUGOS: wb fill skipped (read-only volume)` | the root could not be remounted read-write |
+| `CRUGOS: storage remounted read-write` | a short write window opened |
+| `CRUGOS: storage remounted read-only` | the write window closed and committed |
+| `CRUGOS: wb drawer scrolled (top N of M)` | Up or Down moved the viewport |
+| `CRUGOS: wb drawer refreshed (N entries)` | `r`/`R` reloaded the listing |
+| `CRUGOS: wb drawer selftest ok (N scroll(s), M refresh(es))` | drawer mode saw its scroll and refresh counts |
+| `CRUGOS: wb drawer timeout (N/M)` | the wait expired with drawer operations missing |
 | `CRUGOS: wb window N sent to back` | the depth gadget was pressed |
 | `CRUGOS: wb icons ready (N object(s), keyboard focus)` | `wb.ikeys=1` installed icon focus mode |
 | `CRUGOS: wb icon '<label>' focused` | Tab, an arrow or Enter moved the icon selection |
@@ -755,7 +856,7 @@ there is no keyboard text entry, only focus, movement and menu selection.
 ## Host tests
 
 `make test-host` links the real `kernel/gfx/intuition.c`,
-`kernel/lib/textgrid.c` and `kernel/shell/shell.c` and reports 3054 checks.
+`kernel/lib/textgrid.c` and `kernel/shell/shell.c` and reports 3075 checks.
 `tests/host/test_intuition.c` replaces the framebuffer primitives with counting
 stubs and the cursor accessors with a settable fake (`test_fb_fake_reset()` /
 `test_fb_cursor_set()` from `tests/host/test_gfx.c`), then checks:
@@ -811,7 +912,8 @@ stubs and the cursor accessors with a settable fake (`test_fb_fake_reset()` /
   assertion grew to 75 frames.
 - window painters: installing a painter, the body rectangle it receives, the
   gadgets still drawn after it, `intuition_redraw_window()` repainting one
-  window, and a NULL painter restoring the static body text.
+  window, and a NULL painter restoring the static body text; the group is
+  `test_intuition_paint`.
 - the event queue: a 16-event FIFO, the drop counter on overflow, the action
   count still growing past the queue depth, and the FIFO drain order.
 
@@ -862,7 +964,7 @@ anything else. The script then:
    `ok: workbench title-bar drag (N drag(s), window 2 at (x, y), exit 33)`.
 
 `make test-workbench` then runs `scripts/boot-check.py` with `EXPECT_WB=yes`
-(the phase 6f boot marker, the desktop marker, a `wb selftest ok`, at least one
+(the phase 6g boot marker, the desktop marker, a `wb selftest ok`, at least one
 `wb window N opened`, one `wb window N moved to`, and one `wb cursor at` with
 numeric coordinates) and `scripts/check-disk.py` for the ext4 root.
 
@@ -897,7 +999,7 @@ larger relative motion into several 8-bit HID reports and the guest drops some
 of them, so a single jump of 644 pixels landed 136 pixels short when the gate
 was first written.
 
-`boot-check.py` then runs with `EXPECT_MENU=yes`, which requires the phase 6f
+`boot-check.py` then runs with `EXPECT_MENU=yes`, which requires the phase 6g
 marker, the desktop marker, the menu open and selected markers, the gadget
 click marker, the close marker, at least one `wb action N ...` line and a
 `wb selftest ok (N drag(s), M action(s))` with at least one action, and
@@ -943,7 +1045,7 @@ wb.acts=$(WB_KEYS_ACTS)`:
    and Enter to select it, requiring the highlight marker, the selection marker
    and `wb action 2 menu window 1 item 1`.
 5. waits for exit status 33, then runs `scripts/boot-check.py` with
-   `EXPECT_KEYS=yes` (the phase 6f marker, the desktop and keys markers, the
+   `EXPECT_KEYS=yes` (the phase 6g marker, the desktop and keys markers, the
    resize and key-move markers, the menu markers and a two-action
    `wb selftest ok`) and `scripts/check-disk.py`, and prints
    `ok: workbench resize and keyboard navigation (exit 33)`.
@@ -975,7 +1077,7 @@ wb.acts=$(WB_DESK_ACTS)`:
    back: the drawer title bar turns idle grey `(128,128,128)` and the Shell
    title bar behind it becomes amber at the same point.
 6. waits for exit status 33, then runs `scripts/boot-check.py` with
-   `EXPECT_DESK=yes` (the phase 6f marker, the desktop and icon markers, the
+   `EXPECT_DESK=yes` (the phase 6g marker, the desktop and icon markers, the
    drawer marker, the icon and depth action lines, the desk self-test line and
    a three-action `wb selftest ok`) and `scripts/check-disk.py`, and prints
    `ok: workbench desktop objects and depth (exit 33)`.
@@ -1002,12 +1104,45 @@ wb.ikeys=1 wb.acts=$(WB_ICONS_ACTS)`:
 5. presses the front gadget at (394,102): the same title bar turns amber
    `(255,176,0)` again and the log carries
    `CRUGOS: wb window 1 sent to front`.
-6. waits for exit status 33, then `scripts/boot-check.py` requires the phase 6f
+6. waits for exit status 33, then `scripts/boot-check.py` requires the phase 6g
    marker, the icons-ready, focus, drag, drop, front and action markers, the
    icon self-test line and `EXPECT_ICONS=yes` (its ok line reads `desk no icons
    yes storage disk`), and `scripts/check-disk.py` still runs a clean `e2fsck`.
    The gate prints `ok: workbench icon dragging, send-to-front and keyboard
    focus (exit 33)`.
+
+### Drawer gate
+
+`make test-workbench-drawer` is gate 42 and drives
+`scripts/run-workbench-drawer.py` through six steps:
+
+1. boots with `wb.enable=1 wb.wait=30 wb.desk=1 wb.dr=1 wb.fill=24 wb.acts=4`
+   and a hot-plugged mouse, double-clicks the volume icon at (48,264) and
+   requires the select marker, `CRUGOS: wb drawer 'System:' opened`, the fill
+   marker, and `CRUGOS: wb drawer ready (N entries, 11 row(s))`; the entry count
+   must be at least 25, the row count exactly 11, and the title bar at (600,72)
+   active amber.
+2. hot-plugs a keyboard, waits for `CRUGOS: wb drawer mode`, presses Down three
+   times, requires a `wb drawer scrolled (top N of M)` marker after each press
+   and more than 200 changed pixels between screendumps inside the drawer body
+   box (566,88)-(900,300).
+3. reads (830,400) as desktop `(16,32,48)`, drags the resize grip from
+   (904,304) to (1004,404), requires
+   `CRUGOS: wb window 3 resized to 460x360` and reads the same pixel as the
+   window body `(8,16,24)`.
+4. counts body-text pixels `(224,224,224)` in the widened body and requires at
+   least 200, proving the rows reflowed into the new height.
+5. sends `r`, requires `CRUGOS: wb drawer refreshed (29 entries)`, the drawer
+   self-test line and the usual `wb selftest ok` line.
+6. requires guest exit status 33 and a clean `e2fsck` on the data disk;
+   `boot-check.py` runs with `EXPECT_DRAWER=yes` and its final ok line includes
+   `drawer yes`.
+
+The drawer has to be filled because a 360x260 body shows 11 rows while the
+stock root holds only a handful of names: with nothing below the fold the
+scroll and refresh clamps would have nothing to prove. The 24 filled files plus
+the five root entries give 29 entries, roughly three screens, so Down has room
+to move and a refresh has entries to reload.
 
 ## Interactive demo
 
@@ -1049,10 +1184,13 @@ guest prints `CRUGOS: wb hold finished`, exits with status 33 and leaves
 - Desktop objects can be selected, dragged by the pointer and focused from the
   keyboard (`wb.ikeys=1`), but they cannot be renamed: there is no way to
   relabel an object after `intuition_add_icon()`, no multi-select and no icon
-  reflow when the screen size changes. The drawer lists at most 10 root names,
-  does not scroll and does not refresh while it stays open. There is one
-  painter slot per window, so a second `intuition_set_paint()` replaces the
-  first.
+  reflow when the screen size changes. The drawer lists at most
+  `WB_DRAWER_MAX` (40) root names from a flat read of the root, scrolls one row
+  per arrow key and refreshes on `r`, but there is no drag-select, the
+  scrollbar cannot be dragged and only one drawer window exists. Rows sit on a
+  20-pixel pitch with 8x16 glyphs, so a taller window shows more of them and a
+  resize reflows the list. There is one painter slot per window, so a second
+  `intuition_set_paint()` replaces the first.
 - The shell has no quoting, no globs and no redirection: arguments are split on
   spaces and the extra ones fold into the last argument, `write` creates a
   regular `0644` file but never a directory, `cat` reads at most 4 KiB and
@@ -1065,10 +1203,10 @@ guest prints `CRUGOS: wb hold finished`, exits with status 33 and leaves
   latency is the 10 ms `usb.poll` tick until interrupts or a compositor make
   it cheaper.
 - Text is 8x16 with a 20-pixel line pitch and a 47-character line cap on the
-  static body path; there is no word wrapping and no fonts. Only the shell
-  window scrolls, over 96 lines of 37 usable columns, and it has a single
-  window: `wb.shell=1` binds the keyboard to window 2 and keeps the serial
-  console for diagnostics.
+  static body path; there is no word wrapping and no fonts. The shell window
+  scrolls over 96 lines of 37 usable columns and the drawer scrolls over its
+  listing; each has a single window: `wb.shell=1` binds the keyboard to window 2
+  and keeps the serial console for diagnostics.
 - Outside keys and shell mode the keyboard still reaches the serial console;
   with `wb.keys=1` it drives the desktop instead, and shell mode routes every
   byte to window 2 regardless of which window is active.

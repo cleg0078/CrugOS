@@ -32,6 +32,7 @@
 #   make test-workbench-keys  resize a window and drive the desktop from the keyboard
 #   make test-workbench-desk  open a drawer from the desktop volume icon and send it back
 #   make test-workbench-icons  drag a desktop icon, raise a window and drive the icons by keyboard
+#   make test-workbench-drawer  scroll, refresh and resize the System: drawer
 #   make crypt-disk  build the AES-256-XTS crypt test disk
 #   make test-crypt  boot from an encrypted root and verify the disk
 #   make test-crypt-recovery  unlock the encrypted root with the recovery keyslot
@@ -99,6 +100,7 @@ EXPECT_SHELL ?= no
 EXPECT_KEYS ?= no
 EXPECT_DESK ?= no
 EXPECT_ICONS ?= no
+EXPECT_DRAWER ?= no
 
 # QEMU / firmware options.
 MEMORY_MB ?= 512
@@ -146,6 +148,10 @@ WB_DESK_RUN_TIMEOUT_SEC ?= 240
 WB_ICONS_WAIT ?= 30
 WB_ICONS_ACTS ?= 5
 WB_ICONS_RUN_TIMEOUT_SEC ?= 240
+WB_DRAWER_WAIT ?= 30
+WB_DRAWER_ACTS ?= 4
+WB_DRAWER_FILL ?= 24
+WB_DRAWER_RUN_TIMEOUT_SEC ?= 240
 
 # Interactive demo (make demo): a real QEMU window with a USB keyboard and
 # mouse, the Workbench desktop and a hold so the window stays open.
@@ -282,7 +288,7 @@ HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
         test-crypt-keyboard test-crypt-keyboard-wrong crypt-run test-net test-tcp \
         test-net-dns test-usb-hotplug test-usb-mouse test-audio test-gfx \
         test-workbench test-workbench-menu test-workbench-shell test-workbench-keys \
-        test-workbench-desk test-workbench-icons \
+        test-workbench-desk test-workbench-icons test-workbench-drawer \
         iso check-iso test-iso usb \
         crash-disk \
         check-disk size check-efi repro test-host preflight version options clean distclean help
@@ -658,6 +664,22 @@ test-workbench-icons: esp
 	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no $(EXPECT_ICONS)
 	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 
+# Drawer gate: wb.dr=1 fills the volume, opens the drawer from the volume icon,
+# scrolls it with the arrow keys, refreshes it with 'r' and resizes it with the
+# grip so the row count grows.  Serial markers prove each step, screendumps prove
+# the scroll and the reflow.
+test-workbench-drawer: EXPECT_DRAWER := yes
+test-workbench-drawer: esp
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(PYTHON) scripts/run-workbench-drawer.py --repo $(CURDIR) \
+		--disk $(abspath $(DISK_IMG)) --serial-log $(abspath $(SERIAL_LOG)) \
+		--exit-code $(abspath $(QEMU_EXIT)) --acts $(WB_DRAWER_ACTS) \
+		--fill $(WB_DRAWER_FILL) --wb-wait $(WB_DRAWER_WAIT) \
+		--run-timeout $(WB_DRAWER_RUN_TIMEOUT_SEC) \
+		--qemu-extra "$(WB_QEMU_EXTRA)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no $(EXPECT_ICONS) $(EXPECT_DRAWER)
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
 test:
 	$(Q)rm -f $(DISK_IMG)
 	$(Q)$(MAKE) --no-print-directory run
@@ -888,6 +910,11 @@ options:
 	@printf '  %-16s %s\n' WB_ICONS_WAIT "$(WB_ICONS_WAIT) (seconds)"
 	@printf '  %-16s %s\n' WB_ICONS_ACTS "$(WB_ICONS_ACTS)"
 	@printf '  %-16s %s\n' WB_ICONS_RUN_TIMEOUT_SEC "$(WB_ICONS_RUN_TIMEOUT_SEC)"
+	@printf '  %-16s %s\n' EXPECT_DRAWER "$(EXPECT_DRAWER)"
+	@printf '  %-16s %s\n' WB_DRAWER_WAIT "$(WB_DRAWER_WAIT) (seconds)"
+	@printf '  %-16s %s\n' WB_DRAWER_ACTS "$(WB_DRAWER_ACTS)"
+	@printf '  %-16s %s\n' WB_DRAWER_FILL "$(WB_DRAWER_FILL)"
+	@printf '  %-16s %s\n' WB_DRAWER_RUN_TIMEOUT_SEC "$(WB_DRAWER_RUN_TIMEOUT_SEC)"
 	@printf '  %-16s %s\n' MEMORY_MB "$(MEMORY_MB)"
 	@printf '  %-16s %s\n' SMP "$(SMP)"
 	@printf '  %-16s %s\n' TIMEOUT_SEC "$(TIMEOUT_SEC)"

@@ -149,7 +149,9 @@ both self-test outcomes.
   table since phase 6F, whose `make test-workbench-desk` and
   `make test-workbench-icons` gates check the icon frame, the selected frame,
   the drawer, the stacking-order title bars and a dragged tile in
-  `screendump`s).
+  `screendump`s, and since phase 6G the `System:` drawer scrolls its rows with
+  a scrollbar and reflows them when the window is resized, which
+  `make test-workbench-drawer` checks in `screendump`s).
 - Relative motion only, no acceleration curve, no wheel scrolling of the
   console, no click handling beyond recording the button mask.
 - The sprite is clipped at the screen edge; there is no wrap-around.

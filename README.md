@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 6F icon dragging, send-to-front and keyboard icons (`v0.28.0`)
+## Status: phase 6G drawer scrolling, refresh and reflow (`v0.29.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -37,8 +37,10 @@ selected by a press and the `System:` volume opens a drawer on a double click,
 while the depth box sends its window to the bottom of the stacking order.
 Phase 6F makes those icons interactive: a press grabs and drags a tile, a
 send-to-front gadget joined the depth gadget in every title bar, and the icon
-table takes the keyboard. Release `v0.23.1` made that
-tree bootable media: `make iso` writes a hybrid UEFI ISO
+table takes the keyboard, and phase 6G turns the `System:` drawer into a
+scrolling list: the arrow keys move the viewport, `r` re-reads the volume, a
+scrollbar tracks the position and a resize reflows the rows. Release `v0.23.1`
+made that tree bootable media: `make iso` writes a hybrid UEFI ISO
 that boots from a USB stick or a CD-ROM, with no disk image and no test
 tokens baked in.
 
@@ -614,6 +616,58 @@ Phase 6F makes the desktop objects interactive.
 - the kernel file is 230056 B (224 KiB) and the load image 749 KiB, against the
   1024 KiB stretch and 2048 KiB hard budgets, in a release of 41 gates.
 
+Phase 6G makes the `System:` drawer a scrolling list.
+
+- `kernel/gfx/workbench.c`: the drawer window body is a viewport over the root
+  listing. The row count is `(h - 22) / 20 + 1` for a body `h` above 22 pixels
+  and 0 below that, so the 360x260 drawer (236-pixel body) shows 11 rows and
+  the same drawer resized to 460x360 (336-pixel body) shows 16, on a 20-pixel
+  row pitch for 8x16 glyphs. Arrow Up and Arrow Down scroll one entry at a
+  time, clamped to `[0, entries - rows]` so the list never scrolls past either
+  end; `r` or `R` re-reads the directory listing (a file created after the
+  drawer opened appears) and clamps the top row again. A 4-pixel scrollbar
+  track sits at `x + w - 8` inside the body, with a thumb
+  `max(12, track_height * rows / entries)` pixels tall whose offset follows the
+  top entry, so the drawer shows both position and extent;
+- `wb.dr=1` takes the arrow keys and `r` for the drawer while `wb.desk=1`
+  still opens the desktop, and prints
+  `CRUGOS: wb drawer mode (arrow keys scroll, r refreshes)`;
+  `wb.fill=<0..24>` creates `/f00` .. `/f(N-1)` in the root once before the
+  drawer opens (a missing or read-only volume skips it) and prints
+  `CRUGOS: wb fill N file(s)`, because the scroll, refresh and reflow gate
+  needs a listing longer than one screen. The drawer prints
+  `CRUGOS: wb drawer ready (N entries, N row(s))`, a scroll prints
+  `CRUGOS: wb drawer scrolled (top N of M)`, a refresh prints
+  `CRUGOS: wb drawer refreshed (N entries)` and the drawer selftest line
+  reports the scroll and refresh counts;
+- the kernel mounts the ext4 root read-only at boot, so the fill and the
+  shell's `write` command now open a write window: `storage_remount_rw()` and
+  `storage_remount_ro()` (declared in `include/crug/storage.h`) umount and
+  remount the root around a short write and print
+  `CRUGOS: storage remounted read-write` and
+  `CRUGOS: storage remounted read-only`. The shell's `write` command
+  previously failed silently against the read-only boot mount and now works;
+  `sync` returns success while the volume is read-only because every write
+  already closed its remount;
+- `make test-workbench-drawer` is the 42nd gate:
+  `scripts/run-workbench-drawer.py` fills the root, double-clicks the
+  `System:` volume icon, reads 29 entries (five root entries plus 24 filled
+  files) and 11 rows, requires at least 25 entries and exactly 11 rows, presses
+  Down three times and proves the move with more than 200 changed pixels in the
+  drawer body, drags the resize grip from
+  (904,304) to (1004,404) so the drawer grows to 460x360 and reflows to 16
+  rows, proves the growth at (830,400) -- desktop (16,32,48) before, window
+  body (8,16,24) after -- with at least 200 body-text (224,224,224) pixels
+  inside the widened body, refreshes with `r`, and expects exit status 33 and
+  a clean `e2fsck`. `boot-check.py` gained the `EXPECT_DRAWER` positional
+  and its `ok` line reports `drawer yes`;
+- `make test-host` reports 3075 checks, with the new `test_intuition_paint`
+  group covering the body painter, `intuition_redraw_window()` and the resize
+  reflow;
+- docs: README, workbench, boot, build, roadmap, versioning, gfx and iso
+  describe the scrolling drawer, the two tokens, the remount helpers and the
+  gate.
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -622,9 +676,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.28.0 (phase 6f) -- Amiga-inspired microkernel bring-up
+CrugOS 0.29.0 (phase 6g) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.28.0
+CRUGOS: version 0.29.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -684,7 +738,7 @@ heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
 boot   : pmm=28552 us cpu=438 us vm=626 us traps=360 us timer=65357 us heap=60 us storage=94487 us sched=354 us syscall=122 us total=190359 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase 6f boot ok
+CRUGOS: phase 6g boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -886,6 +940,7 @@ make test-workbench-shell  # type commands into the Workbench shell window
 make test-workbench-keys   # resize a window by its grip and drive it from the keyboard
 make test-workbench-desk   # select desktop objects and send a window to the back
 make test-workbench-icons  # drag a desktop icon, raise a window by its front gadget and drive the icons from the keyboard
+make test-workbench-drawer  # scroll, refresh and resize the System: drawer
 make iso         # build a bootable hybrid UEFI ISO (build/x86_64/crugos.iso)
 make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
@@ -916,6 +971,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `EXPECT_CRYPT`, `EXPECT_AES`, `EXPECT_NET`, `EXPECT_TCP`, `EXPECT_DNS`,
 `EXPECT_USB`, `EXPECT_MOUSE`, `EXPECT_AUDIO`, `EXPECT_GFX`, `EXPECT_WB`,
 `EXPECT_MENU`, `EXPECT_SHELL`, `EXPECT_KEYS`, `EXPECT_DESK`, `EXPECT_ICONS`,
+`EXPECT_DRAWER`,
 `AUDIO_RUN_TIMEOUT_SEC`, `AUDIO_QEMU_EXTRA`, `GFX_WAIT`, `GFX_MOVES`,
 `GFX_RUN_TIMEOUT_SEC`, `GFX_QEMU_EXTRA`, `WB_WAIT`, `WB_DRAG`,
 `WB_RUN_TIMEOUT_SEC`, `WB_QEMU_EXTRA`, `WB_MENU_WAIT`, `WB_MENU_ACTS`,
@@ -923,7 +979,8 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `WB_SHELL_RUN_TIMEOUT_SEC`, `WB_KEYS_WAIT`, `WB_KEYS_ACTS`,
 `WB_KEYS_RUN_TIMEOUT_SEC`, `WB_DESK_WAIT`, `WB_DESK_ACTS`,
 `WB_DESK_RUN_TIMEOUT_SEC`, `WB_ICONS_WAIT`, `WB_ICONS_ACTS`,
-`WB_ICONS_RUN_TIMEOUT_SEC`, `DEMO_DISPLAY`, `DEMO_HOLD_SEC`,
+`WB_ICONS_RUN_TIMEOUT_SEC`, `WB_DRAWER_WAIT`, `WB_DRAWER_ACTS`, `WB_DRAWER_FILL`,
+`WB_DRAWER_RUN_TIMEOUT_SEC`, `DEMO_DISPLAY`, `DEMO_HOLD_SEC`,
 `DEMO_TIMEOUT_SEC`, `DEMO_CMDLINE`, `DEMO_MACHINE_EXTRA`, `DEMO_QEMU_EXTRA`,
 `ISO_IMAGE`, `ISO_STAGE`, `ISO_FAT_IMG`, `ISO_SIZE_MB`, `ISO_VOLID`,
 `ISO_CMDLINE`, `ISO_DATE`, `ISO_RUN_TIMEOUT_SEC`, `EXPECT_ISO`, `ISO_IMG`,
@@ -951,7 +1008,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/input/` | `input.device`: set-1 scancode decoder, the console byte queue and the pointer state |
 | `kernel/audio/` | `audio.device` PCM ring, the per-channel mixer and the tone generator |
 | `kernel/net/` | `net.device`, Ethernet/ARP/IPv4/ICMP/UDP, TCP, the DHCP client and the DNS resolver |
-| `kernel/gfx/` | `gfx.device` (the pointer-driven framebuffer cursor) and `intuition.device` with the phase 6A desktop, its phase 6B menus, gadgets and event queue, and the phase 6C body painter the shell window uses, the phase 6D resize grips and keyboard navigation, the phase 6E desktop objects, depth gadget and drawer, and the phase 6F icon dragging, send-to-front gadget and keyboard icon focus |
+| `kernel/gfx/` | `gfx.device` (the pointer-driven framebuffer cursor) and `intuition.device` with the phase 6A desktop, its phase 6B menus, gadgets and event queue, and the phase 6C body painter the shell window uses, the phase 6D resize grips and keyboard navigation, the phase 6E desktop objects, depth gadget and drawer, the phase 6F icon dragging, send-to-front gadget and keyboard icon focus, and the phase 6G scrolling drawer with its scrollbar, refresh and reflow |
 | `kernel/shell/` | the Workbench shell: line editor, history, the command table and the `shell_io` binding to the mounted ext4 root |
 | `kernel/mm/` | physical allocator, W^X page tables, kernel heap |
 | `kernel/block/` | block-device registry, partitions, bounds checks, RAID1/RAID10, boot-time rebuild and the AES-256-XTS `crypt.device` |
@@ -1037,15 +1094,19 @@ made the windows resizable from a corner grip and taught the keyboard Tab
 focus, 8-pixel arrow moves and a menu popup; phase 6E put desktop objects under
 the windows, added the depth gadget and painted a drawer from the root
 directory; phase 6F made those icons draggable, added the send-to-front gadget
-and gave the icon table keyboard focus. Remaining phase 3B work is
+and gave the icon table keyboard focus; phase 6G made that drawer scroll with a
+scrollbar, refresh with `r` and reflow on resize, and added the read-write
+remount helpers the fill and the shell's `write` command need. Remaining
+phase 3B work is
 online RAID rebuild, hot spare, scrub and a write-intent bitmap, RAID below
 encryption, a redundant ESP, TPM/keyfile keyslots and USB storage; phase 4
 continues with framebuffer (GOP) console input and virtual terminals, plus a
 routing table and richer resolver features on top of the phase 4B-4D stack;
-the next step is the rest of Workbench userspace: renaming an icon, a drawer
-that refreshes and scrolls, sub-menus, a gadget toolkit and, in phase 7,
-application bundles (spec section 35), on top of the phase 6F desktop (window
-resizing, the depth and front gadgets and icon dragging are done). Later
+the next step is the rest of Workbench userspace: drag-selecting icons,
+dragging the drawer's scrollbar, renaming an icon, sub-menus, a gadget toolkit
+and, in phase 7, application bundles (spec section 35), on top of the phase 6G
+desktop (window resizing, the depth and front gadgets, icon dragging and a
+scrolling drawer are done). Later
 phases cover USB storage, graphics, Workbench userspace, SMP/IOMMU and
 virtualisation. See
 [docs/roadmap.md](docs/roadmap.md) for the full sequence and the known

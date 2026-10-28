@@ -36,14 +36,25 @@ static int ops_write(const char *path, const char *data, usize len)
 {
     struct ext4_fs *fs = storage_root();
     u32 ino;
+    int ret;
 
     if (!fs)
         return -1;
+    /* The boot mounts the root read-only: take a short read-write window and
+       close it again so a shell command cannot leave the volume mounted for
+       writing. */
+    if (storage_remount_rw() != 0)
+        return -1;
     if (ext4_lookup(fs, path, &ino) != 0) {
-        if (ext4_create(fs, path, 0644u) != 0)
+        if (ext4_create(fs, path, 0644u) != 0) {
+            (void)storage_remount_ro();
             return -1;
+        }
     }
-    return ext4_write_file(fs, path, data, len);
+    ret = ext4_write_file(fs, path, data, len);
+    if (storage_remount_ro() != 0)
+        ret = -1;
+    return ret;
 }
 
 static int ops_sync(void)
@@ -52,6 +63,10 @@ static int ops_sync(void)
 
     if (!fs)
         return -1;
+    /* Every write already closes its remount (which flushes), so sync is only
+       meaningful while the volume happens to be writable. */
+    if (!(fs->flags & EXT4_MOUNT_RW))
+        return 0;
     return ext4_fsync(fs);
 }
 

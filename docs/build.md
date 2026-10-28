@@ -1,6 +1,6 @@
 # Building CrugOS
 
-This document describes the phase 6F build system: how the kernel, the UEFI
+This document describes the phase 6G build system: how the kernel, the UEFI
 loader, the host crypto tool, the test disk images and the bootable hybrid ISO
 are built, which invariants the link must preserve, and how to diagnose the
 failure modes that are specific to this toolchain.
@@ -41,6 +41,7 @@ make test-workbench-shell  # type commands into the Workbench shell window
 make test-workbench-keys   # resize a window by its grip and drive it from the keyboard
 make test-workbench-desk   # select desktop objects and send a window to the back
 make test-workbench-icons  # drag a desktop icon, raise a window by its front gadget and drive the icons from the keyboard
+make test-workbench-drawer  # scroll, refresh and resize the System: drawer
 make iso         # build a bootable hybrid UEFI ISO (build/<arch>/crugos.iso)
 make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
@@ -67,7 +68,7 @@ make test-crypt-keyboard  # type the passphrase on the PS/2 keyboard and boot
 make test-crypt-keyboard-wrong  # three wrong keyboard passphrases must lock the volume
 make crypt-run   # boot the encrypted disk in a QEMU window for real typing
 make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
-make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/USB HID keyboard and mouse descriptors and reports/pointer state/IPv4/TCP/UDP checksums/DHCP parsing/DNS/audio mixer, tone and PCM ring/framebuffer cursor/intuition windows, menus and gadgets, icon dragging, the send-to-front gadget and keyboard icon focus
+make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/USB HID keyboard and mouse descriptors and reports/pointer state/IPv4/TCP/UDP checksums/DHCP parsing/DNS/audio mixer, tone and PCM ring/framebuffer cursor/intuition windows, menus and gadgets, icon dragging, the send-to-front gadget and keyboard icon focus, the drawer viewport, scrollbar and refresh, 3075 checks
 make disk        # build the GPT/ext4 test disk at build/<arch>/disk.img
 make raid-disks  # build the two GPT/ext4 RAID1 member disks
 make raid10-disks  # build the four GPT/ext4 RAID10 member disks
@@ -159,6 +160,11 @@ options` prints the complete resolved set (including paths derived from
 | `WB_ICONS_WAIT` | `30` | seconds the icon gate boots with `wb.wait=` so the mouse and keyboard can be hotplugged late |
 | `WB_ICONS_ACTS` | `5` | actions (one keyboard activation, one icon press, one drag, one depth and one front press) the gate performs and verifies |
 | `WB_ICONS_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for `make test-workbench-icons` |
+| `EXPECT_DRAWER` | `no` | `yes` requires the `wb drawer mode` / `wb drawer ready` / `wb drawer scrolled` / `wb drawer refreshed` / `wb drawer selftest ok` markers written by `make test-workbench-drawer` |
+| `WB_DRAWER_WAIT` | `30` | seconds the drawer gate boots with `wb.wait=` so the mouse and keyboard can be hotplugged late |
+| `WB_DRAWER_ACTS` | `4` | drawer operations (three scrolls and one refresh) the gate performs and verifies |
+| `WB_DRAWER_FILL` | `24` | files `wb.fill=` creates in the root before the drawer opens, so the listing is longer than one screen |
+| `WB_DRAWER_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for `make test-workbench-drawer` |
 | `DEMO_DISPLAY` | `gtk` | QEMU display `make demo` opens (any `-display` value, for example `sdl` or `none`) |
 | `DEMO_HOLD_SEC` | `600` | seconds `make demo` keeps the desktop on screen before the guest exits by itself |
 | `DEMO_TIMEOUT_SEC` | `900` | wall-clock budget for the whole `make demo` boot |
@@ -565,6 +571,23 @@ the `icons` markers (`EXPECT_ICONS=yes`) and a clean `e2fsck`; it prints
 `ok: workbench icon dragging, send-to-front and keyboard focus (exit 33)`.
 Every pointer move is split into steps of at most 100 pixels.
 
+`make test-workbench-drawer` is gate 42 and proves the phase 6G scrolling
+drawer on the same machine setup, with
+[scripts/run-workbench-drawer.py](../scripts/run-workbench-drawer.py) in place
+of the icon driver and both a `usb-mouse` and a `usb-kbd` hotplugged. It boots
+with `wb.enable=1 wb.wait=$(WB_DRAWER_WAIT) wb.desk=1 wb.dr=1
+wb.fill=$(WB_DRAWER_FILL) wb.acts=$(WB_DRAWER_ACTS)`: the fill remounts the root
+read-write, creates `/f00`..`/f23` and remounts it read-only, then a double
+click on the `System:` volume opens a drawer that must report at least 25
+entries and exactly 11 rows. Three Down presses must each print a
+`wb drawer scrolled` line and change more than 200 pixels inside the body, the
+grip drag from (904,304) to (1004,404) must resize the window to 460x360 and
+reflow its rows (desktop `(16,32,48)` at (830,400) before, window body
+`(8,16,24)` after, and at least 200 body-text pixels inside the widened body),
+and `r` must print `wb drawer refreshed`. The gate requires exit status 33, the
+`drawer` markers (`EXPECT_DRAWER=yes`) and a clean `e2fsck`; it prints
+`ok: workbench drawer scrolling, refresh and reflow (exit 33)`.
+
 ## Interactive demo
 
 `make demo` is not a gate but a way to watch the system: it boots
@@ -573,14 +596,14 @@ already plugged in) into a real `DEMO_DISPLAY` window (GTK by default) instead
 of the headless gates. The command line carries
 `wb.enable=1 wb.wait=0 wb.hold=$(DEMO_HOLD_SEC)`:
 
-- `wb.enable=1` hands the framebuffer to the phase 6F desktop and opens the two
+- `wb.enable=1` hands the framebuffer to the phase 6G desktop and opens the two
   demo windows; adding `wb.shell=1` through `DEMO_CMDLINE` gives window 2 the
   shell, while `wb.keys=1` lets Tab and the arrow keys drive the desktop and
   `wb.ikeys=1` plus `wb.desk=1` give the `System:` icon keyboard focus.
 - `wb.wait=0` turns the desktop self-test into a no-op, so the demo does not
   require a title-bar drag before the gate marker; the interactive desktop is
   the point, not the self-test.
-- `wb.hold=<seconds>` keeps the guest alive after `CRUGOS: phase 6f boot ok`
+- `wb.hold=<seconds>` keeps the guest alive after `CRUGOS: phase 6g boot ok`
   (`wb_hold()`), polling input once per timer tick, so the window stays on
   screen until the deadline or until you close it.
 
