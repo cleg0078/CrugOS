@@ -53,7 +53,10 @@ phase 6H adds `wb.dsel=1` for click-selected drawer rows and a draggable
 scrollbar, and phase H2 adds `heap.stress=<1..200000>` and `heap.guard=1`,
 parsed by `heap_cmdline()` right after `heap_init()`, and phase H3 adds
 `trap.test=<recipe>` (`de`, `ud`, `gp`, `pf`, `df`, `nmi`, `mc`, `db`) for the
-fault injector, parsed by `trap_cmdline()` right after `heap_cmdline()`. A boot
+fault injector, parsed by `trap_cmdline()` right after `heap_cmdline()`, and
+phase U1 adds `user.test=1`, parsed by `user_test_cmdline()` right after
+`trap_cmdline()`, which runs three ring-3 programs from `/bin` after the kernel
+self-test. A boot
 medium that ships no block device (the hybrid
 ISO) passes `storage=none`, which is the one token that changes the storage
 contract instead of adding work to it. The
@@ -114,8 +117,8 @@ post-snapshot allocations cannot push it over capacity.
 6. `timer_init`: TSC frequency, TSC-deadline or LAPIC periodic. Interrupts
    stay disabled until the execution model exists.
 7. `heap_init`: slab caches and large-allocation headers; `heap_cmdline()`
-   then reads `heap.stress=` and `heap.guard=`, and `trap_cmdline()` reads
-   `trap.test=`. `CRUGOS: heap ready`.
+   then reads `heap.stress=` and `heap.guard=`, `trap_cmdline()` reads
+   `trap.test=` and `user_test_cmdline()` reads `user.test=`. `CRUGOS: heap ready`.
 8. `input_init` and `keyboard_init`: reset `input.device`, then program the
    i8042 controller (translation on, IRQ1/IRQ12 masked) and enable scanning.
    The boot prints `CRUGOS: input ready (serial + keyboard)`, or
@@ -245,8 +248,15 @@ post-snapshot allocations cannot push it over capacity.
     check is silent unless `wb.enable=` enabled it. `heap_selftest()` prints
     `CRUGOS: heap check ok (S slab(s), O object(s), L large block(s))` and,
     when `heap.stress=` or `heap.guard=` was supplied, runs those passes too.
-14. `report_boot`, `storage_lock` (wipes the passphrase, the volume keys and
-    the bounce buffer), `CRUGOS: phase h4 boot ok`, then `wb_hold` (only when
+    Right after `CRUGOS: selftest ok` the phase U1 user self-test runs when
+    `user.test=1` was supplied: it loads `/bin/hello`, `/bin/badptr` and
+    `/bin/fault` one at a time, joins each thread and checks the exit codes 0,
+    0 and -14 (a mismatch exits 35 before the report). Without the token it
+    prints nothing.
+14. The user self-test of step 13, when it ran, has already joined its three
+    threads; then `report_boot`, `storage_lock` (wipes the passphrase, the
+    volume keys and the bounce buffer), `CRUGOS: phase u1 boot ok`, then
+    `wb_hold` (only when
     `wb.hold=` was given: the guest stays alive with the desktop on screen until
     the deadline), `trap_test_run()` (only when `trap.test=` was given, so the
     fault lands after the phase marker) and `arch_exit_qemu(0x10)`.
@@ -514,18 +524,31 @@ CRUGOS: wb window 1 sent to front
 CRUGOS: wb action 6 front window 1
 CRUGOS: wb icons selftest ok (1 move(s), 1 front(s))
 CRUGOS: sh run 'ver'
-CRUGOS: sh out CrugOS 0.34.0 (phase h4), x86_64
+CRUGOS: sh out CrugOS 0.35.0 (phase u1), x86_64
 CRUGOS: wb selftest ok (1 drag(s), 1 action(s))
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb drawer selftest ok (3 scroll(s), 1 refresh(es))
 CRUGOS: wb select selftest ok (2 select(s), 1 scrollbar drag(s))
 CRUGOS: sh selftest ok (1 command(s))
 CRUGOS: selftest ok
-CRUGOS: phase h4 boot ok
+CRUGOS: user selftest start                  # only with user.test=1
+CRUGOS: user hello from ring 3
+CRUGOS: user program /bin/hello finished (exit 0)
+CRUGOS: user badptr blocked (EFAULT)
+CRUGOS: user program /bin/badptr finished (exit 0)
+CRUGOS: user fault writing above the window
+CRUGOS: trap report page fault vector=14 error=0x6 ist=0 from=user
+CRUGOS: trap fault present=no write=yes user=yes reserved=no instruction=no cr2=0x10000000000
+CRUGOS: user fault page fault at rip=0x0000008000010056 err=0x0000000000000006 tid 10
+CRUGOS: user fault killed tid 10 code -14
+CRUGOS: user program /bin/fault finished (exit -14)
+CRUGOS: user selftest ok (3 program(s), 1 fault(s))
+boot   : pmm=28541 us cpu=418 us vm=657 us traps=328 us timer=65263 us heap=426 us storage=93624 us sched=305 us syscall=94 us total=189659 us
+CRUGOS: phase u1 boot ok
 ```
 
 With `trap.test=<recipe>` the same boot ends differently: the injector runs after
-`CRUGOS: phase h4 boot ok`, injects exactly one fault and the guest exits 35
+`CRUGOS: phase u1 boot ok`, injects exactly one fault and the guest exits 35
 instead of 33. A `trap.test=de` boot ends:
 
 ```
@@ -551,6 +574,42 @@ A `trap.test=df`, `nmi`, `mc` or `db` boot reports `ist=1`, `ist=2`, `ist=3` and
 `make test-fuzz` adds no line here: it mutates disk images on the host in a
 forked child and never boots QEMU, so it produces no serial output at all (see
 [fuzzing.md](fuzzing.md)).
+
+With `user.test=1` the kernel runs three ring-3 programs after the kernel
+self-test, so the user markers appear after `CRUGOS: selftest ok`, before the
+`boot   :` report line and before the phase marker. A `make test-user` boot
+ends:
+
+```
+CRUGOS: user selftest start
+CRUGOS: user hello from ring 3
+CRUGOS: user program /bin/hello finished (exit 0)
+CRUGOS: user badptr blocked (EFAULT)
+CRUGOS: user program /bin/badptr finished (exit 0)
+CRUGOS: user fault writing above the window
+CRUGOS: trap report page fault vector=14 error=0x6 ist=0 from=user
+CRUGOS: trap fault present=no write=yes user=yes reserved=no instruction=no cr2=0x10000000000
+CRUGOS: user fault page fault at rip=0x0000008000010056 err=0x0000000000000006 tid 10
+CRUGOS: user fault killed tid 10 code -14
+CRUGOS: user program /bin/fault finished (exit -14)
+CRUGOS: user selftest ok (3 program(s), 1 fault(s))
+boot   : pmm=28541 us cpu=418 us vm=657 us traps=328 us timer=65263 us heap=426 us storage=93624 us sched=305 us syscall=94 us total=189659 us
+CRUGOS: phase u1 boot ok
+```
+
+Both user excerpts keep the lines the check asserts; a real boot also prints the
+report's `trap rip=` line and the two `trap regs` lines around the `trap fault`
+line, which the curated samples above leave out.
+
+`/bin/hello` writes one line through `SYS_WRITE` and exits 0. `/bin/badptr`
+passes an address above `USER_TOP`, gets `SYS_EFAULT` and still exits 0, which
+is the copy boundary doing its job without a fault. `/bin/fault` stores past
+the window, so the fault is real: the phase H3 report prints first with
+`from=user`, the U1 kill lines follow and only that thread ends with code -14.
+No other gate may print a `CRUGOS: user` line: `scripts/boot-check.py` takes the
+expectation as its final `EXPECT_USER` argument, so the plain boot markers
+above stay the contract for every gate except `make test-user` (gate 48; see
+[userspace.md](userspace.md)).
 
 The `virtio : net eth0 mac ...` line, the lease, the ARP resolution, the echo
 reply and `net selftest ok` appear only when a NIC is present and the network
@@ -638,14 +697,14 @@ replaced by the skip marker, and the USB device the firmware booted from shows
 up in the USB lines as an unsupported mass-storage function:
 
 ```
-CRUGOS: version 0.34.0
+CRUGOS: version 0.35.0
 CRUGOS: usb controller ready (xhci, 8 port(s))
 CRUGOS: usb device 46f4:0001 on port 1 (speed 4)
 CRUGOS: usb device class 8 on port 1 (unsupported)
 CRUGOS: storage skipped (storage=none)
 CRUGOS: heap check ok (6 slab(s), 8 object(s), 1 large block(s))
 CRUGOS: selftest ok
-CRUGOS: phase h4 boot ok
+CRUGOS: phase u1 boot ok
 ```
 
 `kernel/core/report.c` prints the machine description between them: kernel
@@ -673,8 +732,12 @@ reading the byte queue. See [input.md](input.md) for the scancode decoder and
   identity map, so the driver reprotects its pages with `vm_protect_page()` and
   `PCD|PWT`). User address spaces, a higher-half kernel and
   demand paging arrive with user-mode address spaces.
-- Execution is kernel-mode only. There is no user mode, no address-space switch
-  and no `SYSCALL` MSR gateway yet; `int 0x80` reaches the same dispatcher.
+- Since phase U1 a ring-3 program runs in the fixed 512 GiB to 1 TiB user
+  window, but execution is still one CR3: every user program shares the kernel
+  page tables, so two user programs are not isolated from each other and there
+  is no address-space switch. At most one user thread is live at a time, there
+  is no fork/exec at runtime and no `argv`/environment, and there is still no
+  `SYSCALL` MSR gateway; `int 0x80` reaches the same dispatcher.
 - RAID support is RAID1 and RAID10: one `md0` array. A fully blank member is
   rebuilt at boot before ext4 mounts; there is no online rebuild, no hot
   spare, no scrub, no write-intent bitmap and no generation bump. The kernel

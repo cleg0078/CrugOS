@@ -50,4 +50,15 @@ int harden_kdf_cost_ok(u32 m_cost_kib, u32 t_cost, u32 lanes, u32 min_m_kib,
 int harden_volume_ok(u64 volume_sectors, u64 parent_sectors,
                      u64 offset_sectors);
 
+/* A user-supplied pointer/length pair handed in from CPL3 must land inside
+   the user window (include/crug/vm.h). Kernel addresses never pass. */
+int harden_user_range_ok(u64 addr, u64 len);
+
+/* One ELF PT_LOAD reservation from the user-program loader: page aligned and
+   inside the window. An empty segment reserves nothing and is always fine. */
+int harden_user_segment_ok(u64 va, u64 size);
+
+/* An entry point (or user stack pointer) must land inside the window. */
+int harden_user_entry_ok(u64 entry);
+
 #endif

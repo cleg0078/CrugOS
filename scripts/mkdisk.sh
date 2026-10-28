@@ -85,6 +85,21 @@ if [ "$mode" = crash ]; then
     debugfs -w -R "write $tmp/crash.txt /simulate-crash" "$fs_image" >/dev/null
 fi
 
+# Optional ring-3 programs (make test-user): the kernel loads /bin/hello,
+# /bin/badptr and /bin/fault from the root filesystem.  USER_DIR comes from the
+# environment so the raid/nvme/ahci/crypt call sites keep their positional
+# arguments unchanged.
+if [ -n "${USER_DIR:-}" ]; then
+    debugfs -w -R "mkdir /bin" "$fs_image" >/dev/null 2>&1 || true
+    for prog in hello badptr fault; do
+        if [ ! -f "$USER_DIR/$prog" ]; then
+            echo "mkdisk: missing user program $USER_DIR/$prog" >&2
+            exit 1
+        fi
+        debugfs -w -R "write $USER_DIR/$prog /bin/$prog" "$fs_image" >/dev/null
+    done
+fi
+
 if [ "$mode" = crypt ]; then
     mkcrypt_args=(format "$tmp/part.img" --plain "$fs_image" --password "$crypt_pass" --m "$crypt_m")
     if [ -n "$crypt_recovery" ]; then

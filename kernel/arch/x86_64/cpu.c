@@ -3,6 +3,7 @@
 #include <crug/string.h>
 #include <crug/apic.h>
 #include <crug/trap.h>
+#include <crug/segment.h>
 
 #ifndef CRUG_REQUIRE_AVX2
 #define CRUG_REQUIRE_AVX2 1
@@ -58,7 +59,7 @@ extern char __db_stack_top[];
 
 cpu_features g_cpu_features;
 
-static gdt_entry g_gdt[5];
+static gdt_entry g_gdt[GDT_ENTRIES];
 static tss64 g_tss;
 static gdt_pointer g_gdtr;
 static struct cpu g_boot_cpu;
@@ -209,19 +210,25 @@ static void gdt_init(void)
 
     memset(g_gdt, 0, sizeof(g_gdt));
     memset(&g_tss, 0, sizeof(g_tss));
+    /* rsp0 is the stack the CPU switches to on a CPL3 -> CPL0 trap. It starts
+       as the boot stack and schedule() re-points it at the incoming thread's
+       kernel stack before every switch (see cpu_set_kernel_stack). */
     g_tss.rsp0 = (u64)(uintptr)__stack_top;
     g_tss.ist1 = (u64)(uintptr)__df_stack_top;
     g_tss.ist2 = (u64)(uintptr)__nmi_stack_top;
     g_tss.ist3 = (u64)(uintptr)__mc_stack_top;
     g_tss.ist4 = (u64)(uintptr)__db_stack_top;
-    /* rsp0 stays the boot stack: the kernel is ring-0 only and never returns
-       to ring 3 through a trap yet (see docs/traps.md, phase H3 limits). */
     g_tss.iomap_base = sizeof(g_tss);
 
-    gdt_set(1, 0, 0xfffff, 0x9a, 0xa0);
-    gdt_set(2, 0, 0xfffff, 0x92, 0xc0);
-    gdt_set(3, (u32)tss_base, tss_limit, 0x89, 0x00);
-    gdt_set(4, (u32)(tss_base >> 32), 0, 0x00, 0x00);
+    gdt_set(GDT_INDEX_KERNEL_CS, 0, 0xfffff, 0x9a, 0xa0);
+    gdt_set(GDT_INDEX_KERNEL_DS, 0, 0xfffff, 0x92, 0xc0);
+    gdt_set(GDT_INDEX_TSS, (u32)tss_base, tss_limit, 0x89, 0x00);
+    gdt_set(GDT_INDEX_TSS_HIGH, (u32)(tss_base >> 32), 0, 0x00, 0x00);
+    /* Long mode ignores the base/limit of code and data segments, but the
+       DPL still decides whether CPL3 may load them: 0xfa = code, DPL3,
+       readable; 0xf2 = data, DPL3, writable. Empty LDT, so the TI bit is 0. */
+    gdt_set(GDT_INDEX_USER_CS, 0, 0xfffff, 0xfa, 0xa0);
+    gdt_set(GDT_INDEX_USER_DS, 0, 0xfffff, 0xf2, 0xc0);
 
     g_gdtr.limit = sizeof(g_gdt) - 1;
     g_gdtr.base = (u64)(uintptr)&g_gdt[0];
@@ -240,6 +247,20 @@ static void gdt_init(void)
         "movw %%ax, %%gs\n"
         : : : "rax", "memory");
     __asm__ volatile("ltr %0" : : "r"(tss_sel));
+}
+
+/* Point TSS.rsp0 at the stack a CPL3 entry will land on. The scheduler calls
+   this with the incoming thread's kernel stack top before every switch, so a
+   syscall or fault from ring 3 never runs on a stale or freed stack. */
+void cpu_set_kernel_stack(u64 top)
+{
+    g_tss.rsp0 = top;
+}
+
+/* The stack the boot CPU still runs on before any thread switch. */
+u64 cpu_boot_stack_top(void)
+{
+    return (u64)(uintptr)__stack_top;
 }
 
 struct cpu *cpu_self(void)

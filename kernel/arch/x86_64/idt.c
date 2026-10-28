@@ -3,6 +3,7 @@
 #include <crug/cpu.h>
 #include <crug/timer.h>
 #include <crug/syscall.h>
+#include <crug/thread.h>
 
 typedef struct idt_entry {
     u16 offset_low;
@@ -84,8 +85,8 @@ static const char *trap_vector_name(u64 vector)
 }
 
 /* Phase H3: every fault writes the crash report before the policy decides
-   whether the kernel survives it.  Rings 3 faults are only survivable once
-   their ring-3 thread exists; until then both classes panic. */
+   whether the kernel survives it.  A ring-3 fault is charged to the offending
+   program (phase U1); every ring-0 fault still panics. */
 static void trap_report(trap_frame *frame)
 {
     struct trap_report_info info;
@@ -122,8 +123,18 @@ void trap_dispatch(trap_frame *frame)
 
     trap_report(frame);
     cls = trap_classify(v, frame->cs);
-    if (cls == TRAP_USER)
-        panic("user-mode %s", trap_vector_name(v));
+    if (cls == TRAP_USER && v != 2 && v != 8 && v != 18) {
+        thread *t = sched_current();
+        i64 code = -(i64)v;
+
+        kprintf("CRUGOS: user fault %s at rip=%p err=%p tid %u\n",
+                trap_vector_name(v), (void *)(uintptr)frame->rip,
+                (void *)(uintptr)frame->error, (unsigned)(t ? t->id : 0));
+        kprintf("CRUGOS: user fault killed tid %u code %lld\n",
+                (unsigned)(t ? t->id : 0), (long long)code);
+        /* Only the offending program dies: the kernel keeps running. */
+        thread_kill_current(code);
+    }
     panic("%s", trap_vector_name(v));
 }
 

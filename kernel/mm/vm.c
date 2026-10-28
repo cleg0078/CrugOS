@@ -53,6 +53,24 @@ static u64 *next_table(u64 *table, u64 index, int create)
     return next;
 }
 
+/* Like next_table, but every intermediate entry is marked user-accessible.
+   The kernel walk never calls this, so PML4[0] stays supervisor-only. */
+static u64 *next_table_user(u64 *table, u64 index)
+{
+    u64 entry = table[index];
+    u64 *next;
+
+    if (entry & VM_PRESENT) {
+        if (entry & VM_HUGE)
+            return 0;
+        table[index] = entry | VM_USER | VM_WRITE;
+        return (u64 *)pmm_phys_to_virt(entry & VM_ADDR_MASK);
+    }
+    next = (u64 *)alloc_table();
+    table[index] = pmm_virt_to_phys(next) | VM_PRESENT | VM_WRITE | VM_USER;
+    return next;
+}
+
 static int split_huge_pd(u64 *pd, u64 index)
 {
     u64 entry = pd[index];
@@ -91,6 +109,28 @@ static u64 *pte_for(u64 va)
             return 0;
     }
     pt = next_table(pd, vm_pd_index(va), 1);
+    if (!pt)
+        return 0;
+    return &pt[vm_pt_index(va)];
+}
+
+static u64 *pte_for_user(u64 va)
+{
+    u64 *pdpt, *pd, *pt;
+
+    if (!vm_canonical(va))
+        return 0;
+    pdpt = next_table_user(g_pml4, vm_pml4_index(va));
+    if (!pdpt)
+        return 0;
+    pd = next_table_user(pdpt, vm_pdpt_index(va));
+    if (!pd)
+        return 0;
+    if (pd[vm_pd_index(va)] & VM_HUGE) {
+        if (split_huge_pd(pd, vm_pd_index(va)) != 0)
+            return 0;
+    }
+    pt = next_table_user(pd, vm_pd_index(va));
     if (!pt)
         return 0;
     return &pt[vm_pt_index(va)];
@@ -203,6 +243,68 @@ int vm_map_range(u64 va, u64 pa, u64 size, u64 flags)
             return -1;
     }
     return 0;
+}
+
+int vm_user_map_page(u64 va, u64 pa, u64 flags)
+{
+    u64 *p;
+
+    if ((va & (CRUG_PAGE_SIZE - 1)) != 0 || (pa & (CRUG_PAGE_SIZE - 1)) != 0)
+        return -1;
+    if (va < USER_BASE || va >= USER_TOP)
+        return -1;
+    if (!vm_canonical(va) || (pa & ~VM_ADDR_MASK) != 0)
+        return -1;
+    p = pte_for_user(va);
+    if (!p)
+        return -1;
+    if (*p & VM_PRESENT)
+        return -1;
+    *p = (pa & VM_ADDR_MASK) |
+         ((flags | VM_USER) & ~VM_GLOBAL & VM_PTE_FLAG_MASK);
+    vm_flush_page(va);
+    return 0;
+}
+
+int vm_user_map_pages(u64 va, u64 pages, u64 flags)
+{
+    u64 i;
+
+    if (pages == 0 || va < USER_BASE || va >= USER_TOP)
+        return -1;
+    if (pages > (USER_TOP - va) / CRUG_PAGE_SIZE)
+        return -1;
+    for (i = 0; i < pages; i++) {
+        u64 page_va = va + i * CRUG_PAGE_SIZE;
+        u64 pa = pmm_alloc_page();
+
+        if (pa == 0) {
+            vm_user_unmap_pages(va, i);
+            return -1;
+        }
+        memset(pmm_phys_to_virt(pa), 0, CRUG_PAGE_SIZE);
+        if (vm_user_map_page(page_va, pa, flags) != 0) {
+            pmm_free_page(pa);
+            vm_user_unmap_pages(va, i);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+void vm_user_unmap_pages(u64 va, u64 pages)
+{
+    u64 i;
+
+    for (i = 0; i < pages; i++) {
+        u64 page_va = va + i * CRUG_PAGE_SIZE;
+        u64 pa = vm_translate(page_va);
+
+        if (pa == 0)
+            continue;
+        (void)vm_unmap_page(page_va);
+        pmm_free_page(pa & VM_ADDR_MASK);
+    }
 }
 
 int vm_unmap_page(u64 va)

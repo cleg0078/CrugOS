@@ -34,6 +34,8 @@ void test_shell_functions(void);
 void test_harden_functions(void);
 void test_heap_functions(void);
 void test_trap_functions(void);
+void test_uaccess_functions(void);
+void test_exec_functions(void);
 
 int main(void)
 {
@@ -62,6 +64,8 @@ int main(void)
     RUN(test_harden_functions);
     RUN(test_heap_functions);
     RUN(test_trap_functions);
+    RUN(test_uaccess_functions);
+    RUN(test_exec_functions);
     printf("%d checks, %d failure(s)\n", tests_run, tests_failed);
     return tests_failed == 0 ? 0 : 1;
 }

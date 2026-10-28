@@ -7,6 +7,8 @@
 #include <crug/cpu.h>
 #include <crug/string.h>
 #include <crug/kernel.h>
+#include <crug/segment.h>
+#include <crug/harden.h>
 
 extern void cpu_switch(u64 *prev_rsp, u64 *next_rsp);
 
@@ -28,6 +30,11 @@ struct scheduler {
 
 static struct scheduler g_sched;
 static thread g_boot_thread;
+/* Only one ring-3 thread exists at a time: the kernel still runs on a single
+   address space and a single user window (phase U1 limit). */
+static thread *g_user_thread;
+
+extern void thread_user_start(void);
 
 static const u8 g_quanta[SCHED_CLASSES] = { 1, 4, 2, 8 };
 
@@ -101,6 +108,11 @@ static void schedule(void)
     }
     g_sched.current = next;
     next->state = THREAD_RUNNING;
+    /* A CPL3 entry lands on TSS.rsp0, so it must already point at the incoming
+       thread's kernel stack (the boot stack for the idle boot thread). */
+    cpu_set_kernel_stack(next->stack_base
+                             ? next->stack_base + next->stack_size
+                             : cpu_boot_stack_top());
     g_sched.switches++;
     cpu_switch(&prev->rsp, &next->rsp);
 }
@@ -286,6 +298,15 @@ static void thread_destroy(thread *t)
         return;
     if (t == g_sched.current)
         panic("sched: cannot destroy current thread");
+    if (t->user_map_count) {
+        u32 i;
+
+        for (i = 0; i < t->user_map_count; i++)
+            vm_user_unmap_pages(t->user_map[i].va, t->user_map[i].pages);
+        t->user_map_count = 0;
+    }
+    if (t == g_user_thread)
+        g_user_thread = 0;
     if (t->stack_base) {
         /* The identity map must cover every page the PMM can hand out, so
            restore the guard page before returning the stack to the PMM. */
@@ -357,19 +378,80 @@ thread *thread_create(const char *name, void (*entry)(void *), void *arg,
     return t;
 }
 
-void thread_exit(void)
+/* thread_create needs a kernel entry point; a user thread never runs it because
+   thread_create_user swaps sp[7] for the iretq trampoline. */
+static void thread_user_never(void *arg)
 {
-    u64 flags = cpu_irq_save();
+    (void)arg;
+}
+
+thread *thread_create_user(const char *name, u64 entry, u64 user_rsp,
+                           const thread_user_map *maps, u32 map_count,
+                           sched_class cls)
+{
+    thread *t;
+    u64 *sp;
+    u32 i;
+
+    if (map_count > THREAD_USER_MAP_MAX || (map_count != 0 && !maps))
+        return 0;
+    if (!harden_user_entry_ok(entry))
+        return 0;
+    if (!harden_user_entry_ok(user_rsp))
+        return 0;
+    if (g_user_thread && g_user_thread->state != THREAD_ZOMBIE)
+        return 0;
+    t = thread_create(name, thread_user_never, 0, cls);
+    if (!t)
+        return 0;
+    t->flags |= THREAD_FLAG_USER;
+    t->user_rip = entry;
+    t->user_rsp = user_rsp;
+    for (i = 0; i < map_count; i++)
+        t->user_map[i] = maps[i];
+    t->user_map_count = map_count;
+    sp = (u64 *)(uintptr)(t->stack_base + t->stack_size - 72ull);
+    sp[7] = (u64)(uintptr)thread_user_start;
+    t->rsp = (u64)(uintptr)sp;
+    g_user_thread = t;
+    return t;
+}
+
+
+/* Called by kernel/arch/x86_64/user.S while building the ring-3 iretq frame.
+   Keeps every struct thread offset out of assembly. */
+void thread_user_frame(u64 *out)
+{
     thread *t = g_sched.current;
+
+    if (!t || (t->flags & THREAD_FLAG_USER) == 0)
+        panic("sched: user trampoline without a user thread");
+    cpu_set_kernel_stack(t->stack_base + t->stack_size);
+    out[0] = t->user_rip;
+    out[1] = t->user_rsp;
+    out[2] = (u64)SEG_USER_DS;
+    out[3] = (u64)SEG_USER_CS;
+}
+
+void thread_kill_current(i64 code)
+{
+    thread *t = g_sched.current;
+    u64 flags = cpu_irq_save();
 
     if (!t)
         panic("sched: exit without current thread");
+    t->exit_code = code;
     t->state = THREAD_ZOMBIE;
     wait_queue_wake_all(&t->joiners);
     schedule();
     cpu_irq_restore(flags);
     for (;;)
         __asm__ volatile("cli; hlt");
+}
+
+void thread_exit(void)
+{
+    thread_kill_current(0);
 }
 
 int thread_join(thread *t)
@@ -386,6 +468,25 @@ int thread_join(thread *t)
     cpu_irq_restore(flags);
     thread_destroy(t);
     return 0;
+}
+
+i64 thread_join_code(thread *t)
+{
+    u64 flags;
+    i64 code;
+
+    if (!t)
+        return -1;
+    if (t == g_sched.current)
+        panic("sched: join self");
+    flags = cpu_irq_save();
+    while (t->state != THREAD_ZOMBIE)
+        sched_block(&t->joiners);
+    cpu_irq_restore(flags);
+    /* Read the code before thread_destroy frees the record. */
+    code = t->exit_code;
+    thread_destroy(t);
+    return code;
 }
 
 thread *sched_current(void)

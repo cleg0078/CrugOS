@@ -1,19 +1,24 @@
 # Hardening: untrusted input on the boot path (phase H1)
 
 Phase H1 (hardening pass 1) is the first pass that treats device- and
-image-supplied bytes as hostile. CrugOS is ring-0 only today: there are no DPL3
-selectors and no userland, so the syscall dispatcher is driven by the in-kernel
-self-test rather than by an untrusted process. What an attacker can control
-right now is the boot path: an inserted disk, a crafted partition or filesystem
-image, a tampered file on the ESP (`cmdline.txt`, `kernel.elf`) and a PCIe
+image-supplied bytes as hostile. At the time of H1 CrugOS was ring-0 only: there
+were no DPL3 selectors and no userland, so the syscall dispatcher was driven by
+the in-kernel self-test rather than by an untrusted process. Phase U1 has since
+crossed into ring 3, so a `DPL3` program now reaches that dispatcher directly
+through the copy boundary described below, and the validators are still the part
+that survives the move. What an attacker could control at the start was the
+boot path: an inserted disk, a crafted partition or filesystem image, a tampered
+file on the ESP (`cmdline.txt`, `kernel.elf`) and a PCIe
 device that lies about its registers. Phase H1 puts those values behind a small
 set of pure validators, so a check runs once in the kernel, ships with a host
 test, and is proven end to end by a crafted-image gate. The review that drove
 the pass (`specs/fix-p1/REPORT.md`, tree at `v0.30.0`) counted 6 High, 16
 Medium and 18 Low findings; H1 closes the Highs that are reachable today and
 adds the `secure_zero()` primitive the rest of the pass needed. Phase H2 then
-hardened the kernel heap; see [heap.md](heap.md) for that pass and
-[roadmap.md](roadmap.md) for what remains.
+hardened the kernel heap and phase H3 built the trap policy; phase U1 crossed
+into ring 3. See [heap.md](heap.md), [traps.md](traps.md) and
+[userspace.md](userspace.md) for those passes, and [roadmap.md](roadmap.md) for
+what remains.
 
 ## The trust boundary
 
@@ -84,6 +89,35 @@ destination. A failure prints
 `CRUGOS: syscall selftest failed (pointer gate)`; success stays inside the
 normal `CRUGOS: syscall selftest ok` line.
 
+## The user copy boundary
+
+Phase U1 is where the syscall pointer gate stops being an in-kernel convenience
+and becomes a real trust boundary. A ring-3 pointer is not an address in the
+4 GiB identity map, so `harden_range_ok()` cannot bound it: the user window
+(`USER_BASE` 0x0000008000000000, `USER_TOP` 0x0000010000000000) is the whole
+universe a `DPL3` program may name. `harden_user_range_ok(va, size)` is pure
+window arithmetic -- at most one page, page aligned, inside the window -- and it
+is independent of SMAP, because a CPU without SMAP still must not let a user
+pointer reach kernel memory by arithmetic alone. `harden_user_segment_ok()` and
+`harden_user_entry_ok()` extend the same rule to ELF segments and the entry
+point, so the loader refuses a module that names a kernel address.
+
+The window check answers "is this allowed at all"; it does not answer "is this
+mapped". `kernel/mm/uaccess.c` therefore follows the check with a write to the
+current address space: every page in the range must resolve through
+`vm_translate()`, and an in-window but unmapped page returns `UACCESS_EFAULT`
+(`-14`) instead of taking a kernel `#PF` while the kernel is dereferencing a
+caller's pointer. Only the actual copy is bracketed by `stac`/`clac`, and only
+when CPUID exposes SMAP, so the window around the access is as small as the
+instruction allows. `uaccess_user_read()`, `uaccess_user_write()` and
+`uaccess_user_str()` are the only copies the syscall layer uses for CPL3
+callers; the in-kernel path keeps the identity-map check, which is why the
+self-test above is still meaningful. The syscall layer copies through kernel
+bounce buffers (`SYS_WRITE` moves at most 4096 bytes in 256-byte chunks), so no
+user pointer is dereferenced twice and a fault part-way through reports one
+clean error. See [userspace.md](userspace.md) for the window, the page walk and
+the syscall split.
+
 ## Image gate
 
 `make test-hardening` is the 44th gate. It is not a fuzzer: it is a
@@ -101,7 +135,7 @@ must print.
 
 | Case | Patch | Required marker | Exit |
 | --- | --- | --- | --- |
-| `control` | none | `CRUGOS: phase h4 boot ok` (any phase id matches), `CRUGOS: ext4 ready`, `CRUGOS: storage ready`, `CRUGOS: writable storage ok`, `CRUGOS: selftest ok` | 33 |
+| `control` | none | `CRUGOS: phase u1 boot ok` (any phase id matches), `CRUGOS: ext4 ready`, `CRUGOS: storage ready`, `CRUGOS: writable storage ok`, `CRUGOS: selftest ok` | 33 |
 | `geometry-bpg` | superblock `+0x20` (`s_blocks_per_group`) = 100000 | `CRUGOS: ext4 mount rejected (geometry)` | 35 |
 | `geometry-ipg` | superblock `+0x28` (`s_inodes_per_group`) = 100000 | `CRUGOS: ext4 mount rejected (geometry)` | 35 |
 | `root-extent` | root inode `eh_max` (`inode + 44`) = 5, inode checksum recomputed | `CRUGOS: ext4 mount rejected (root extent)` | 35 |
@@ -225,17 +259,20 @@ ok: hardening pass 1 rejected 6 crafted image(s) (control boot exit 33)
 
 ## What is not covered
 
-- Report item 3 is now phase H3, not this pass: every non-`#BP` exception
-  builds one bounded report and is classified by `trap_classify()` -- the
-  user-killable set is `TRAP_USER` for a CPL3 frame and `TRAP_FATAL` from ring 0,
-  `#BP` stays handled, and everything else is fatal -- and `#DF`, `#NMI`, `#MC`
-  and `#DB` run on their own IST stacks, with `__df_stack` grown to 16 KiB. See
-  [traps.md](traps.md) for the report contract, the classification matrix, the
-  `trap.test=` recipes and the `make test-trap` gate. What stays open is the
-  ring-3 half: there is no DPL3 process yet, so `rsp0` still points at the boot
-  stack, a `TRAP_USER` fault panics as `user-mode <name>` instead of killing a
-  thread, and the crafted-image gate still avoids the panic by construction
-  rather than by policy.
+- Report item 3 is now phase H3, and phase U1 closed its ring-3 half: every
+  non-`#BP` exception builds one bounded report classified by `trap_classify()`
+  -- the user-killable set is `TRAP_USER` for a CPL3 frame and `TRAP_FATAL` from
+  ring 0, `#BP` stays handled, and everything else is fatal -- and `#DF`, `#NMI`,
+  `#MC` and `#DB` run on their own IST stacks, with `__df_stack` grown to 16 KiB.
+  U1 makes `rsp0` per-thread and turns a `TRAP_USER` fault into a per-thread
+  kill instead of `panic("user-mode <name>")`, so a user program cannot take the
+  machine down by faulting. What stays open is the address-space half: a
+  user-frame `#DF`, `#NMI` or `#MC` still panics (there is no policy for
+  abandoning a whole address space), and every user program shares the kernel
+  CR3, so two programs are not isolated from each other. See [traps.md](traps.md)
+  and [userspace.md](userspace.md) for the report contract, the classification
+  matrix, the `trap.test=` recipes and the `make test-trap` / `make test-user`
+  gates.
 - Heap hardening is now phase H2, not this pass: page cookies, validated slab
   headers, the doubly linked large-block list and the read-only integrity
   checker are documented in [heap.md](heap.md), which also lists what the
@@ -255,7 +292,10 @@ ok: hardening pass 1 rejected 6 crafted image(s) (control boot exit 33)
   and 0 crashes. It stops where a host process cannot follow: no ring-0-only
   faults, no QEMU devices, no dirty-journal replay and no concurrency. See
   [fuzzing.md](fuzzing.md).
-- Several Mediums become Critical once ring 3 exists: today a bad pointer in
-  the syscall ABI is caught by the in-kernel self-test, but a DPL3 process
-  would reach the same dispatcher directly. The validators are the part that
-  survives the move; the policy around them is not written yet.
+- Several Mediums became live when ring 3 landed: a bad pointer in the syscall
+  ABI now comes from a `DPL3` process, not only from the in-kernel self-test.
+  Phase U1 answers the pointer half with the user copy boundary above and the
+  fault half with the per-thread kill path, but the policy around the
+  validators still assumes one address space: with a shared kernel CR3 a user
+  program can read another program's pages once two live user threads are
+  allowed, which U1 avoids only by refusing the second one with `-EBUSY`.

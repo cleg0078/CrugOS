@@ -19,6 +19,7 @@
 #include <crug/gfx.h>
 #include <crug/workbench.h>
 #include <crug/trap.h>
+#include <crug/exec.h>
 
 void kernel_main(const boot_info *bi);
 
@@ -64,6 +65,7 @@ void kernel_main(const boot_info *bi)
     heap_init();
     heap_cmdline(bi);
     trap_cmdline(bi);
+    user_test_cmdline(bi);
     t.heap = arch_read_tsc();
     kprintf("CRUGOS: heap ready\n");
 
@@ -106,6 +108,10 @@ void kernel_main(const boot_info *bi)
 
     selftest_run();
     kprintf("CRUGOS: selftest ok\n");
+
+    /* make test-user: run the ring-3 programs and check the user/kernel walls. */
+    if (user_selftest() != 0)
+        arch_exit_qemu(0x11);
 
     report_boot(bi, &t);
 

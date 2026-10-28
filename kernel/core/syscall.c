@@ -8,6 +8,7 @@
 #include <crug/kernel.h>
 #include <crug/string.h>
 #include <crug/net.h>
+#include <crug/uaccess.h>
 
 static i64 syscall_port_create(void)
 {
@@ -44,10 +45,64 @@ static i64 syscall_socket_handle(handle_table *table, struct net_tcp_socket *s)
     return (i64)h;
 }
 
+/* Phase U1: the same dispatcher serves CPL0 selftests and CPL3 programs. A
+   user call never dereferences an argument directly: every pointer is range
+   checked and copied through a kernel bounce buffer. */
+#define SYS_BOUNCE_MAX MSGPORT_MAX_PAYLOAD
+#define SYS_USER_IO_MAX 4096u
+#define SYS_WRITE_CHUNK 256u
+#define SYS_USER_NAME_MAX 128u
+
+static int from_user(const trap_frame *frame)
+{
+    return (frame->cs & 3u) == 3u;
+}
+
+/* SYS_WRITE(1|2, buf, len): console output for ring-3 programs. */
+static i64 syscall_write(const trap_frame *frame)
+{
+    u64 fd = frame->rdi;
+    u64 uaddr = frame->rsi;
+    u64 len = frame->rdx;
+    u64 done = 0;
+    char chunk[SYS_WRITE_CHUNK + 1u];
+    int user = from_user(frame);
+
+    if (fd != 1u && fd != 2u)
+        return SYS_EBADF;
+    if (len > SYS_USER_IO_MAX)
+        len = SYS_USER_IO_MAX;
+    if (len == 0)
+        return 0;
+    if (uaddr == 0)
+        return SYS_EFAULT;
+    if (user && uaccess_check(uaddr, len) != 0)
+        return SYS_EFAULT;
+    if (!user && !harden_range_ok(uaddr, len, HARDEN_IDENTITY_LIMIT))
+        return SYS_EFAULT;
+    while (done < len) {
+        u64 n = len - done;
+
+        if (n > SYS_WRITE_CHUNK)
+            n = SYS_WRITE_CHUNK;
+        if (user) {
+            if (uaccess_user_read(chunk, uaddr + done, n) != 0)
+                return SYS_EFAULT;
+        } else {
+            memcpy(chunk, (const void *)(uintptr)(uaddr + done), (usize)n);
+        }
+        chunk[n] = 0;
+        kprintf("%s", chunk);
+        done += n;
+    }
+    return (i64)done;
+}
+
 void syscall_dispatch(trap_frame *frame)
 {
     i64 ret;
     u64 nr = frame->rax;
+    int user = from_user(frame);
 
     switch (nr) {
     case SYS_PING:
@@ -73,38 +128,77 @@ void syscall_dispatch(trap_frame *frame)
     case SYS_PORT_SEND: {
         handle_table *table = process_handles(process_current());
         msgport *p = (msgport *)handle_get(table, frame->rdi, HANDLE_PORT);
+        u64 len = frame->r10;
+        char bounce[SYS_BOUNCE_MAX];
 
         if (!p) {
             ret = SYS_EBADF;
             break;
         }
-        if (!harden_range_ok(frame->rdx, frame->r10, HARDEN_IDENTITY_LIMIT)) {
+        if (len > SYS_BOUNCE_MAX) {
+            ret = SYS_EINVAL;
+            break;
+        }
+        if (!user) {
+            if (!harden_range_ok(frame->rdx, len, HARDEN_IDENTITY_LIMIT)) {
+                ret = SYS_EFAULT;
+                break;
+            }
+            ret = msgport_send(p, frame->rsi, (const void *)(uintptr)frame->rdx,
+                               (usize)len);
+            break;
+        }
+        if (uaccess_user_read(bounce, frame->rdx, len) != 0) {
             ret = SYS_EFAULT;
             break;
         }
-        ret = msgport_send(p, frame->rsi, (const void *)(uintptr)frame->rdx,
-                           (usize)frame->r10);
+        ret = msgport_send(p, frame->rsi, bounce, (usize)len);
         break;
     }
     case SYS_PORT_RECV: {
         handle_table *table = process_handles(process_current());
         msgport *p = (msgport *)handle_get(table, frame->rdi, HANDLE_PORT);
+        u64 len = frame->r10;
         u64 type = 0;
+        char bounce[SYS_BOUNCE_MAX];
         i64 n;
 
         if (!p) {
             ret = SYS_EBADF;
             break;
         }
-        if (!harden_range_ok(frame->rdx, frame->r10, HARDEN_IDENTITY_LIMIT) ||
-            (frame->rsi != 0 &&
-             !harden_range_ok(frame->rsi, sizeof(u64), HARDEN_IDENTITY_LIMIT))) {
+        if (!user) {
+            if (!harden_range_ok(frame->rdx, len, HARDEN_IDENTITY_LIMIT) ||
+                (frame->rsi != 0 &&
+                 !harden_range_ok(frame->rsi, sizeof(u64), HARDEN_IDENTITY_LIMIT))) {
+                ret = SYS_EFAULT;
+                break;
+            }
+            n = msgport_recv(p, &type, (void *)(uintptr)frame->rdx, (usize)len);
+            if (n >= 0 && frame->rsi)
+                *(u64 *)(uintptr)frame->rsi = type;
+            ret = n;
+            break;
+        }
+        if (len > SYS_BOUNCE_MAX) {
+            ret = SYS_EINVAL;
+            break;
+        }
+        if (uaccess_check(frame->rdx, len) != 0 ||
+            (frame->rsi != 0 && uaccess_check(frame->rsi, sizeof(u64)) != 0)) {
             ret = SYS_EFAULT;
             break;
         }
-        n = msgport_recv(p, &type, (void *)(uintptr)frame->rdx, (usize)frame->r10);
-        if (n >= 0 && frame->rsi)
-            *(u64 *)(uintptr)frame->rsi = type;
+        n = msgport_recv(p, &type, bounce, (usize)len);
+        if (n > 0 && uaccess_user_write(frame->rdx, bounce, (u64)n) != 0) {
+            ret = SYS_EFAULT;
+            break;
+        }
+        if (n >= 0 && frame->rsi != 0 &&
+            uaccess_user_write(frame->rsi, &type, sizeof(u64)) != 0) {
+            ret = SYS_EFAULT;
+            break;
+        }
         ret = n;
         break;
     }
@@ -156,13 +250,28 @@ void syscall_dispatch(trap_frame *frame)
         handle_table *table = process_handles(process_current());
         struct net_tcp_socket *s = (struct net_tcp_socket *)handle_get(
             table, frame->rdi, HANDLE_SOCKET);
+        char bounce[SYS_USER_IO_MAX];
+        u64 len = frame->rdx;
         int n;
 
         if (!s) {
             ret = SYS_EBADF;
             break;
         }
-        n = tcp_send(s, (const void *)(uintptr)frame->rsi, (usize)frame->rdx);
+        if (!user) {
+            n = tcp_send(s, (const void *)(uintptr)frame->rsi, (usize)len);
+            ret = n < 0 ? SYS_EINVAL : (i64)n;
+            break;
+        }
+        if (len > SYS_USER_IO_MAX) {
+            ret = SYS_EINVAL;
+            break;
+        }
+        if (uaccess_user_read(bounce, frame->rsi, len) != 0) {
+            ret = SYS_EFAULT;
+            break;
+        }
+        n = tcp_send(s, bounce, (usize)len);
         ret = n < 0 ? SYS_EINVAL : (i64)n;
         break;
     }
@@ -170,14 +279,37 @@ void syscall_dispatch(trap_frame *frame)
         handle_table *table = process_handles(process_current());
         struct net_tcp_socket *s = (struct net_tcp_socket *)handle_get(
             table, frame->rdi, HANDLE_SOCKET);
+        char bounce[SYS_USER_IO_MAX];
+        u64 len = frame->rdx;
         int n;
 
         if (!s) {
             ret = SYS_EBADF;
             break;
         }
-        n = tcp_recv(s, (void *)(uintptr)frame->rsi, (usize)frame->rdx, 3000u);
-        ret = n < 0 ? SYS_EAGAIN : (i64)n;
+        if (!user) {
+            n = tcp_recv(s, (void *)(uintptr)frame->rsi, (usize)len, 3000u);
+            ret = n < 0 ? SYS_EAGAIN : (i64)n;
+            break;
+        }
+        if (len > SYS_USER_IO_MAX) {
+            ret = SYS_EINVAL;
+            break;
+        }
+        if (uaccess_check(frame->rsi, len) != 0) {
+            ret = SYS_EFAULT;
+            break;
+        }
+        n = tcp_recv(s, bounce, (usize)len, 3000u);
+        if (n < 0) {
+            ret = SYS_EAGAIN;
+            break;
+        }
+        if (n > 0 && uaccess_user_write(frame->rsi, bounce, (u64)n) != 0) {
+            ret = SYS_EFAULT;
+            break;
+        }
+        ret = (i64)n;
         break;
     }
     case SYS_SOCKET_CLOSE: {
@@ -214,22 +346,43 @@ void syscall_dispatch(trap_frame *frame)
     }
     case SYS_RESOLVE: {
         struct net_dns_answer answer;
-        const char *name = (const char *)(uintptr)frame->rdi;
+        char namebuf[SYS_USER_NAME_MAX];
+        const char *name;
 
-        if (!name || !frame->rsi) {
-            ret = SYS_EINVAL;
-            break;
+        if (user) {
+            if (uaccess_user_str(namebuf, frame->rdi, sizeof(namebuf)) != 0 ||
+                frame->rsi == 0 || uaccess_check(frame->rsi, sizeof(u32)) != 0) {
+                ret = SYS_EFAULT;
+                break;
+            }
+            name = namebuf;
+        } else {
+            name = (const char *)(uintptr)frame->rdi;
+            if (!name || !frame->rsi) {
+                ret = SYS_EINVAL;
+                break;
+            }
         }
         if (net_dns_resolve(name, &answer, 3000u) != 0 || answer.count == 0u) {
             ret = SYS_EIO;
             break;
         }
-        *(u32 *)(uintptr)frame->rsi = answer.addr[0];
+        if (user) {
+            if (uaccess_user_write(frame->rsi, &answer.addr[0], sizeof(u32)) != 0) {
+                ret = SYS_EFAULT;
+                break;
+            }
+        } else {
+            *(u32 *)(uintptr)frame->rsi = answer.addr[0];
+        }
         ret = 0;
         break;
     }
+    case SYS_WRITE:
+        ret = syscall_write(frame);
+        break;
     case SYS_EXIT:
-        thread_exit();
+        thread_kill_current(user ? (i64)frame->rdi : 0);
         ret = 0;
         break;
     default:

@@ -6,6 +6,9 @@ vector except `#BP` reached one shared handler that printed a single
 double fault had a stack of its own. H3 turns that into a policy: a bounded,
 uniform report, an explicit kernel-versus-user decision, and four IST stacks so
 the handler still has somewhere to run when the fault is "the stack is gone".
+Phase U1 then gave the policy a ring 3 to act on: a `DPL3` fault is charged to
+the faulting thread and the machine keeps running, while a CPL0 frame still
+panics.
 
 The formatter and the classification are pure -- no `kprintf`, no serial port,
 no framebuffer -- in `kernel/lib/trapfmt.c`, so the host suite can assert every
@@ -24,9 +27,9 @@ them the same way each time:
   decoded `CR2` address. No vector gets a bespoke one-liner.
 - **Whose fault was it?** `trap_classify()` splits the vector space into
   handled, user-killable and fatal, using the frame's `cs` to tell a kernel
-  frame from a CPL3 frame. Today a "user-killable" fault still panics, but the
-  decision is now a named enum in one function instead of an `if` inside the
-  handler.
+  frame from a CPL3 frame. Since phase U1 a user-killable fault from a `DPL3`
+  frame kills only the faulting thread and the scheduler carries on; the same
+  vector from a CPL0 frame is fatal.
 - **Did the handler have a stack?** A double fault, NMI, machine check and
   debug exception are delivered on their own IST stack, so a report can be
   printed after the faulting stack has already been destroyed.
@@ -66,8 +69,9 @@ The rules are deliberately narrow:
   table.
 - `vector` and `ist` are decimal; `error` is hex even when it is zero.
 - `from=kernel` when `cs & 3 == 0`, `from=user` when the frame came from
-  CPL3. No CPL3 code exists yet, so every log today says `from=kernel`; the
-  classification is written and host-tested for the day it does.
+  CPL3. Phase U1 makes the second case real: a ring-3 program's fault prints
+  `from=user` (the `make test-user` excerpt below shows one), while the fault
+  injector and every kernel-frame fault still print `from=kernel`.
 - The `fault` line exists **only** for vector 14 (`#PF`). `error` bit 0 is
   `present`, bit 1 `write`, bit 2 `user`, bit 3 `RSVD`, bit 4 `instruction`
   fetch, each printed as `yes`/`no` in that order, with `cr2` last.
@@ -94,9 +98,27 @@ CRUGOS: trap report page fault vector=14 error=0x2 ist=0 from=kernel
 CRUGOS: trap fault present=no write=yes user=no reserved=no instruction=no cr2=0xffff800000000000
 ```
 
-After the report comes the ordinary panic path: `*** CRUGOS PANIC: <name> ***`,
-the stack scan and `CRUGOS: panic`. The handler then writes `0x11` to
-`isa-debug-exit`, so QEMU exits with status 35.
+A ring-3 page fault has the same shape with `from=user`; the `user` bit in the
+error code is set, and the report is followed by the U1 kill lines instead of a
+panic. The excerpt keeps only the policy-relevant lines; the report's
+`trap rip=` and two `trap regs` lines are elided:
+
+```
+CRUGOS: user fault writing above the window
+CRUGOS: trap report page fault vector=14 error=0x6 ist=0 from=user
+CRUGOS: trap fault present=no write=yes user=yes reserved=no instruction=no cr2=0x10000000000
+CRUGOS: user fault page fault at rip=0x0000008000010056 err=0x0000000000000006 tid 10
+CRUGOS: user fault killed tid 10 code -14
+```
+
+For a fatal fault -- every kernel-frame fault, and a CPL3 frame whose vector is
+not handled and not user-killable -- the report is followed by the ordinary
+panic path:
+`*** CRUGOS PANIC: <name> ***`, the stack scan and `CRUGOS: panic`. The handler
+then writes `0x11` to `isa-debug-exit`, so QEMU exits with status 35. A
+`TRAP_USER` fault takes the phase U1 kill path instead: the report, the two
+`CRUGOS: user fault ...` lines and no panic, so the boot continues and still
+exits 33.
 
 ## The classification matrix
 
@@ -150,11 +172,14 @@ breakpoint self-test asserts. `trap_classify(3, ...)` is still exercised on the
 host. That one legacy line is the only `trap   :`-prefixed output left in the
 kernel.
 
-`TRAP_USER` currently prints the report and then calls
-`panic("user-mode <name>")`. That is deliberate: there is no ring 3 to kill a
-thread in yet, and the branch is exactly where the kill will go. The alternative
--- treating a user fault as fatal in the matrix -- would mean rewriting the
-policy when ring 3 lands.
+`TRAP_USER` prints the report and then ends only the offending thread:
+`kernel/arch/x86_64/idt.c` prints `CRUGOS: user fault <name> at rip=... err=...
+tid N`, then `CRUGOS: user fault killed tid N code -<vector>` with the negated
+vector as the thread's exit code, and calls `thread_kill_current()`; the
+scheduler resumes and `thread_join_code()` hands the code to the parent. The H3
+placeholder, `panic("user-mode <name>")`, is gone. The exception is a user-frame
+`#DF`, `#NMI` or `#MC`: those are `TRAP_FATAL`, there is no healthy thread to
+blame, and they still panic.
 
 ## IST stacks
 
@@ -182,10 +207,12 @@ report, prints it and runs the panic stack scan. Sixteen kilobytes leaves that
 work room without depending on the stack that just failed. The other three stay
 at 8 KiB.
 
-`rsp0` in the TSS still points at the boot stack, because the kernel is ring 0
-only and never `iretq`s to CPL3: a kernel frame already runs on the kernel
-stack, so `rsp0` is never consulted. Making it per-thread is a prerequisite for
-ring 3, not a bug in H3.
+Phase H3 left `rsp0` pointing at the boot stack because the kernel never
+`iretq`ed to CPL3. Phase U1 makes it per-thread: `cpu_set_kernel_stack()` is the
+only writer of the field, and `schedule()` installs the incoming thread's kernel
+stack top -- the thread's own kernel stack for a `THREAD_FLAG_USER` thread, the
+boot stack top (`cpu_boot_stack_top()`) for a kernel thread -- so a fault taken
+at CPL3 always lands on a valid kernel stack.
 
 ## Injecting faults from the command line
 
@@ -217,7 +244,7 @@ back to a default fault.
 | --- | --- | --- | --- |
 | `de` | `volatile u64 zero = 0; 100 / zero` | 0 divide error | 0 |
 | `ud` | `ud2` | 6 invalid opcode | 0 |
-| `gp` | load `ds` with selector `0x33`, outside the five-entry GDT | 13 general protection | 0 |
+| `gp` | load `ds` with selector `0x3b` (index 7), outside the seven-entry GDT | 13 general protection | 0 |
 | `pf` | store to `0xffff800000000000`: high canonical, unmapped, `error=0x2` | 14 page fault | 0 |
 | `df` | `movabsq $0x0000800000000000, %rsp` then `pushq $0` | 8 double fault | 1 |
 | `nmi` | `int $2` | 2 NMI | 2 |
@@ -233,6 +260,12 @@ faults again, and the CPU escalates to a real `#DF` on IST1:
 CRUGOS: trap report double fault vector=8 error=0x0 ist=1 from=kernel
 CRUGOS: trap rip=0x0 cs=0x8 rflags=0x10246 rsp=0x800000000000 ss=0x10
 ```
+
+The `gp` row moved in phase U1. The recipe used to load `%ds` with `0x33`, which
+was outside the five-entry GDT in H3; U1 turned index 6 (`0x33`) into the ring-3
+data descriptor, so `0x33` is now a valid selector and the recipe has to stay
+one slot further out. `0x3b` is index 7 with `RPL3`, past the seven-entry GDT, so
+the %ds load still faults -- the fix is the selector, not the policy.
 
 `int $N` for `nmi`, `mc` and `db` goes through the IDT gate like a software
 interrupt, so the handler sees the vector and the IST routing is exercised even
@@ -296,11 +329,16 @@ no-zero-padding rule and a cap too small for the full text.
 
 ## What is not covered
 
-- Ring 3 does not exist yet, so `TRAP_USER` panics: a user-killable fault still
-  takes the kernel down. Killing the offending thread and resuming the scheduler
-  is the next step, and the branch is where it goes.
-- `rsp0` is not per-thread. The kernel never returns to CPL3, so the field is
-  unused today; ring 3 needs it set on every entry and saved on every exit.
+- One user thread at a time: a second `thread_create_user()` returns `-EBUSY`,
+  and every user program shares the kernel CR3, so a fault can be charged to a
+  thread but two user programs cannot be isolated from each other yet.
+- A user-frame `#DF`, `#NMI` or `#MC` still panics. Those vectors are fatal in
+  both rings by design, and there is no policy for abandoning a whole address
+  space, so the machine still stops rather than killing the thread.
+- The kill path has no unwinding or per-thread report tail: the report and the
+  two `user fault` lines go to the console, the thread is destroyed, and its
+  user pages are unmapped without a symbolized backtrace of the faulting
+  program.
 - There is no stack unwinding. The panic path scans the stack for return
   addresses and prints raw frames; the report carries `rip`, `rsp` and the
   registers, not a symbolized backtrace.

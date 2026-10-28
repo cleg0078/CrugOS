@@ -1,4 +1,4 @@
-/* CrugOS single syscall dispatcher (phase 4D: adds the name resolver). */
+/* CrugOS single syscall dispatcher (phase U1: callable from ring 3). */
 #ifndef CRUG_SYSCALL_H
 #define CRUG_SYSCALL_H
 
@@ -21,7 +21,8 @@
 #define SYS_SOCKET_LISTEN 13u
 #define SYS_SOCKET_ACCEPT 14u
 #define SYS_RESOLVE 15u
-#define SYS_MAX 16u
+#define SYS_WRITE 16u
+#define SYS_MAX 17u
 
 #define SYS_EINVAL (-22ll)
 #define SYS_ENOSYS (-38ll)
@@ -30,6 +31,7 @@
 #define SYS_EAGAIN (-11ll)
 #define SYS_EIO (-5ll)
 #define SYS_EFAULT (-14ll)
+#define SYS_EBUSY (-16ll)
 
 #define SYSCALL_VECTOR 0x80u
 #define SYS_PING_MAGIC 0x43524731ull

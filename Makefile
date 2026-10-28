@@ -19,6 +19,7 @@
 #   make test-heap           corrupt the kernel heap and prove the integrity checker catches it
 #   make test-trap           inject crafted CPU faults and check the crash reports
 #   make test-fuzz           mutate a real disk image and fuzz the mount path
+#   make test-user           run a ring-3 program and prove the user/kernel walls
 #   make test-raid  boot RAID1 (two members) and verify member disks
 #   make test-raid10  boot RAID10 (four members) and verify member disks
 #   make test-nvme   boot from an NVMe namespace and verify the disk
@@ -108,6 +109,7 @@ EXPECT_ICONS ?= no
 EXPECT_DRAWER ?= no
 EXPECT_SELECT ?= no
 EXPECT_HEAP ?= no
+EXPECT_USER ?= no
 
 # QEMU / firmware options.
 MEMORY_MB ?= 512
@@ -180,6 +182,9 @@ HEAP_RUN_TIMEOUT_SEC ?= 240
 
 # Trap gate (make test-trap): how long one crafted fault may boot.
 TRAP_TIMEOUT_SEC ?= 60
+
+# Userspace gate (make test-user): how long the ring-3 selftest may take.
+USER_RUN_TIMEOUT_SEC ?= 240
 
 # Interactive demo (make demo): a real QEMU window with a USB keyboard and
 # mouse, the Workbench desktop and a hold so the window stays open.
@@ -280,7 +285,8 @@ WARN_FLAGS := -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare
 COMMON_FLAGS := -std=gnu11 -fcrug-kernel -ffreestanding -fno-pic -fno-pie \
                 -fno-stack-protector -fno-ident -fno-asynchronous-unwind-tables \
                 -fno-unwind-tables -fno-builtin -fno-omit-frame-pointer -mno-red-zone \
-                -Iinclude -MMD -MP $(VERSION_FLAGS) $(AVX2_FLAGS) $(WARN_FLAGS) $(MODE_FLAGS)
+                -Iinclude -Iboot/efi -MMD -MP $(VERSION_FLAGS) $(AVX2_FLAGS) \
+                $(WARN_FLAGS) $(MODE_FLAGS)
 KERNEL_FLAGS := $(COMMON_FLAGS) -mno-sse -mno-sse2 -mno-mmx -mno-80387 \
                 -mno-avx -mno-avx2 -mno-avx512f -fno-builtin
 LOADER_FLAGS := $(COMMON_FLAGS) -fshort-wchar
@@ -291,14 +297,31 @@ KERNEL_LDFLAGS := -nostdlib -static -no-pie -Wl,--build-id=none \
 KERNEL_SOURCES := $(wildcard kernel/arch/$(ARCH)/*.c) $(wildcard kernel/arch/$(ARCH)/*.S) \
                   $(wildcard kernel/core/*.c) $(wildcard kernel/lib/*.c) \
                   $(wildcard kernel/mm/*.c) $(wildcard kernel/block/*.c) \
-                  $(wildcard kernel/fs/*.c) $(wildcard kernel/input/*.c) \
+                  $(wildcard kernel/fs/*.c) $(wildcard kernel/exec/*.c) \
+                  $(wildcard kernel/input/*.c) \
                   $(wildcard kernel/net/*.c) $(wildcard kernel/audio/*.c) \
                   $(wildcard kernel/gfx/*.c) \
                   $(wildcard kernel/shell/*.c) \
                   $(wildcard drivers/*/*.c) \
                   $(wildcard kernel/crypto/*.c) $(wildcard kernel/crypto/*.S)
 KERNEL_OBJECTS := $(patsubst %,$(OBJ)/%.o,$(basename $(KERNEL_SOURCES)))
+# The ELF64 loader in boot/efi/elf.c is shared with the UEFI loader, but the
+# kernel links it with the kernel flags, so it is an explicit object.
+KERNEL_OBJECTS += $(OBJ)/shared/elf.o
 KERNEL_DEPS := $(KERNEL_OBJECTS:.o=.d)
+
+USER_ELF_DIR := $(BUILD)/user
+USER_OBJ := $(BUILD)/user/obj
+USER_PROGRAMS := hello badptr fault
+USER_ELF := $(patsubst %,$(USER_ELF_DIR)/%,$(USER_PROGRAMS))
+USER_FLAGS := -std=gnu11 -fcrug-kernel -ffreestanding -fno-pic -fno-pie \
+              -mcmodel=large -fno-stack-protector -fno-builtin -fno-ident \
+              -fno-asynchronous-unwind-tables -fno-unwind-tables \
+              -Iinclude -Iuser -mno-red-zone -mno-sse -mno-sse2 -mno-mmx \
+              -mno-80387 -mno-avx -mno-avx2 -mno-avx512f \
+              -Wall -Wextra -Wno-unused-parameter $(MODE_FLAGS)
+USER_LDFLAGS := -nostdlib -static -no-pie -Wl,--build-id=none \
+                -Wl,-T,user/user.ld
 
 LOADER_SOURCES := $(wildcard boot/efi/*.c)
 LOADER_OBJECTS := $(patsubst %,$(OBJ)/%.o,$(basename $(LOADER_SOURCES)))
@@ -307,11 +330,11 @@ LOADER_DEPS := $(LOADER_OBJECTS:.o=.d)
 HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
                       $(wildcard kernel/crypto/*.c) $(wildcard kernel/crypto/*.S)
 
-.PHONY: all kernel loader esp disk raid-disks raid10-disks nvme-disk ahci-disk \
+.PHONY: all kernel loader user esp disk raid-disks raid10-disks nvme-disk ahci-disk \
         mkcrypt crypt-disk raid-repair-disks raid10-repair-disks run demo test test-compat \
         test-raid test-raid-degraded test-raid10 test-raid10-degraded test-nvme test-ahci \
         test-raid-repair test-raid10-repair test-journal-csum test-journal-replay \
-        test-hardening test-heap test-trap test-fuzz \
+        test-hardening test-heap test-trap test-fuzz test-user \
         test-crypt test-crypt-recovery test-crypt-wrongkey test-crypt-tamper test-crypt-ni \
         test-crypt-prompt test-crypt-prompt-wrong test-crypt-prompt-timeout \
         test-crypt-keyboard test-crypt-keyboard-wrong crypt-run test-net test-tcp \
@@ -343,6 +366,7 @@ esp: $(KERNEL) $(LOADER)
 
 $(KERNEL_OBJECTS): VERSION
 $(LOADER_OBJECTS): VERSION
+$(USER_ELF): VERSION
 
 $(KERNEL): $(KERNEL_OBJECTS) kernel/arch/$(ARCH)/linker.ld VERSION
 	@mkdir -p $(dir $@)
@@ -384,8 +408,30 @@ $(OBJ)/boot/%.o: boot/%.c
 	$(Q)$(CC) $(LOADER_FLAGS) -c $< -o $@
 	@echo "  CC    $<"
 
-disk:
-	$(Q)scripts/mkdisk.sh $(DISK_IMG) $(DISK_SIZE_MB)
+$(OBJ)/shared/elf.o: boot/efi/elf.c
+	@mkdir -p $(dir $@)
+	$(Q)$(CC) $(KERNEL_FLAGS) -c $< -o $@
+	@echo "  CC    $<"
+
+$(USER_OBJ)/%.o: user/%.c
+	@mkdir -p $(dir $@)
+	$(Q)$(CC) $(USER_FLAGS) -MMD -MP -c $< -o $@
+	@echo "  CC    $<"
+
+$(USER_OBJ)/%.o: user/%.S
+	@mkdir -p $(dir $@)
+	$(Q)$(CC) $(USER_FLAGS) -MMD -MP -c $< -o $@
+	@echo "  AS    $<"
+
+$(USER_ELF_DIR)/%: $(USER_OBJ)/start.o $(USER_OBJ)/%.o user/user.ld
+	@mkdir -p $(dir $@)
+	$(Q)$(CC) $(USER_FLAGS) $(USER_LDFLAGS) -o $@ $(USER_OBJ)/start.o $(USER_OBJ)/$*.o
+	@echo "  USRLD $@"
+
+user: $(USER_ELF)
+
+disk: user
+	$(Q)USER_DIR=$(abspath $(USER_ELF_DIR)) scripts/mkdisk.sh $(DISK_IMG) $(DISK_SIZE_MB)
 	@echo "  DISK  $(DISK_IMG)"
 
 crash-disk: scripts/mkdisk.sh scripts/journal-csum.py
@@ -901,6 +947,20 @@ test-fuzz:
 	$(Q)tests/host/build/fuzz-mount --image $(abspath $(DISK_IMG)) --cases 1 --selftest
 	$(Q)tests/host/build/fuzz-mount --image $(abspath $(DISK_IMG)) --crypt-image $(abspath $(CRYPT_IMG)) --cases $(FUZZ_CASES) --crypt-cases $(FUZZ_CRYPT_CASES) --seed $(FUZZ_SEED) --timeout $(FUZZ_TIMEOUT_SEC) --crash-dir $(abspath $(BUILD_ROOT))/fuzz
 
+# Userspace gate: boot with user.test=1, so the kernel loads three ELF programs
+# from the root filesystem, runs them at CPL3, checks that a kernel pointer is
+# refused with EFAULT, and that a user-mode page fault kills only that program.
+test-user: EXPECT_USER := yes
+test-user: esp user
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(MAKE) --no-print-directory disk
+	$(Q)$(MAKE) --no-print-directory run TIMEOUT_SEC=$(USER_RUN_TIMEOUT_SEC) \
+		CMDLINE_EXTRA="user.test=1"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION \
+		$(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no no \
+		$(EXPECT_USER)
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
 check-disk:
 	@if [ -n "$(DISK_IMG)" ] && [ ! -f "$(DISK_IMG)" ]; then \
 		$(MAKE) --no-print-directory disk; \
@@ -1012,6 +1072,8 @@ options:
 	@printf '  %-16s %s\n' HEAP_STRESS_OPS "$(HEAP_STRESS_OPS)"
 	@printf '  %-16s %s\n' HEAP_RUN_TIMEOUT_SEC "$(HEAP_RUN_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' TRAP_TIMEOUT_SEC "$(TRAP_TIMEOUT_SEC) (seconds)"
+	@printf '  %-16s %s\n' EXPECT_USER "$(EXPECT_USER)"
+	@printf '  %-16s %s\n' USER_RUN_TIMEOUT_SEC "$(USER_RUN_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' FUZZ_CASES "$(FUZZ_CASES)"
 	@printf '  %-16s %s\n' FUZZ_CRYPT_CASES "$(FUZZ_CRYPT_CASES)"
 	@printf '  %-16s %s\n' FUZZ_SEED "$(FUZZ_SEED)"

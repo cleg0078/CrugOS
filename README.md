@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase H4 host mount-path fuzzer (`v0.34.0`)
+## Status: phase U1 ring 3 (`v0.35.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -51,7 +51,10 @@ and a read-only integrity checker, and phase H3 gives every fault the same
 bounded report, classifies it for a kernel or a user frame, and delivers the
 four stack-destroying vectors on IST stacks. Phase H4 takes the storage mount
 path to the host: it mutates real disk images and mounts every mutant in a
-forked child, 22000 cases per gate.
+forked child, 22000 cases per gate. Phase U1 crosses into ring 3: a
+seven-entry GDT, a fixed 512 GiB to 1 TiB user window, an ELF loader that maps
+`/bin` programs with W^X permissions, a copy boundary on every syscall pointer,
+and a trap path that kills only the faulting user thread.
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -915,6 +918,63 @@ adds a fuzzer, its own link line and one more gate.
 - `make test-host` still reports 3400 checks, the kernel is still 253144 B
   (247 KiB) on disk and 821986 B (802 KiB) loaded, and all 47 gates pass.
 
+Phase U1 adds the first ring-3 program: a seven-entry GDT with a DPL3 code/data
+pair, a fixed user window in the address space, an ELF loader that maps `/bin`
+programs with W^X permissions, a copy boundary on every syscall pointer and a
+fault path that kills only the offending user thread.
+
+- `include/crug/segment.h`/`kernel/arch/x86_64/cpu.c` grow the GDT from five to
+  seven entries: kernel code/data `0x08`/`0x10`, the 64-bit TSS at `0x18`, and
+  ring-3 code/data `0x2B`/`0x33` (`SEG_USER_CS`/`SEG_USER_DS`); the TSS keeps the
+  phase H3 IST stacks, and `rsp0` is no longer the boot stack:
+  `cpu_set_kernel_stack()` is its only writer and `schedule()` installs the
+  incoming thread's kernel stack top, so a trap from CPL3 lands on a valid stack;
+- `include/crug/vm.h` defines the user window at `USER_BASE` 512 GiB to
+  `USER_TOP` 1 TiB (PML4 slot 1), outside the supervisor-only identity map, and
+  `kernel/mm/vm.c` adds `vm_user_map_page`/`vm_user_map_pages`/
+  `vm_user_unmap_pages`, which create every intermediate table with `VM_USER`,
+  strip `VM_GLOBAL` and take W^X from the caller (`VM_NX` on data pages);
+- `kernel/exec/elf_exec.c` reads `/bin/<name>` with `ext4_read_file` (512 KiB
+  cap), parses it with the same `boot/efi/elf.c` the UEFI loader uses, reserves
+  each `PT_LOAD` with the right permissions, copies the bytes through
+  `pmm_phys_to_virt` so SMAP cannot trip the loader, maps a four-page stack just
+  below `USER_STACK_TOP` with an unmapped page under it, and hands the result to
+  `thread_create_user()`; empty segments are ignored and the entry point and
+  stack pointer go through `harden_user_entry_ok`;
+- `kernel/mm/uaccess.c` is the only way the kernel touches user memory: a pure
+  `harden_user_range_ok` window check, a page-table walk that reports
+  `UACCESS_EFAULT` instead of taking a kernel `#PF`, and `stac`/`clac` around the
+  actual copy when CPUID exposes SMAP;
+- `kernel/core/syscall.c` serves both rings: `from_user()` tests `frame->cs & 3`,
+  CPL0 callers keep the identity-map path so the in-kernel selftests are
+  unchanged, and CPL3 callers go through the bounce-buffer copies. `SYS_WRITE`
+  (16) writes fd 1/2 from up to 4096 bytes in 256-byte chunks, `SYS_MAX` is 17,
+  `SYS_EBUSY` (-16) is new, and `SYS_EXIT` from CPL3 ends only that thread;
+- `kernel/arch/x86_64/user.S`/`kernel/core/thread.c`: a `THREAD_FLAG_USER` thread
+  carries `user_rip`/`user_rsp` and up to 8 mapped regions; `thread_create_user()`
+  refuses a second live user thread with `-EBUSY`, `thread_destroy()` unmaps the
+  recorded pages, and `thread_user_start` builds the `iretq` frame (`SS 0x33`,
+  user `RSP`, `RFLAGS 0x202`, `CS 0x2B`, entry `RIP`);
+- `kernel/arch/x86_64/idt.c`: a fault from CPL3 prints the report and
+  `CRUGOS: user fault <name> at rip=... err=... tid N`, then
+  `CRUGOS: user fault killed tid N code -<vector>` and kills only that thread via
+  `thread_kill_current()`; user `#DF`/`#NMI`/`#MC` and every CPL0 fault still
+  panic, and `TRAP_USER` is no longer a "user-mode <name>" panic;
+- `user/` holds three freestanding programs (`hello`, `badptr`, `fault`) linked
+  by `user/user.ld` at `0x8000010000` with separate R+X text and R+W data
+  segments; `user/lib.h` is inline `int $0x80` wrappers and `make user` builds
+  them into `build/x86_64/user/`; `scripts/mkdisk.sh` reads `USER_DIR` from the
+  environment and writes them into `/bin`;
+- `kernel/core/user_test.c` parses `user.test=1` from the boot command line and
+  runs the three programs in sequence, and `make test-user` is the 48th gate: it
+  rebuilds the disk with the programs, boots with the token under
+  `USER_RUN_TIMEOUT_SEC` (240), and passes boot-check the new final `EXPECT_USER`
+  argument, which fails any gate that prints a user marker without it;
+- `tests/host/test_uaccess.c` and `test_exec.c` cover the window, segment and
+  entry validators, `uaccess_check` and the ELF segment policy; `make test-host`
+  reports 3470 checks, the kernel is 262760 B (256 KiB) on disk and 831006 B
+  (811 KiB) loaded, and all 48 gates pass.
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -923,9 +983,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.34.0 (phase h4) -- Amiga-inspired microkernel bring-up
+CrugOS 0.35.0 (phase u1) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.34.0
+CRUGOS: version 0.35.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -974,7 +1034,7 @@ CRUGOS: tcp http served (72 bytes)
 CRUGOS: net selftest ok
 CRUGOS: gfx ready (1024x768, cursor at 512,384)
 CRUGOS: selftest ok
-kernel : 0x0000000000100000 size=247 KiB
+kernel : 0x0000000000100000 size=256 KiB
 boot   : cpu=0 acpi_rsdp=0x1f77e000 fdt=0x0 initrd=0x0
 memory : 36 regions, usable 474080 KiB (462 MiB)
 pmm    : total=118520 free=118462 bitmap=131072 B
@@ -984,9 +1044,9 @@ entropy: ca02033c50b53413
 wx     : audit ok, identity map 0..4 GiB, guard unmapped
 heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
-boot   : pmm=28552 us cpu=438 us vm=626 us traps=360 us timer=65357 us heap=60 us storage=94487 us sched=354 us syscall=122 us total=190359 us
+boot   : pmm=28541 us cpu=418 us vm=657 us traps=328 us timer=65263 us heap=426 us storage=93624 us sched=305 us syscall=94 us total=189659 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase h4 boot ok
+CRUGOS: phase u1 boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -1194,13 +1254,15 @@ make test-hardening  # craft hostile superblock/inode/crypt images and boot them
 make test-heap   # corrupt the kernel heap and prove the integrity checker catches it
 make test-trap   # inject eight crafted faults and check the report, IST and panic
 make test-fuzz   # mutate a real disk image and fuzz the mount path
+make test-user   # boot with user.test=1 and run three ring-3 programs
 make iso         # build a bootable hybrid UEFI ISO (build/x86_64/crugos.iso)
 make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
 make usb         # write the ISO to a USB block device (USB_DEV=/dev/sdX)
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
-make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows/menus/gadgets, resize grips, keyboard focus and keys, icon dragging, the send-to-front gadget and keyboard icon focus, the body input handler, the text grid and the shell)
+make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows/menus/gadgets, resize grips, keyboard focus and keys, icon dragging, the send-to-front gadget and keyboard icon focus, the body input handler, the text grid and the shell, the user-window and uaccess validators, and the ELF exec mapper)
 make check-disk  # e2fsck + persisted-file checks on the latest test disk
+make user        # build the ring-3 programs the disk image carries
 make disk        # generate the GPT/ext4 test disk
 make raid-disks  # generate the two RAID1 member disks
 make raid10-disks  # generate the four RAID10 member disks
@@ -1224,7 +1286,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `EXPECT_CRYPT`, `EXPECT_AES`, `EXPECT_NET`, `EXPECT_TCP`, `EXPECT_DNS`,
 `EXPECT_USB`, `EXPECT_MOUSE`, `EXPECT_AUDIO`, `EXPECT_GFX`, `EXPECT_WB`,
 `EXPECT_MENU`, `EXPECT_SHELL`, `EXPECT_KEYS`, `EXPECT_DESK`, `EXPECT_ICONS`,
-`EXPECT_DRAWER`, `EXPECT_SELECT`, `EXPECT_HEAP`,
+`EXPECT_DRAWER`, `EXPECT_SELECT`, `EXPECT_HEAP`, `EXPECT_USER`,
 `AUDIO_RUN_TIMEOUT_SEC`, `AUDIO_QEMU_EXTRA`, `GFX_WAIT`, `GFX_MOVES`,
 `GFX_RUN_TIMEOUT_SEC`, `GFX_QEMU_EXTRA`, `WB_WAIT`, `WB_DRAG`,
 `WB_RUN_TIMEOUT_SEC`, `WB_QEMU_EXTRA`, `WB_MENU_WAIT`, `WB_MENU_ACTS`,
@@ -1236,7 +1298,8 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `WB_DRAWER_RUN_TIMEOUT_SEC`, `WB_SELECT_WAIT`, `WB_SELECT_ACTS`,
 `WB_SELECT_FILL`, `WB_SELECT_RUN_TIMEOUT_SEC`, `HARDEN_TIMEOUT_SEC`,
 `HEAP_STRESS_OPS`, `HEAP_RUN_TIMEOUT_SEC`, `TRAP_TIMEOUT_SEC`, `FUZZ_CASES`,
-`FUZZ_CRYPT_CASES`, `FUZZ_SEED`, `FUZZ_TIMEOUT_SEC`, `DEMO_DISPLAY`, `DEMO_HOLD_SEC`,
+`FUZZ_CRYPT_CASES`, `FUZZ_SEED`, `FUZZ_TIMEOUT_SEC`, `USER_RUN_TIMEOUT_SEC`,
+`DEMO_DISPLAY`, `DEMO_HOLD_SEC`,
 `DEMO_TIMEOUT_SEC`, `DEMO_CMDLINE`, `DEMO_MACHINE_EXTRA`, `DEMO_QEMU_EXTRA`,
 `ISO_IMAGE`, `ISO_STAGE`, `ISO_FAT_IMG`, `ISO_SIZE_MB`, `ISO_VOLID`,
 `ISO_CMDLINE`, `ISO_DATE`, `ISO_RUN_TIMEOUT_SEC`, `EXPECT_ISO`, `ISO_IMG`,
@@ -1260,13 +1323,14 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `include/crug/` | shared kernel/loader headers (types, BootInfo, I/O, string, heap, threads, IPC, syscalls) |
 | `kernel/arch/x86_64/` | boot code, linker script, port I/O, serial, i8042 keyboard, framebuffer, CPU/IDT/APIC/timer, context switch |
 | `kernel/core/` | kernel entry, console, printf, panic, self-tests, scheduler, handles, MsgPort, syscall dispatcher, boot report |
+| `kernel/exec/` | ELF loader for ring-3 programs: segment policy, W^X user mappings and the user stack |
 | `kernel/lib/` | freestanding string, formatting, bitmap, console line-editor and text-grid routines |
 | `kernel/input/` | `input.device`: set-1 scancode decoder, the console byte queue and the pointer state |
 | `kernel/audio/` | `audio.device` PCM ring, the per-channel mixer and the tone generator |
 | `kernel/net/` | `net.device`, Ethernet/ARP/IPv4/ICMP/UDP, TCP, the DHCP client and the DNS resolver |
 | `kernel/gfx/` | `gfx.device` (the pointer-driven framebuffer cursor) and `intuition.device` with the phase 6A desktop, its phase 6B menus, gadgets and event queue, and the phase 6C body painter the shell window uses, the phase 6D resize grips and keyboard navigation, the phase 6E desktop objects, depth gadget and drawer, the phase 6F icon dragging, send-to-front gadget and keyboard icon focus, the phase 6G scrolling drawer with its scrollbar, refresh and reflow, and the phase 6H drawer row selection with its draggable scrollbar and body-input hook |
 | `kernel/shell/` | the Workbench shell: line editor, history, the command table and the `shell_io` binding to the mounted ext4 root |
-| `kernel/mm/` | physical allocator, W^X page tables, kernel heap |
+| `kernel/mm/` | physical allocator, W^X page tables, the user-window mapper and uaccess copy boundary, kernel heap |
 | `kernel/block/` | block-device registry, partitions, bounds checks, RAID1/RAID10, boot-time rebuild and the AES-256-XTS `crypt.device` |
 | `kernel/fs/` | GPT, writable checksummed ext4, checksummed JBD2 journal and the storage boot policy (including the console passphrase prompt) |
 | `kernel/crypto/` | AES, XTS, AES-NI, BLAKE2b and Argon2id (shared with the host tools) |
@@ -1274,8 +1338,9 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `scripts/` | QEMU runner, disk/RAID1/RAID10/crypt image builders, the hybrid ISO builder (`mkiso.sh`, `mkfat.py`), boot/PE/disk/RAID/journal/crypt/ISO checks, the serial and keyboard prompt drivers, tamper helper, size and reproducibility gates |
 | `tests/host/` | host unit tests for freestanding code and the mount-path fuzzer (`fuzz_mount.c`) |
 | `tools/` | host-side development tools (`gen-font.py`, `mkcrypt.c`, `gen-crc32c.py`) |
+| `user/` | ring-3 programs and their freestanding runtime (`user.ld`, `start.S`, `lib.h`) |
 | `docs/` | [build](docs/build.md), [boot](docs/boot.md), [storage](docs/storage.md), [checksums](docs/checksums.md), [crypto](docs/crypto.md), [input](docs/input.md), [network](docs/network.md),
-[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [USB/xHCI](docs/usb.md), [audio](docs/audio.md), [graphics](docs/gfx.md), [Workbench](docs/workbench.md), [bootable ISO](docs/iso.md), [kernel heap](docs/heap.md), [trap policy](docs/traps.md), [mount-path fuzzing](docs/fuzzing.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
+[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [USB/xHCI](docs/usb.md), [audio](docs/audio.md), [graphics](docs/gfx.md), [Workbench](docs/workbench.md), [bootable ISO](docs/iso.md), [kernel heap](docs/heap.md), [trap policy](docs/traps.md), [mount-path fuzzing](docs/fuzzing.md), [ring 3](docs/userspace.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
 
 ## Versioning
 

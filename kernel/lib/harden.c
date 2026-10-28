@@ -1,5 +1,7 @@
 /* CrugOS device-supplied value validators (hardening pass 1). */
 #include <crug/harden.h>
+#include <crug/mm.h>
+#include <crug/vm.h>
 
 /* Little-endian u16, independent of struct packing. */
 static u16 harden_ld16(const u8 *p)
@@ -94,4 +96,29 @@ int harden_volume_ok(u64 volume_sectors, u64 parent_sectors,
     if (offset_sectors > parent_sectors)
         return 0;
     return volume_sectors <= parent_sectors - offset_sectors;
+}
+
+int harden_user_range_ok(u64 addr, u64 len)
+{
+    if (len == 0)
+        return 1;
+    if (addr < USER_BASE || addr >= USER_TOP)
+        return 0;
+    return len <= USER_TOP - addr;
+}
+
+int harden_user_segment_ok(u64 va, u64 size)
+{
+    if (size == 0)
+        return 1;
+    if (va < USER_BASE || va >= USER_TOP)
+        return 0;
+    if ((va & (USER_PAGE - 1ull)) != 0)
+        return 0;
+    return size <= USER_TOP - va;
+}
+
+int harden_user_entry_ok(u64 entry)
+{
+    return entry >= USER_BASE && entry < USER_TOP;
 }

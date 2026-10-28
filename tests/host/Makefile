@@ -10,7 +10,7 @@ SOURCES := main.c test_string.c test_printf.c test_elf.c test_bitmap.c test_vm_m
            test_crc32c.c test_blake2b.c test_aes.c test_argon2.c test_crypt.c \
            test_lineedit.c test_input.c test_net.c test_dns.c test_usb.c test_audio.c \
            test_gfx.c test_intuition.c test_textgrid.c test_shell.c test_harden.c \
-           test_heap.c test_trap.c \
+           test_heap.c test_trap.c test_uaccess.c test_exec.c \
            ../../drivers/usb/usb_hid.c \
            ../../kernel/audio/audio.c ../../kernel/audio/mixer.c \
            ../../kernel/gfx/gfx.c ../../kernel/gfx/intuition.c \
@@ -20,7 +20,7 @@ SOURCES := main.c test_string.c test_printf.c test_elf.c test_bitmap.c test_vm_m
            ../../kernel/lib/crc32c.c ../../kernel/lib/lineedit.c \
            ../../kernel/lib/textgrid.c ../../kernel/shell/shell.c \
            ../../kernel/lib/harden.c ../../kernel/lib/trapfmt.c \
-           ../../kernel/mm/heap.c \
+           ../../kernel/mm/heap.c ../../kernel/mm/uaccess.c \
            ../../kernel/crypto/blake2b.c \
            ../../kernel/crypto/aes.c ../../kernel/crypto/xts.c ../../kernel/crypto/aesni.S \
            ../../kernel/crypto/argon2id.c ../../kernel/block/crypt_meta.c \

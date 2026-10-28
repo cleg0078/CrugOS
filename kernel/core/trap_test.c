@@ -110,8 +110,10 @@ void trap_test_run(void)
     } else if (strcmp(g_recipe, "ud") == 0) {
         __asm__ volatile("ud2");
     } else if (strcmp(g_recipe, "gp") == 0) {
-        /* Index 6 lies past the five-entry GDT, so the %ds load faults. */
-        __asm__ volatile("movw $0x33, %%ax\n\tmovw %%ax, %%ds"
+        /* Index 7 (0x3b) lies past the seven-entry GDT, so the %ds load
+           faults. Phase U1 turned index 6 / 0x33 into the ring-3 data
+           descriptor, which is why this must stay one slot further out. */
+        __asm__ volatile("movw $0x3b, %%ax\n\tmovw %%ax, %%ds"
                          : : : "rax", "memory");
     } else if (strcmp(g_recipe, "pf") == 0) {
         *(volatile u64 *)(uintptr)0xffff800000000000ull = 1u;

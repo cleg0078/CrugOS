@@ -26,6 +26,16 @@ typedef enum sched_class {
 #define THREAD_GUARD_PAGES 1u
 #define SCHED_CLASSES 4u
 
+/* A thread that enters ring 3 owns a user address window (phase U1). */
+#define THREAD_FLAG_USER 1u
+#define THREAD_USER_MAP_MAX 8u
+
+typedef struct thread_user_map {
+    u64 va;
+    u32 pages;
+    u32 pad;
+} thread_user_map;
+
 typedef struct wait_queue {
     struct thread *head;
     struct thread *tail;
@@ -51,14 +61,25 @@ typedef struct thread {
     wait_queue joiners;
     u64 wake_tick;
     i64 exit_code;
+    /* Ring 3 state; only meaningful when flags has THREAD_FLAG_USER. */
+    u64 user_rip;
+    u64 user_rsp;
+    u32 flags;
+    u32 user_map_count;
+    thread_user_map user_map[THREAD_USER_MAP_MAX];
 } thread;
 
 void sched_init(void);
 void sched_start(void);
 thread *thread_create(const char *name, void (*entry)(void *), void *arg,
                       sched_class cls);
+thread *thread_create_user(const char *name, u64 entry, u64 user_rsp,
+                           const thread_user_map *maps, u32 map_count,
+                           sched_class cls);
 int thread_join(thread *t);
+i64 thread_join_code(thread *t);
 void thread_exit(void) CRUG_NORETURN;
+void thread_kill_current(i64 code) CRUG_NORETURN;
 void sched_yield(void);
 void sched_tick(void);
 thread *sched_current(void);

@@ -108,6 +108,8 @@ u64 read_cr4(void);
 void write_cr4(u64 value);
 void cpu_early_init(void);
 void cpu_late_init(void);
+void cpu_set_kernel_stack(u64 top);
+u64 cpu_boot_stack_top(void);
 void cpu_halt_forever(void);
 
 #endif

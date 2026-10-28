@@ -1,6 +1,6 @@
 # Roadmap
 
-The specification defines 47 phases/gates. Phase 0 established the smallest
+The specification defines 48 phases/gates. Phase 0 established the smallest
 end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
 phase 1 makes the kernel own physical memory, page tables, exceptions and
 timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
@@ -965,13 +965,14 @@ change for memory management, storage, SMP or drivers.
 Phase H2 closed the heap free-list and magic work (report items F7/F8) with
 address-keyed page cookies, validated slab headers and a read-only integrity
 checker. Phase H3 then replaced the per-vector panic one-liner with a trap policy
-and put the four stack-destroying vectors on IST stacks, and phase H4 took the
-mount path to the host with a seeded image fuzzer. What remains is a per-thread
-`rsp0` and the rest of ring 3, a hook that kills a user thread instead of
-panicking, weak EFI entropy, and the AHCI timeout bounce reuse. Those are
-prerequisites for a hostile process: a DPL3 frame would reach the syscall and
-trap paths that the crafted-image gate only exercises from ring 0, and several
-of the remaining Mediums become Critical once one can call them directly.
+and put the four stack-destroying vectors on IST stacks, phase H4 took the
+mount path to the host with a seeded image fuzzer, and phase U1 crossed into
+ring 3, so a DPL3 frame now reaches the syscall and trap paths directly. What
+remains is a per-process address space (every program shares the kernel CR3, so
+two user programs are not isolated from each other yet), runtime `fork`/`exec`
+with `argv` and an environment, weak EFI entropy, and the AHCI timeout bounce
+reuse. Those are the prerequisites for running more than one program at a time,
+and several of the remaining Mediums stay reachable until then.
 
 ## Phase H2 - hardened kernel heap (done)
 
@@ -1148,6 +1149,80 @@ of the remaining Mediums become Critical once one can call them directly.
 - docs: `docs/fuzzing.md` plus README, roadmap, versioning, build, boot,
   hardening, traps and workbench.
 - All 47 gates pass at `v0.34.0`.
+
+## Phase U1 - ring 3 and the first user program (done)
+
+- Phase U1 is the specification's deliberately deferred "protected userspace"
+  milestone: ring 3 end to end, from a DPL3 segment pair to a fault that is
+  charged to the program instead of the kernel. It adds three freestanding ELF
+  programs under `/bin` and one more gate; the kernel image and the `BootInfo`
+  v1 handoff are unchanged.
+- `include/crug/segment.h`/`kernel/arch/x86_64/cpu.c` grow the GDT from five to
+  seven entries: kernel code/data at `0x08`/`0x10`, the 64-bit TSS at `0x18`,
+  ring-3 code at `0x2B` (`SEG_USER_CS`) and ring-3 data at `0x33`
+  (`SEG_USER_DS`). The TSS keeps the H3 IST1..IST4 stacks, and `rsp0` is now
+  per thread: `cpu_set_kernel_stack()` is its only writer and `schedule()`
+  installs the incoming thread's kernel stack top (kernel threads use the boot
+  stack top), so a trap from CPL3 always lands on a valid kernel stack.
+- `include/crug/vm.h` fixes the user window at `USER_BASE`
+  `0x0000008000000000` (512 GiB, PML4 slot 1) through `USER_TOP`
+  `0x0000010000000000` (1 TiB), above the supervisor-only identity map, so a
+  `U/S=1` leaf can only exist in that range. `kernel/mm/vm.c` adds
+  `vm_user_map_page`, `vm_user_map_pages` and `vm_user_unmap_pages`, which
+  create every intermediate PDPTE/PDE with `VM_USER`, strip `VM_GLOBAL` and take
+  W^X from the caller's flags (`VM_NX` on data pages).
+- `kernel/exec/elf_exec.c` (with `include/crug/exec.h`) loads `/bin/<name>`:
+  `ext4_read_file` into a 512 KiB (`ELF_MAX_BYTES`) kernel buffer, the same
+  `boot/efi/elf.c` parser the UEFI loader uses, then per-`PT_LOAD` reservation
+  with executable segments mapped read+execute and data segments
+  `VM_WRITE|VM_NX`. Contents are copied through `pmm_phys_to_virt`, never through
+  the user mapping, so SMAP cannot trip the loader; empty segments are ignored;
+  the stack is four pages below `USER_STACK_TOP` with an unmapped page under
+  it; `harden_user_segment_ok`/`harden_user_entry_ok` validate the segment,
+  entry and initial stack against the window.
+- `kernel/mm/uaccess.c` is the only path from the kernel to user memory:
+  `uaccess_check` is pure window arithmetic (`harden_user_range_ok`), a
+  page-table walk then reports `UACCESS_EFAULT` for an unmapped page instead of
+  taking a kernel `#PF`, and `stac`/`clac` bracket only the copy when CPUID
+  exposes SMAP. `uaccess_user_read`, `uaccess_user_write` and
+  `uaccess_user_str` are the three copy primitives.
+- `kernel/core/syscall.c` now serves both rings: `from_user()` tests
+  `frame->cs & 3`, CPL0 callers keep the identity-map path so the in-kernel
+  selftests are untouched, and CPL3 callers go through the bounce buffers.
+  `SYS_WRITE` (16) writes fd 1/2 from at most 4096 bytes in 256-byte chunks,
+  `SYS_MAX` is 17, `SYS_EBUSY` (-16) is new, and `SYS_EXIT` from CPL3 ends only
+  the calling thread.
+- `kernel/arch/x86_64/user.S`/`kernel/core/thread.c`: a `THREAD_FLAG_USER`
+  thread carries `user_rip`, `user_rsp` and up to `THREAD_USER_MAP_MAX` (8)
+  mapped regions; `thread_create_user()` returns `-EBUSY` for a second live user
+  thread, `thread_destroy()` unmaps the recorded pages, and `thread_user_start`
+  builds the `iretq` frame (`SS 0x33`, user `RSP`, `RFLAGS 0x202`, `CS 0x2B`,
+  entry `RIP`).
+- `kernel/arch/x86_64/idt.c`: a fault from CPL3 writes the H3 report and then
+  `CRUGOS: user fault <name> at rip=... err=... tid N` plus
+  `CRUGOS: user fault killed tid N code -<vector>`, killing only that thread via
+  `thread_kill_current()`. User `#DF`/`#NMI`/`#MC` and every CPL0 fault still
+  panic; the old `panic("user-mode <name>")` path is gone.
+- `user/` holds `hello.c`, `badptr.c` and `fault.c`, the `user.ld` linker script
+  (base `0x8000010000`, separate R+X text and R+W data `PT_LOAD`s) and the
+  freestanding runtime in `user/lib.h` (inline `int $0x80` wrappers, `nr` in
+  `rax`, arguments in `rdi`/`rsi`/`rdx`/`r10`). `make user` builds them,
+  `scripts/mkdisk.sh` reads `USER_DIR` from the environment and writes them into
+  `/bin`, and `disk` depends on `user`.
+- `kernel/core/user_test.c` parses `user.test=1` from the boot command line and
+  runs the three programs in sequence: `/bin/hello` exits 0, `/bin/badptr` gets
+  `-EFAULT` for a kernel pointer and exits 0, and `/bin/fault` dies with -14
+  after storing above the window. `make test-user` is the 48th gate: it rebuilds
+  the disk with the programs, boots with the token under `USER_RUN_TIMEOUT_SEC`
+  (240 s) and passes boot-check the new final `EXPECT_USER` argument, which
+  fails any other gate that prints a user marker.
+- `tests/host/test_uaccess.c` and `tests/host/test_exec.c` cover the window,
+  segment and entry validators, `uaccess_check` and the ELF segment policy;
+  `make test-host` reports 3470 checks, the kernel is 262760 B (256 KiB) on
+  disk and 831006 B (811 KiB) loaded.
+- docs: `docs/userspace.md` plus README, roadmap, versioning, build, boot, traps,
+  hardening, iso, fuzzing and workbench.
+- All 48 gates pass at `v0.35.0`.
 
 ## Bootable media - hybrid UEFI ISO (done, `v0.23.1`)
 
