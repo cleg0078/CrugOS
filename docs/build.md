@@ -1,6 +1,6 @@
 # Building CrugOS
 
-This document describes the phase 4C build system: how the kernel, the UEFI
+This document describes the phase 4D build system: how the kernel, the UEFI
 loader, the host crypto tool and the test disk images are built, which
 invariants the link must preserve, and how to diagnose the failure modes that
 are specific to this toolchain.
@@ -28,6 +28,7 @@ make run         # boot the ESP tree under QEMU + OVMF
 make test        # boot, verify markers/version/AVX2, then e2fsck the disk
 make test-net    # boot with a slirp virtio-net NIC and verify DHCP/ARP/ICMP
 make test-tcp    # TCP client/server and an HTTP exchange, both directions
+make test-net-dns  # resolve a name against a host DNS server over TCP
 make test-raid   # boot a two-member RAID1 root and check both members
 make test-raid10 # boot a four-member RAID10 root and check every member
 make test-nvme   # boot from an NVMe namespace and check the image
@@ -50,7 +51,7 @@ make test-crypt-keyboard  # type the passphrase on the PS/2 keyboard and boot
 make test-crypt-keyboard-wrong  # three wrong keyboard passphrases must lock the volume
 make crypt-run   # boot the encrypted disk in a QEMU window for real typing
 make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
-make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/IPv4/TCP/UDP checksums/DHCP parsing
+make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/IPv4/TCP/UDP checksums/DHCP parsing/DNS
 make disk        # build the GPT/ext4 test disk at build/<arch>/disk.img
 make raid-disks  # build the two GPT/ext4 RAID1 member disks
 make raid10-disks  # build the four GPT/ext4 RAID10 member disks
@@ -92,10 +93,15 @@ options` prints the complete resolved set (including paths derived from
 | `EXPECT_AES` | `any` | AES implementation the boot must report: `software`, `aes-ni` or `any` |
 | `EXPECT_NET` | `no` | `yes` requires the `make test-net` DHCP/ARP/ICMP markers (`no` skips them) |
 | `EXPECT_TCP` | `no` | `yes` requires the five `CRUGOS: tcp ...` markers written by `make test-tcp` |
+| `EXPECT_DNS` | `no` | `yes` requires the five `CRUGOS: dns ...` markers written by `make test-net-dns` |
 | `NET_MODE` | empty | `user` attaches a slirp user-mode virtio-net NIC (`-netdev user,id=net0`); empty means no NIC |
 | `NET_HOSTFWD` | empty | forwarded port for the slirp NIC, e.g. `tcp:127.0.0.1:<port>-:8080`; the `tcp:` protocol prefix is mandatory |
 | `TCP_SERVE_SEC` | `15` | how long the guest listener waits for the gate's connection (`net.serve=`) |
 | `TCP_RUN_TIMEOUT_SEC` | `180` | wall-clock budget for `make test-tcp` (the TCP boot is slower than a plain one) |
+| `DNS_NAME` | `crugos.test` | name the `make test-net-dns` boot resolves (`net.name=`) |
+| `DNS_ADDRESS` | `10.0.2.99` | address the gate's DNS server answers with |
+| `DNS_TTL` | `60` | TTL the gate's DNS server puts in its answer |
+| `DNS_RUN_TIMEOUT_SEC` | `180` | wall-clock budget for `make test-net-dns` |
 | `CRASH_IMG` | `$(BUILD)/crash.img` | crash-gate image (journal commit, no checkpoint) |
 | `CRASH_REPLAY_IMG` | `$(BUILD)/crash-replay.img` | copy the kernel replays on the second crash-gate boot |
 | `CC` | `crugc` | compiler for kernel and loader objects |
@@ -321,6 +327,15 @@ five `CRUGOS: tcp ...` markers (`EXPECT_TCP=yes`) and a clean `e2fsck`. The
 boot exits 33 on success and the driver prints
 `ok: tcp client/server http (N echo connection(s), M byte(s) fetched from the
 guest, exit 33)`.
+
+`make test-net-dns` adds the resolver: `scripts/run-net-dns.py` binds a TCP DNS
+responder on a free `127.0.0.1` port (the guest reaches it as `10.0.2.2`; slirp
+routes TCP there but not UDP), passes
+`net.dns=10.0.2.2:<port> net.dns-tcp=1 net.name=<host>` through
+`CMDLINE_EXTRA`, and requires the five `CRUGOS: dns ...` markers
+(`EXPECT_DNS=yes`), a `resolved <host> -> <address> via tcp` line, at least one
+query arriving at the server and a clean `e2fsck`. The driver prints
+`ok: dns resolve over tcp (N query(s), <host> -> <address>, exit 33)`.
 
 The supported ext4 subset, write path, checksum layout, journal format and
 failure modes are documented in [storage.md](storage.md) and

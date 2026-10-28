@@ -16,6 +16,7 @@
 #   make test-ahci   boot from a SATA (AHCI) disk and verify the disk
 #   make test-net    boot with a virtio-net NIC and verify DHCP/ARP/ICMP
 #   make test-tcp    boot TCP client/server + HTTP over virtio-net
+#   make test-net-dns  boot the DNS resolver against a host DNS server over TCP
 #   make crypt-disk  build the AES-256-XTS crypt test disk
 #   make test-crypt  boot from an encrypted root and verify the disk
 #   make test-crypt-recovery  unlock the encrypted root with the recovery keyslot
@@ -72,6 +73,7 @@ EXPECT_AHCI ?= no
 EXPECT_CRYPT ?= no
 EXPECT_AES ?= any
 EXPECT_NET ?= no
+EXPECT_DNS ?= no
 
 # QEMU / firmware options.
 MEMORY_MB ?= 512
@@ -83,6 +85,10 @@ QEMU_EXTRA ?=
 SERIAL_TCP ?=
 TCP_SERVE_SEC ?= 15
 TCP_RUN_TIMEOUT_SEC ?= 180
+DNS_NAME ?= crugos.test
+DNS_ADDRESS ?= 10.0.2.99
+DNS_TTL ?= 60
+DNS_RUN_TIMEOUT_SEC ?= 180
 NET_MODE ?=
 NET_HOSTFWD ?=
 OVMF_CODE ?= /usr/share/OVMF/OVMF_CODE_4M.fd
@@ -186,6 +192,7 @@ HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
         test-crypt test-crypt-recovery test-crypt-wrongkey test-crypt-tamper test-crypt-ni \
         test-crypt-prompt test-crypt-prompt-wrong test-crypt-prompt-timeout \
         test-crypt-keyboard test-crypt-keyboard-wrong crypt-run test-net test-tcp \
+        test-net-dns \
         crash-disk \
         check-disk size check-efi repro test-host preflight version options clean distclean help
 
@@ -337,6 +344,18 @@ test-tcp: esp
 		--exit-code $(abspath $(QEMU_EXIT)) --serve-seconds $(TCP_SERVE_SEC) \
 		--run-timeout $(TCP_RUN_TIMEOUT_SEC)
 	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" no no no no no any no yes
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
+# DNS gate: the driver is a hermetic DNS server on the slirp host loopback and
+# the guest resolves DNS_NAME over TCP (slirp does not route UDP to the host).
+test-net-dns: esp
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(PYTHON) scripts/run-net-dns.py --repo $(CURDIR) \
+		--disk $(abspath $(DISK_IMG)) --serial-log $(abspath $(SERIAL_LOG)) \
+		--exit-code $(abspath $(QEMU_EXIT)) --name $(DNS_NAME) \
+		--address $(DNS_ADDRESS) --ttl $(DNS_TTL) \
+		--run-timeout $(DNS_RUN_TIMEOUT_SEC)
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" no no no no no any no no yes
 	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 
 test:
@@ -519,10 +538,15 @@ options:
 	@printf '  %-16s %s\n' EXPECT_CRYPT "$(EXPECT_CRYPT)"
 	@printf '  %-16s %s\n' EXPECT_AES "$(EXPECT_AES)"
 	@printf '  %-16s %s\n' EXPECT_NET "$(EXPECT_NET)"
+	@printf '  %-16s %s\n' EXPECT_DNS "$(EXPECT_DNS)"
 	@printf '  %-16s %s\n' NET_MODE "$(NET_MODE)"
 	@printf '  %-16s %s\n' NET_HOSTFWD "$(NET_HOSTFWD)"
 	@printf '  %-16s %s\n' TCP_SERVE_SEC "$(TCP_SERVE_SEC)"
 	@printf '  %-16s %s\n' TCP_RUN_TIMEOUT_SEC "$(TCP_RUN_TIMEOUT_SEC)"
+	@printf '  %-16s %s\n' DNS_NAME "$(DNS_NAME)"
+	@printf '  %-16s %s\n' DNS_ADDRESS "$(DNS_ADDRESS)"
+	@printf '  %-16s %s\n' DNS_TTL "$(DNS_TTL)"
+	@printf '  %-16s %s\n' DNS_RUN_TIMEOUT_SEC "$(DNS_RUN_TIMEOUT_SEC)"
 	@printf '  %-16s %s\n' MEMORY_MB "$(MEMORY_MB)"
 	@printf '  %-16s %s\n' SMP "$(SMP)"
 	@printf '  %-16s %s\n' TIMEOUT_SEC "$(TIMEOUT_SEC)"

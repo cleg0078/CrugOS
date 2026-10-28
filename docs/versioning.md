@@ -1,10 +1,11 @@
 # Versioning
 
 CrugOS uses [Semantic Versioning 2.0.0](https://semver.org/) with annotated
-`vMAJOR.MINOR.PATCH` Git tags. The current release is `v0.17.0` (phase 4C: a
-minimal TCP transport behind `net.device` -- client, listener, an HTTP exchange
-in both directions and six socket syscalls, gated end to end against a host peer
--- on top of the phase 4B polled virtio-net driver with Ethernet, ARP, IPv4,
+`vMAJOR.MINOR.PATCH` Git tags. The current release is `v0.18.0` (phase 4D: a
+caching DNS stub resolver behind `net.device` -- a UDP query, a TCP fallback,
+CNAME chains, an eight-entry TTL cache and the `SYS_RESOLVE` syscall, gated end
+to end against a host DNS server over slirp -- on top of the phase 4C TCP
+transport, the phase 4B polled virtio-net driver with Ethernet, ARP, IPv4,
 ICMP echo, UDP and a DHCP client, the phase 4A PS/2 keyboard input and the
 phase 3B-10
 AES-256-XTS `crypt.device` with Argon2id keyslots, a checksummed crash-consistent filesystem over virtio-blk, NVMe, AHCI
@@ -65,6 +66,7 @@ make test-crypt-prompt test-crypt-prompt-wrong test-crypt-prompt-timeout  # cons
 make test-crypt-keyboard test-crypt-keyboard-wrong  # PS/2 keyboard unlock
 make test-net                    # virtio-net DHCP/ARP/ICMP boot gate
 make test-tcp                    # TCP client/server HTTP gate
+make test-net-dns                # DNS resolution over a host DNS server
 make size check-efi test-host repro
 make check-disk                  # e2fsck + persisted files on the test disk
 git add -A && git commit -m "release: vX.Y.Z"
@@ -91,5 +93,6 @@ git push origin main vX.Y.Z
 | `v0.13.0` | 2026-10-27 | phase 3B-9: `crypt.device` (GPT type `8f1c7d2e-...`, 16 KiB header, eight keyslots, AES-256-XTS data area with data-relative tweaks), Argon2id (RFC 9106) key derivation, 64-byte master key wrapped per slot with a keyed BLAKE2b-256 MAC and a recovery passphrase, AES-NI/software dispatch pinned to IEEE 1619 vector 10, loader `\crugos\cmdline.txt` with `crypt.pass=` plus redaction and key zeroization, `mkcrypt` host tool, `mkdisk.sh crypt` mode, and five encrypted-root gates; BootInfo stays v1 and the kernel ABI is unchanged |
 | `v0.14.0` | 2026-10-27 | phase 3B-10: masked serial-console passphrase prompt when the ESP carries no `crypt.pass=`, shared line editor (`kernel/lib/lineedit.c`) with CR/LF, backspace, Ctrl-C and overflow handling, three attempts bounded by `crypt.prompt_timeout=`, fail-closed `crypt locked` markers, `SERIAL_TCP` serial capture and the `run-crypt-prompt.py` driver behind three new gates (correct, wrong, timeout); BootInfo stays v1 and the kernel ABI is unchanged |
 | `v0.15.0` | 2026-10-27 | phase 4A: `input.device` (set-1 scancode decoder, Shift/Ctrl/Alt/Caps state, US layout, control-code mapping, 64-byte queue), polled i8042 keyboard driver, `console_try_getc()` merging serial and keyboard input, `CRUGOS: input ready (serial + keyboard)` marker and console prompt wording, QMP `send-key` driver (`run-crypt-keyboard.py`) behind two new keyboard gates and 903 host checks; BootInfo stays v1 and the kernel ABI is unchanged |
+| `v0.18.0` | 2026-10-28 | phase 4D: caching DNS stub resolver (`kernel/net/dns.c`: UDP query to `net.dns=` or the DHCP server address, TCP retry with the two-byte length prefix on truncation or timeout, strictly-backwards compression-pointer walking with 16-hop and 128-byte caps, up to four CNAME aliases, eight-entry TTL cache keyed by the lowercased name), `dns_build_query`/`dns_parse_response`/`dns_decode_name`/`dns_skip_name` wire helpers, `net.dns=`/`net.dns-tcp=`/`net.name=` command-line tokens, `SYS_RESOLVE` (15), `dns_selftest()` with `CRUGOS: dns ...` markers, `scripts/run-net-dns.py` hermetic DNS-over-TCP responder behind `make test-net-dns`, `EXPECT_DNS` boot-check markers and 1042 host checks; BootInfo stays v1 and the kernel ABI is unchanged |
 | `v0.17.0` | 2026-10-27 | phase 4C: TCP transport (`kernel/net/tcp.c`: four sockets, 1400-byte segments, 4 KiB receive rings, connect with bounded SYN retries, listen/accept, send with bounded retransmission, in-order receive, close), `tcp_selftest()` client/listener HTTP exchange selected by `net.tcp=`/`net.serve=`, six socket syscalls (`SYS_SOCKET_CONNECT/SEND/RECV/CLOSE/LISTEN/ACCEPT`, typed handles), `scripts/run-net-tcp.py` with a slirp responder and a QEMU host forward behind `make test-tcp`, `EXPECT_TCP` boot-check markers and 943 host checks; BootInfo stays v1 and the kernel ABI is unchanged |
 | `v0.16.0` | 2026-10-27 | phase 4B: net.device registry and net_config, legacy virtio-net PCI driver (VIRTIO_NET_F_MAC only, 32 pre-posted 2 KiB RX buffers on queue 0, one 2 KiB TX bounce buffer on queue 1 with a 500 ms completion wait, up to four polled eth0..eth3), Ethernet framing with 60-byte padding and a MAC/broadcast filter, ARP cache with request/reply and resolution retries, IPv4 header checksum validation, ICMP echo, UDP with a transmit pseudo-header checksum, DHCP client (DISCOVER/OFFER/REQUEST/ACK, three attempts, options 53/55/50/54, mask/router/DNS), net_selftest() boot gate, QEMU slirp wiring (NET_MODE=user) behind make test-net and 938 host checks; BootInfo stays v1 and the kernel ABI is unchanged |

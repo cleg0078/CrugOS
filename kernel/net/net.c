@@ -46,6 +46,8 @@ void net_init(const boot_info *bi)
     memset(g_udp, 0, sizeof(g_udp));
     tcp_init();
     tcp_cmdline(bi);
+    dns_init();
+    dns_cmdline(bi);
     dhcp_init();
     virtio_net_init();
 }
@@ -481,6 +483,15 @@ int net_selftest(void)
         kprintf("CRUGOS: net selftest failed (tcp)\n");
         return 0;
     }
+    if (!dns_selftest()) {
+        kprintf("CRUGOS: net selftest failed (dns)\n");
+        return 0;
+    }
     kprintf("CRUGOS: net selftest ok\n");
     return 1;
+}
+
+int net_arp_resolve(u32 ip, u8 mac[NET_MAC_LEN], u32 timeout_ms)
+{
+    return arp_resolve(ip, mac, timeout_ms);
 }

@@ -1,4 +1,4 @@
-/* CrugOS single syscall dispatcher (phase 4C: adds the socket calls). */
+/* CrugOS single syscall dispatcher (phase 4D: adds the name resolver). */
 #ifndef CRUG_SYSCALL_H
 #define CRUG_SYSCALL_H
 
@@ -20,7 +20,8 @@
 #define SYS_SOCKET_CLOSE 12u
 #define SYS_SOCKET_LISTEN 13u
 #define SYS_SOCKET_ACCEPT 14u
-#define SYS_MAX 15u
+#define SYS_RESOLVE 15u
+#define SYS_MAX 16u
 
 #define SYS_EINVAL (-22ll)
 #define SYS_ENOSYS (-38ll)
@@ -37,5 +38,8 @@ int syscall_selftest(void);
 
 /* Socket path self-test: connect, send, receive and close through int 0x80. */
 int syscall_socket_selftest(u32 ip, u16 port);
+
+/* Resolver path self-test: resolve HOST through int 0x80 and expect ADDR. */
+int syscall_resolve_selftest(const char *host, u32 addr);
 
 #endif /* CRUG_SYSCALL_H */

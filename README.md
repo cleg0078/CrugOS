@@ -8,15 +8,17 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 4C TCP and sockets (`v0.17.0`)
+## Status: phase 4D DNS resolver (`v0.18.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
 striped RAID roots that can rebuild a replacement member, an AES-256-XTS
 encrypted root that can be unlocked with a passphrase typed on the console,
 and three storage transports; phase 4A adds console input from a PS/2 keyboard,
-phase 4B adds a small IPv4 stack over a virtio-net NIC, and phase 4C extends it
-with TCP, an HTTP exchange in both directions and six socket syscalls:
+phase 4B adds a small IPv4 stack over a virtio-net NIC, phase 4C extends it
+with TCP, an HTTP exchange in both directions and six socket syscalls, and
+phase 4D adds a caching DNS stub resolver with a TCP fallback and a name
+syscall:
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -294,6 +296,22 @@ Phase 4C adds TCP and a socket path on top of that stack:
   forward, so both directions are exercised end to end before `e2fsck` checks
   the disk. See [network.md](docs/network.md).
 
+Phase 4D adds name resolution on top of that stack:
+
+- a caching stub resolver (`kernel/net/dns.c`): a UDP query to `net.dns=` (or
+  the DHCP server address) and a TCP retry with the two-byte length prefix when
+  the answer is truncated or the UDP leg times out; compression pointers must
+  walk strictly backwards, up to four CNAME aliases are followed, and an
+  eight-entry TTL cache answers repeats;
+- `dns_selftest()` runs after the TCP checks and is skipped unless the loader
+  command line carries `net.name=<host>`; `net.dns=<ip>[:port]` picks the
+  server and `net.dns-tcp=1` forces the stream transport;
+- `SYS_RESOLVE` (15) resolves a name with a 3000 ms budget and returns the
+  first address to the caller;
+- `make test-net-dns` runs `scripts/run-net-dns.py`, a hermetic DNS-over-TCP
+  responder on the host loopback that slirp reaches as `10.0.2.2`, then checks
+  the disk with `e2fsck`. See [network.md](docs/network.md).
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -302,9 +320,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.17.0 (phase 4c) -- Amiga-inspired microkernel bring-up
+CrugOS 0.18.0 (phase 4d) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.17.0
+CRUGOS: version 0.18.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -361,7 +379,7 @@ heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
 boot   : pmm=28552 us cpu=438 us vm=626 us traps=360 us timer=65357 us heap=60 us storage=94487 us sched=354 us syscall=122 us total=190359 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase 4c boot ok
+CRUGOS: phase 4d boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -374,6 +392,18 @@ own. `storage: no GPT on sda` is expected: `sda` is the firmware's ESP disk and
 the test volume is the virtio disk `vda`. Argon2id dominates the encrypted gates
 instead (`m=4096 KiB, t=3`, about 230 ms of storage stage), and the unencrypted
 gates such as this one boot in about 190 ms.
+
+The DNS gate (`make test-net-dns`) swaps the HTTP exchange for a name
+resolution boot (the guest resolves over TCP, so the TCP lines are absent and
+only the resolver lines appear):
+
+```
+CRUGOS: dns server 10.0.2.2:60901 (tcp)
+CRUGOS: dns resolved crugos.test -> 10.0.2.99 via tcp (ttl 60)
+CRUGOS: dns cache hit crugos.test -> 10.0.2.99
+CRUGOS: dns socket syscall ok
+CRUGOS: dns selftest ok
+```
 
 ## Quick start
 
@@ -406,8 +436,9 @@ make crypt-run   # boot the encrypted disk in a QEMU window and type it
 make run         # boot and keep the serial log for inspection
 make test-net    # boot with a virtio-net NIC and verify DHCP/ARP/ICMP
 make test-tcp    # TCP client/server plus an HTTP exchange against a host peer
+make test-net-dns  # resolve a name against a host DNS server over TCP
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
-make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, IPv4 checksums, DHCP parsing)
+make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, IPv4 checksums, DHCP parsing, DNS)
 make check-disk  # e2fsck + persisted-file checks on the latest test disk
 make disk        # generate the GPT/ext4 test disk
 make raid-disks  # generate the two RAID1 member disks
@@ -429,8 +460,9 @@ default in the makefile; `make options` prints the full resolved set. Useful
 variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `QEMU_DISPLAY`, `QEMU_EXTRA`, `OVMF_CODE`, `OVMF_VARS`, `REQUIRE_AVX2`,
 `EXPECT_AVX2`, `EXPECT_RAID`, `EXPECT_NVME`, `EXPECT_REBUILD`, `EXPECT_AHCI`,
-`EXPECT_CRYPT`, `EXPECT_AES`, `EXPECT_NET`, `EXPECT_TCP`, `NET_MODE`,
-`NET_HOSTFWD`, `TCP_SERVE_SEC`, `TCP_RUN_TIMEOUT_SEC`, `NVME_IMG`, `AHCI_IMG`,
+`EXPECT_CRYPT`, `EXPECT_AES`, `EXPECT_NET`, `EXPECT_TCP`, `EXPECT_DNS`,
+`NET_MODE`, `NET_HOSTFWD`, `TCP_SERVE_SEC`, `TCP_RUN_TIMEOUT_SEC`, `DNS_NAME`,
+`DNS_ADDRESS`, `DNS_TTL`, `DNS_RUN_TIMEOUT_SEC`, `NVME_IMG`, `AHCI_IMG`,
 `CRYPT_IMG`,
 `CRYPT_TAMPER_IMG`, `CRYPT_PASS`, `CRYPT_RECOVERY_PASS`, `CRYPT_M`,
 `CRYPT_PROMPT_TIMEOUT_SEC`, `CRYPT_PROMPT_WRONG_PASS`, `CRYPT_RUN_DISPLAY`,
@@ -447,7 +479,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/core/` | kernel entry, console, printf, panic, self-tests, scheduler, handles, MsgPort, syscall dispatcher, boot report |
 | `kernel/lib/` | freestanding string, formatting, bitmap and console line-editor routines |
 | `kernel/input/` | `input.device`: set-1 scancode decoder and the console byte queue |
-| `kernel/net/` | `net.device`, Ethernet/ARP/IPv4/ICMP/UDP, TCP and the DHCP client |
+| `kernel/net/` | `net.device`, Ethernet/ARP/IPv4/ICMP/UDP, TCP, the DHCP client and the DNS resolver |
 | `kernel/mm/` | physical allocator, W^X page tables, kernel heap |
 | `kernel/block/` | block-device registry, partitions, bounds checks, RAID1/RAID10, boot-time rebuild and the AES-256-XTS `crypt.device` |
 | `kernel/fs/` | GPT, writable checksummed ext4, checksummed JBD2 journal and the storage boot policy (including the console passphrase prompt) |
@@ -512,11 +544,14 @@ a small IPv4 stack (`net.device`: Ethernet, ARP, IPv4, ICMP echo, UDP) with a
 DHCP client and a boot self-test that leases, resolves and pings the gateway;
 phase 4C added a minimal TCP transport with a client, a listener, an HTTP
 exchange in both directions and six socket syscalls, gated end to end by a host
-peer over slirp and a QEMU host forward. Remaining phase 3B work is online RAID rebuild, hot spare, scrub and a
+peer over slirp and a QEMU host forward; phase 4D added a caching DNS stub
+resolver with a UDP query, a TCP fallback, CNAME chains, a TTL cache and the
+`SYS_RESOLVE` syscall, gated against a hermetic host DNS server. Remaining
+phase 3B work is online RAID rebuild, hot spare, scrub and a
 write-intent bitmap, RAID below encryption, a redundant ESP, TPM/keyfile
 keyslots and USB storage/hotplug; phase 4 continues with framebuffer (GOP)
-console input, a USB HID keyboard and virtual terminals, plus a DNS resolver, a
-routing table and richer socket semantics on top of the phase 4B/4C stack. Later phases
+console input, a USB HID keyboard and virtual terminals, plus a routing table
+and richer resolver features on top of the phase 4B-4D stack. Later phases
 cover USB/audio/graphics, Workbench userspace, SMP/IOMMU and virtualisation. See
 [docs/roadmap.md](docs/roadmap.md) for the full sequence and the known
 specification gaps (Crug syntax, cross-architecture compilers and the OVMF

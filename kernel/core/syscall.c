@@ -200,6 +200,22 @@ void syscall_dispatch(trap_frame *frame)
         ret = syscall_socket_handle(table, s);
         break;
     }
+    case SYS_RESOLVE: {
+        struct net_dns_answer answer;
+        const char *name = (const char *)(uintptr)frame->rdi;
+
+        if (!name || !frame->rsi) {
+            ret = SYS_EINVAL;
+            break;
+        }
+        if (net_dns_resolve(name, &answer, 3000u) != 0 || answer.count == 0u) {
+            ret = SYS_EIO;
+            break;
+        }
+        *(u32 *)(uintptr)frame->rsi = answer.addr[0];
+        ret = 0;
+        break;
+    }
     case SYS_EXIT:
         thread_exit();
         ret = 0;
@@ -286,6 +302,17 @@ int syscall_socket_selftest(u32 ip, u16 port)
     if (syscall1(SYS_SOCKET_CLOSE, (u64)h) != 0)
         return -1;
     return ok ? 0 : -1;
+}
+
+int syscall_resolve_selftest(const char *host, u32 addr)
+{
+    u32 out = 0;
+
+    if (!host)
+        return -1;
+    if (syscall2(SYS_RESOLVE, (u64)(uintptr)host, (u64)(uintptr)&out) != 0)
+        return -1;
+    return out == addr ? 0 : -1;
 }
 
 int syscall_selftest(void)

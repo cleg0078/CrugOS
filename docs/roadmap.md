@@ -18,7 +18,8 @@ the serial console; phase 4A adds a polled PS/2 keyboard whose scancodes feed
 `input.device` and a merged console read path; phase 4B brings up IPv4 over a
 polled virtio-net NIC, with a DHCP lease, ARP resolution and an ICMP echo
 self-test; phase 4C adds a minimal TCP transport with a client, a listener, an
-HTTP exchange in both directions and six socket syscalls.
+HTTP exchange in both directions and six socket syscalls; phase 4D adds a
+caching DNS stub resolver with a UDP query, a TCP fallback and a name syscall.
 Every later phase keeps the same BootInfo contract, so the loader does not
 change for memory management, storage, SMP or drivers.
 
@@ -340,6 +341,27 @@ change for memory management, storage, SMP or drivers.
   test-host` covers TCP and UDP checksums (943 checks).
 - All 29 gates pass at `v0.17.0`.
 
+## Phase 4D - DNS resolver (done)
+
+- Caching stub resolver (`kernel/net/dns.c`): a UDP query to `net.dns=` (or the
+  address from DHCP option 6) and a TCP retry with the two-byte length prefix
+  when the answer is truncated or the UDP leg times out.
+- Wire handling: `dns_build_query()`, `dns_parse_response()` (id, `QR` and
+  rcode checks, `-2` on `TC`), `dns_decode_name()` (compression pointers must
+  walk strictly backwards, 16-hop and 128-byte caps) and `dns_skip_name()` (a
+  compressed field ends at `p+2`, keeping the following records aligned).
+- Up to four CNAME aliases per lookup and an eight-entry TTL cache keyed by the
+  lowercased name (TTL clamped to 86400 s), emptied by `dns_cache_flush()`.
+- `SYS_RESOLVE` (15) resolves a name with a 3000 ms budget into a `u32 *`.
+- `dns_selftest()` inside `net_selftest()` resolves `net.name=` over the
+  configured transport, repeats the lookup from the cache and exercises the
+  syscall; it is skipped without `net.name=`.
+- `make test-net-dns` runs `scripts/run-net-dns.py` (a hermetic DNS-over-TCP
+  responder on the host loopback), `scripts/boot-check.py` takes
+  `EXPECT_DNS=yes`, and `make test-host` covers query building, name walking,
+  parsing and the cache (1042 checks).
+- All 30 gates pass at `v0.18.0`.
+
 ## Phase 3B - remaining storage work
 
 - Journal wrapping, revoke records and orphan-file recovery.
@@ -358,9 +380,10 @@ change for memory management, storage, SMP or drivers.
 
 - xHCI USB, HID, UAC2 audio (phase 4A delivered the PS/2 console input step,
   phase 4B the virtio-net/IPv4 slice and phase 4C the TCP/socket slice).
-- A DNS resolver and a routing table on top of the phase 4B/4C stack, richer
-  socket semantics (bind, options, non-blocking, more than four sockets); IPv6,
-  fragmentation and reassembly.
+- A routing table and richer resolver features (multiple servers, DNSSEC
+  validation, AAAA/PTR/SRV, search domains, negative caching) on top of the
+  phase 4B-4D stack, richer socket semantics (bind, options, non-blocking, more
+  than four sockets); IPv6, fragmentation and reassembly.
 - Software framebuffer -> VirtIO-GPU -> vendor GPU drivers.
 - Workbench userspace, `.app` bundles, `.crpkg` packages, capability model.
 - POSIX-like layer: 64-bit UID/GID, ACLs, process groups, signals.

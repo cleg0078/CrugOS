@@ -35,10 +35,11 @@ OVMF (UEFI firmware)
 `include/crug/bootinfo.h` is the single contract between loader and kernel.
 The structure is versioned (`magic = 0x43524731`, `version = 1`) and the kernel
 refuses to boot if either does not match or if required fields are invalid.
-Phases 1 through 4C did not change the layout; phase 3B-9 is the first
+Phases 1 through 4D did not change the layout; phase 3B-9 is the first
 kernel to consume the `command_line` field, phase 3B-10 falls back to an
-interactive serial passphrase prompt when no token is present, and phase 4C
-reads the non-secret `net.tcp=` / `net.serve=` tokens from the same field. The loader caps
+interactive serial passphrase prompt when no token is present, and phases 4C and
+4D read the non-secret `net.tcp=` / `net.serve=` / `net.dns=` /
+`net.dns-tcp=` / `net.name=` tokens from the same field. The loader caps
 the command line at 511 bytes and the kernel wipes the page after it copies the
 `crypt.pass=` value.
 
@@ -102,7 +103,9 @@ post-snapshot allocations cannot push it over capacity.
 9. `net_init`: reset `net.device` and `tcp_init`, then probe legacy virtio-net
    PCI functions (up to four `eth0`..`eth3`) and register them, bind the DHCP
    client to UDP port 68 and read the `net.tcp=<port>` / `net.serve=<seconds>`
-   command-line tokens through `tcp_cmdline`. The boot prints
+   command-line tokens through `tcp_cmdline`; `dns_init` empties the resolver
+   cache and binds UDP port 53000, and `dns_cmdline` reads `net.dns=<ip>[:port]`,
+   `net.dns-tcp=1` and `net.name=<host>`. The boot prints
    `CRUGOS: net ready (N device(s))`. The network self-test runs later, with the
    other self-tests.
 10. `storage_init`: `block_init`, the legacy virtio-blk devices, then the
@@ -154,9 +157,11 @@ post-snapshot allocations cannot push it over capacity.
     and syscalls, then the network self-test (DHCP lease, ARP, ICMP echo) when a
     NIC is present, followed by the TCP checks (listen on 8080, HTTP client leg
     against `net.tcp=`, the same exchange through the socket syscalls, and one
-    served request bounded by `net.serve=`) when that token was supplied.
+    served request bounded by `net.serve=`) when that token was supplied, then
+    the DNS checks (resolve `net.name=`, a cached second lookup and the
+    `SYS_RESOLVE` path) when a name was supplied.
 14. `report_boot`, `storage_lock` (wipes the passphrase, the volume keys and
-    the bounce buffer), `CRUGOS: phase 4c boot ok`, `arch_exit_qemu(0x10)`.
+    the bounce buffer), `CRUGOS: phase 4d boot ok`, `arch_exit_qemu(0x10)`.
 
 Storage is still brought up with interrupts disabled: the virtio driver polls
 its used ring, the NVMe driver polls completion queues and the AHCI driver polls
@@ -345,9 +350,14 @@ CRUGOS: tcp connect ok (10.0.2.2:52847)
 CRUGOS: tcp http ok (53 bytes)
 CRUGOS: tcp socket syscall ok
 CRUGOS: tcp http served (72 bytes)
+CRUGOS: dns server 10.0.2.2:53 (udp)      # only with net.name= on the command line
+CRUGOS: dns resolved crugos.test -> 10.0.2.99 via tcp (ttl 60)
+CRUGOS: dns cache hit crugos.test -> 10.0.2.99
+CRUGOS: dns socket syscall ok
+CRUGOS: dns selftest ok
 CRUGOS: net selftest ok
 CRUGOS: selftest ok
-CRUGOS: phase 4c boot ok
+CRUGOS: phase 4d boot ok
 ```
 
 The `virtio : net eth0 mac ...` line, the lease, the ARP resolution, the echo
@@ -358,8 +368,10 @@ user-mode NIC whose DHCP server hands out `10.0.2.15/24` and whose gateway
 `10.0.2.2` answers ARP and echo. The five `tcp` lines appear only when the
 loader command line carried `net.tcp=<port>`: `make test-tcp` runs
 `scripts/run-net-tcp.py`, which answers the guest over slirp's host loopback and
-fetches the guest listener through a QEMU host forward. See
-[network.md](network.md).
+fetches the guest listener through a QEMU host forward. The five `dns` lines
+appear only when the loader carried `net.name=<host>`; `make test-net-dns` runs
+`scripts/run-net-dns.py`, which answers DNS over TCP on the host loopback and
+reaches the guest through slirp. See [network.md](network.md).
 
 `raid ready` and `raid healthy`/`raid degraded` appear only on the RAID
 root path, and the `crypt` lines only on the encrypted path; the single-disk

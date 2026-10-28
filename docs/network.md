@@ -1,17 +1,19 @@
-# Networking: net.device, virtio-net, IPv4 and TCP
+# Networking: net.device, virtio-net, IPv4, TCP and DNS
 
 The kernel owns a small IPv4 stack behind a device-neutral `net.device` layer.
 Phase 4B delivered the first slice of the specification's Phase 4 networking
 gate: a legacy virtio-net NIC, Ethernet framing, ARP, IPv4, ICMP echo, UDP and a
 DHCP client. Phase 4C adds a minimal TCP transport (`kernel/net/tcp.c`) with a
 client, a listener, an HTTP exchange in both directions and six socket
-syscalls, all exercised by a boot self-test against QEMU user-mode networking
-(slirp). A DNS resolver is the next increment.
+syscalls. Phase 4D adds a caching DNS stub resolver (`kernel/net/dns.c`) with a
+UDP query, a TCP fallback and a seventh syscall. Every slice is exercised by a
+boot self-test against QEMU user-mode networking (slirp).
 
 ```
    DHCP client    ICMP echo    TCP client/server (six socket syscalls)
         |              |              |
-        +--------------+--------------+
+        +--------------+--------------+-------- DNS resolver
+                       |                     (UDP query, TCP fallback, cache)
                        v
              net_udp_send / net_ipv4_send_raw / net_eth_send
                       |
@@ -223,6 +225,45 @@ typed handles (`HANDLE_SOCKET`) in the process handle table:
 handle. There is no `bind`, no address struct and no non-blocking mode: the
 queue length, addresses and timeouts are fixed in the kernel.
 
+## DNS resolver
+
+`kernel/net/dns.c` is a caching stub resolver. It owns no transport of its own:
+a query is a UDP datagram to the server named by `net.dns=` (or the address in
+option 6 of the DHCP lease) and, when the answer is truncated or the UDP leg
+times out, the same query is retried over TCP with the two-byte length prefix
+from RFC 1035.
+
+- **Wire format.** `dns_build_query()` writes a 12-byte header (recursion
+  desired, one question) followed by the name in label form and `QTYPE=A`,
+  `QCLASS=IN`. `dns_parse_response()` checks the id, the `QR` bit and
+  `RCODE=0`, and returns `-2` when `TC` is set so the caller can fall back to
+  TCP.
+- **Name compression.** `dns_decode_name()` follows pointers that must walk
+  strictly backwards, caps the walk at 16 hops and the decoded name at
+  `NET_DNS_NAME_MAX` (128 bytes). `dns_skip_name()` ends a compressed field at
+  `p+2`, which keeps the following records aligned.
+- **CNAME chains.** Up to `NET_DNS_MAX_CNAME` (4) aliases are followed; the
+  final address, not the alias, is cached under the name the caller asked for.
+- **Cache.** Eight entries (`NET_DNS_CACHE`) keyed by the lowercased name with
+  trailing dots stripped, each holding up to `NET_DNS_MAX_ADDRS` (4) addresses
+  and a TTL clamped to 86400 s. `dns_cache_flush()` empties it.
+- **Command line.** `dns_cmdline()` reads `net.dns=<ip>[:port]`,
+  `net.dns-tcp=1` (skip UDP) and `net.name=<host>`; all three are non-secret
+  and travel in `BootInfo`.
+- **Syscall.** `SYS_RESOLVE` (15) takes a name and a `u32 *`, resolves with a
+  3000 ms budget and stores the first address.
+
+`dns_selftest()` runs inside `net_selftest()` after the TCP leg and is skipped
+unless the command line carried `net.name=`:
+
+```
+CRUGOS: dns server 10.0.2.2:53 (udp)
+CRUGOS: dns resolved crugos.test -> 10.0.2.99 via tcp (ttl 60)
+CRUGOS: dns cache hit crugos.test -> 10.0.2.99
+CRUGOS: dns socket syscall ok
+CRUGOS: dns selftest ok
+```
+
 ## Boot integration
 
 `kernel/core/main.c` probes the stack right after `input_init()`:
@@ -239,9 +280,10 @@ CRUGOS: net ready (1 device(s))
   passes, so an ordinary boot without a NIC stays green;
 - `dhcp_acquire(1000 ms)`, `arp_resolve(gateway, 3000 ms)` and
   `icmp_ping(gateway, seq 1, 3000 ms)`; then `tcp_selftest()`, which is skipped
-  unless the loader command line carries `net.tcp=<port>`; failures print
+  unless the loader command line carries `net.tcp=<port>`, and `dns_selftest()`,
+  which is skipped unless it carries `net.name=<host>`; failures print
   `CRUGOS: net selftest failed (dhcp|arp|icmp|tcp listen|tcp connect|tcp http|
-  tcp socket|tcp serve)` and the kernel panics with `selftest: network`.
+  tcp socket|tcp serve|dns)` and the kernel panics with `selftest: network`.
 
 A healthy gate prints:
 
@@ -255,12 +297,18 @@ CRUGOS: tcp connect ok (10.0.2.2:52847)
 CRUGOS: tcp http ok (53 bytes)
 CRUGOS: tcp socket syscall ok
 CRUGOS: tcp http served (72 bytes)
+CRUGOS: dns server 10.0.2.2:53 (udp)
+CRUGOS: dns resolved crugos.test -> 10.0.2.99 via tcp (ttl 60)
+CRUGOS: dns cache hit crugos.test -> 10.0.2.99
+CRUGOS: dns socket syscall ok
+CRUGOS: dns selftest ok
 CRUGOS: net selftest ok
 ```
 
-The TCP lines appear only in a gate that passes `net.tcp=`; an ordinary
-`make test` or `make test-net` boot has no `tcp listen` line and stays green.
-The boot ends with `CRUGOS: phase 4c boot ok`.
+The TCP lines appear only in a gate that passes `net.tcp=` and the DNS lines
+only in one that passes `net.name=`; an ordinary `make test` or
+`make test-net` boot has neither and stays green.
+The boot ends with `CRUGOS: phase 4d boot ok`.
 
 ## QEMU wiring
 
@@ -291,7 +339,8 @@ the guest's own listener. `run-qemu.sh` maps that variable to
 | `make test` | No NIC: the stack is skipped, all earlier markers still pass |
 | `make test-net` | slirp NIC: DHCP lease, gateway ARP, one ICMP echo, then `e2fsck` on the disk |
 | `make test-tcp` | A responding host peer plus a host fetch of the guest listener: two client connections complete an HTTP exchange, the socket syscalls work, the guest serves one request, then `e2fsck` |
-| `make test-host` | Wire helpers, RFC 1071 checksums, TCP/UDP checksums, DHCP option parsing (943 checks) |
+| `make test-net-dns` | A host DNS server reachable over slirp: one name resolves over TCP, the second lookup hits the cache and the socket syscall returns the same address, then `e2fsck` |
+| `make test-host` | Wire helpers, RFC 1071 checksums, TCP/UDP checksums, DHCP option parsing, DNS name walking/compression/cache (1042 checks) |
 
 `make test-net` runs the guest with `NET_MODE=user` and passes
 `EXPECT_NET=yes` to `scripts/boot-check.py`, which then requires
@@ -299,12 +348,19 @@ the guest's own listener. `run-qemu.sh` maps that variable to
 address/sequence shapes. `make test-tcp` adds `EXPECT_TCP=yes`, which requires
 the five `CRUGOS: tcp ...` lines with `(port N)`, `(a.b.c.d:port)`,
 `(N bytes)` and `(N bytes)` shapes, and the driver exits 0 only when both
-legs succeeded (`ok: tcp client/server http`).
+legs succeeded (`ok: tcp client/server http`). `make test-net-dns` runs
+`scripts/run-net-dns.py`, which answers DNS over TCP on the host loopback
+(slirp routes TCP to `10.0.2.2` but not UDP), passes
+`net.dns=10.0.2.2:<port> net.dns-tcp=1 net.name=<host>` to the guest and asks
+`boot-check.py` for `EXPECT_DNS=yes`, which requires the five `CRUGOS: dns ...`
+lines and a `resolved <name> -> <address> via tcp` shape.
 
 ## Known limits
 
-- No DNS resolver, no IPv6, no fragmentation or reassembly, no ICMP errors and
-  no routing table. TCP is an in-order bring-up transport: no options beyond the
+- No IPv6, no fragmentation or reassembly, no ICMP errors and no routing
+  table. The resolver is a stub: it asks one server, does no DNSSEC or DNSSEC
+  validation, no AAAA/PTR/SRV records, no search domains and no negative
+  caching. TCP is an in-order bring-up transport: no options beyond the
   fixed header, no congestion control, no SACK, no TIME_WAIT timer (the slot is
   reclaimed immediately), no window probing, out-of-order segments are dropped
   rather than buffered, and the ISN is not randomized to cryptographic quality.

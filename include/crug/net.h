@@ -29,6 +29,15 @@
 #define NET_TCP_DEFAULT_HTTP_PORT 8080u
 #define NET_TCP_RETRIES 5u
 
+/* DNS (phase 4D): a caching stub resolver over UDP with a TCP fallback. */
+#define NET_DNS_PORT 53u
+#define NET_DNS_LOCAL_PORT 53000u
+#define NET_DNS_MSG_MAX 512u
+#define NET_DNS_NAME_MAX 128u
+#define NET_DNS_CACHE 8u
+#define NET_DNS_MAX_ADDRS 4u
+#define NET_DNS_MAX_CNAME 4u
+
 enum net_tcp_state {
     NET_TCP_CLOSED = 0,
     NET_TCP_LISTEN,
@@ -175,6 +184,25 @@ int tcp_send(struct net_tcp_socket *s, const void *data, usize len);
 int tcp_recv(struct net_tcp_socket *s, void *data, usize len, u32 timeout_ms);
 int tcp_close(struct net_tcp_socket *s, u32 timeout_ms);
 int tcp_selftest(void);
+
+/* DNS resolver, kernel/net/dns.c. */
+struct net_dns_answer {
+    u32 addr[NET_DNS_MAX_ADDRS];
+    u32 count;
+    u32 ttl;
+};
+
+void dns_init(void);
+void dns_cmdline(const boot_info *bi);
+void dns_cache_flush(void);
+int net_dns_resolve(const char *name, struct net_dns_answer *answer, u32 timeout_ms);
+const char *net_dns_transport(void);
+int dns_selftest(void);
+usize dns_build_query(const char *name, u16 id, u8 *out, usize cap);
+int dns_parse_response(const u8 *msg, usize len, u16 id,
+                       struct net_dns_answer *answer, char *cname, usize cname_cap);
+usize dns_decode_name(const u8 *msg, usize len, usize pos, char *out, usize cap);
+int net_arp_resolve(u32 ip, u8 mac[NET_MAC_LEN], u32 timeout_ms);
 
 void dhcp_init(void);
 int dhcp_acquire(u32 timeout_ms, struct net_config *config);
