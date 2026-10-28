@@ -104,8 +104,9 @@ static void test_intuition_basics(void)
     /* Each open and close repaints every window bottom to top: 1+2+3+4 on the
      * four opens, then 3 and 2 as the two windows close, so 15 window draws.
      * Every draw frames the window itself, its close box (phase 6B), its depth
-     * box (phase 6E) and its resize grip (phase 6D): four frames per draw. */
-    CHECK(g_frame_calls == 60u);
+     * box (phase 6E), its front box (phase 6F) and its resize grip (phase 6D):
+     * five frames per draw. */
+    CHECK(g_frame_calls == 75u);
 }
 
 static void test_intuition_no_framebuffer(void)
@@ -915,6 +916,206 @@ static void test_intuition_depth(void)
     CHECK(intuition_active() == 2);
 }
 
+static void test_intuition_icon_drag(void)
+{
+    struct input_pointer ev;
+    struct intuition_event out;
+    i32 x = 0;
+    i32 y = 0;
+    u32 w = 0;
+    u32 h = 0;
+
+    test_reset(1024, 768);
+    CHECK(intuition_add_icon(16, 240, "System:", INTUITION_ICON_VOLUME) == 0);
+    CHECK(intuition_icon_moves() == 0u);
+
+    /* A press inside the tile remembers the offset (32, 24) and queues the
+     * selecting event. */
+    move_cursor(48, 264);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.type == INTUITION_EVENT_ICON);
+    CHECK(out.index == 0);
+
+    /* Motion drags the tile by the pointer delta; the count only moves when
+     * the drag ends, and the drag itself queues nothing. */
+    move_cursor(100, 304);
+    pointer(&ev, 52, 40, 0x01u, 0x00u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_icon_rect(0, &x, &y, &w, &h) == 0);
+    CHECK(x == 68 && y == 280);
+    CHECK(w == INTUITION_ICON_WIDTH && h == INTUITION_ICON_HEIGHT);
+    CHECK(intuition_icon_moves() == 0u);
+    CHECK(intuition_event_poll(&out) == 0);
+
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_icon_moves() == 1u);
+    CHECK(intuition_action_count() == 2u);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.type == INTUITION_EVENT_ICON_MOVE);
+    CHECK(out.window == 0);
+    CHECK(out.index == 0);
+    CHECK(out.x == 68 && out.y == 280);
+    CHECK(intuition_event_poll(&out) == 0);
+
+    /* A drag cannot push the tile off the screen. */
+    move_cursor(100, 304);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.type == INTUITION_EVENT_ICON);
+    move_cursor(1023, 767);
+    pointer(&ev, 923, 463, 0x01u, 0x00u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_icon_rect(0, &x, &y, &w, &h) == 0);
+    CHECK(x == 1024 - (i32)INTUITION_ICON_WIDTH);
+    CHECK(y == 768 - (i32)INTUITION_ICON_HEIGHT);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_icon_moves() == 2u);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.type == INTUITION_EVENT_ICON_MOVE);
+    CHECK(out.x == 1024 - (i32)INTUITION_ICON_WIDTH);
+    CHECK(out.y == 768 - (i32)INTUITION_ICON_HEIGHT);
+
+    /* A press and release without motion is a plain click: no move event. */
+    move_cursor(1000, 750);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_icon_moves() == 2u);
+    while (intuition_event_poll(&out)) {
+        CHECK(out.type == INTUITION_EVENT_ICON);
+    }
+
+    /* A tiny wiggle stays inside the dead zone: the tile does not move. */
+    move_cursor(1000, 750);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.type == INTUITION_EVENT_ICON);
+    move_cursor(999, 749);
+    pointer(&ev, -1, -1, 0x01u, 0x00u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_icon_rect(0, &x, &y, &w, &h) == 0);
+    CHECK(x == 960 && y == 720);
+    CHECK(intuition_icon_moves() == 2u);
+
+    /* Past INTUITION_ICON_DRAG_MIN the drag becomes live. */
+    move_cursor(990, 740);
+    pointer(&ev, -9, -9, 0x01u, 0x00u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_icon_rect(0, &x, &y, &w, &h) == 0);
+    CHECK(x == 950 && y == 710);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_icon_moves() == 3u);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.type == INTUITION_EVENT_ICON_MOVE);
+    CHECK(out.x == 950 && out.y == 710);
+    CHECK(intuition_event_poll(&out) == 0);
+}
+
+static void test_intuition_front(void)
+{
+    struct input_pointer ev;
+    struct intuition_event out;
+
+    test_reset(1024, 768);
+    CHECK(intuition_open(100, 100, 300, 300, "One", "body") == 1);
+    CHECK(intuition_open(480, 300, 320, 200, "Two", "body") == 2);
+    CHECK(intuition_active() == 2);
+    CHECK(intuition_front_count() == 0u);
+    CHECK(intuition_action_count() == 0u);
+    CHECK(intuition_event_count() == 0u);
+
+    /* Window 1 is covered by window 2; its front gadget raises it.  The
+     * gadget sits 32 pixels left of the close box: (348, 106) to (360, 118). */
+    move_cursor(354, 112);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_front_count() == 1u);
+    CHECK(intuition_action_count() == 1u);
+    CHECK(intuition_active() == 1);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.type == INTUITION_EVENT_ACTIVATE);
+    CHECK(out.window == 1);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.type == INTUITION_EVENT_FRONT);
+    CHECK(out.window == 1);
+    CHECK(intuition_event_poll(&out) == 0);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_event_poll(&out) == 0);
+
+    /* The window already owns the front: the gadget changes nothing. */
+    move_cursor(354, 112);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_front_count() == 1u);
+    CHECK(intuition_action_count() == 1u);
+    CHECK(intuition_event_count() == 0u);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+
+    /* Window 2 is still behind window 1, so its own front box raises it. */
+    move_cursor(754, 312);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_front_count() == 2u);
+    CHECK(intuition_active() == 2);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.type == INTUITION_EVENT_ACTIVATE);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.type == INTUITION_EVENT_FRONT);
+    CHECK(out.window == 2);
+}
+
+static void test_intuition_icon_keys(void)
+{
+    test_reset(1024, 768);
+    CHECK(intuition_add_icon(16, 240, "System:", INTUITION_ICON_VOLUME) == 0);
+    CHECK(intuition_add_icon(96, 240, "Docs", INTUITION_ICON_DRAWER) == 1);
+    CHECK(intuition_add_icon(176, 240, "Read", INTUITION_ICON_FILE) == 2);
+    CHECK(intuition_icon_selected() == -1);
+
+    /* Right, Down and Tab walk forwards and wrap; Up and Left walk back. */
+    CHECK(intuition_icon_key(INPUT_KEY_RIGHT) == 0);
+    CHECK(intuition_icon_selected() == 0);
+    CHECK(intuition_icon_key(INPUT_KEY_DOWN) == 0);
+    CHECK(intuition_icon_selected() == 1);
+    CHECK(intuition_icon_key('\t') == 0);
+    CHECK(intuition_icon_selected() == 2);
+    CHECK(intuition_icon_key(INPUT_KEY_RIGHT) == 0);
+    CHECK(intuition_icon_selected() == 0);
+    CHECK(intuition_icon_key(INPUT_KEY_LEFT) == 0);
+    CHECK(intuition_icon_selected() == 2);
+    CHECK(intuition_icon_key(INPUT_KEY_UP) == 0);
+    CHECK(intuition_icon_selected() == 1);
+
+    /* Enter asks the caller to activate the selection. */
+    CHECK(intuition_icon_key('\n') == 1);
+    CHECK(intuition_icon_key('\r') == 1);
+    CHECK(intuition_icon_selected() == 1);
+
+    /* Escape drops the selection; a second Enter then only selects the
+     * first object and returns 0. */
+    CHECK(intuition_icon_key(0x1b) == 0);
+    CHECK(intuition_icon_selected() == -1);
+    CHECK(intuition_icon_key('\n') == 0);
+    CHECK(intuition_icon_selected() == 0);
+    CHECK(intuition_icon_key('x') == 0);
+    CHECK(intuition_icon_selected() == 0);
+
+    /* An empty table takes no focus at all. */
+    test_reset(1024, 768);
+    CHECK(intuition_icon_key(INPUT_KEY_RIGHT) == 0);
+    CHECK(intuition_icon_key('\n') == 0);
+    CHECK(intuition_icon_selected() == -1);
+}
 void test_intuition_functions(void)
 {
     printf("- intuition basics / clamping / limits\n");
@@ -945,4 +1146,10 @@ void test_intuition_functions(void)
     test_intuition_icons();
     printf("- intuition depth gadget / send to back\n");
     test_intuition_depth();
+    printf("- intuition icon dragging\n");
+    test_intuition_icon_drag();
+    printf("- intuition send to front\n");
+    test_intuition_front();
+    printf("- intuition keyboard icon focus\n");
+    test_intuition_icon_keys();
 }

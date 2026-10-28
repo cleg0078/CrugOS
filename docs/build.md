@@ -1,6 +1,6 @@
 # Building CrugOS
 
-This document describes the phase 6E build system: how the kernel, the UEFI
+This document describes the phase 6F build system: how the kernel, the UEFI
 loader, the host crypto tool, the test disk images and the bootable hybrid ISO
 are built, which invariants the link must preserve, and how to diagnose the
 failure modes that are specific to this toolchain.
@@ -40,6 +40,7 @@ make test-workbench-menu  # open menus, select items and click gadgets
 make test-workbench-shell  # type commands into the Workbench shell window
 make test-workbench-keys   # resize a window by its grip and drive it from the keyboard
 make test-workbench-desk   # select desktop objects and send a window to the back
+make test-workbench-icons  # drag a desktop icon, raise a window by its front gadget and drive the icons from the keyboard
 make iso         # build a bootable hybrid UEFI ISO (build/<arch>/crugos.iso)
 make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
@@ -66,7 +67,7 @@ make test-crypt-keyboard  # type the passphrase on the PS/2 keyboard and boot
 make test-crypt-keyboard-wrong  # three wrong keyboard passphrases must lock the volume
 make crypt-run   # boot the encrypted disk in a QEMU window for real typing
 make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
-make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/USB HID keyboard and mouse descriptors and reports/pointer state/IPv4/TCP/UDP checksums/DHCP parsing/DNS/audio mixer, tone and PCM ring/framebuffer cursor/intuition windows, menus and gadgets
+make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/USB HID keyboard and mouse descriptors and reports/pointer state/IPv4/TCP/UDP checksums/DHCP parsing/DNS/audio mixer, tone and PCM ring/framebuffer cursor/intuition windows, menus and gadgets, icon dragging, the send-to-front gadget and keyboard icon focus
 make disk        # build the GPT/ext4 test disk at build/<arch>/disk.img
 make raid-disks  # build the two GPT/ext4 RAID1 member disks
 make raid10-disks  # build the four GPT/ext4 RAID10 member disks
@@ -154,6 +155,10 @@ options` prints the complete resolved set (including paths derived from
 | `WB_DESK_WAIT` | `30` | seconds the desktop gate boots with `wb.wait=` so the mouse can be hotplugged late |
 | `WB_DESK_ACTS` | `3` | actions (two icon presses, one depth press) the gate performs and verifies |
 | `WB_DESK_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for `make test-workbench-desk` |
+| `EXPECT_ICONS` | `no` | `yes` requires the `wb icons ready` / `wb icon` drag and trigger lines / `wb window N sent to front` / `wb icons selftest ok` markers written by `make test-workbench-icons` |
+| `WB_ICONS_WAIT` | `30` | seconds the icon gate boots with `wb.wait=` so the mouse and keyboard can be hotplugged late |
+| `WB_ICONS_ACTS` | `5` | actions (one keyboard activation, one icon press, one drag, one depth and one front press) the gate performs and verifies |
+| `WB_ICONS_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for `make test-workbench-icons` |
 | `DEMO_DISPLAY` | `gtk` | QEMU display `make demo` opens (any `-display` value, for example `sdl` or `none`) |
 | `DEMO_HOLD_SEC` | `600` | seconds `make demo` keeps the desktop on screen before the guest exits by itself |
 | `DEMO_TIMEOUT_SEC` | `900` | wall-clock budget for the whole `make demo` boot |
@@ -289,7 +294,7 @@ OVMF 4M needs a substantial amount of RAM before it will boot from QEMU's
 | 512 | reliable; used by all gates |
 
 This is a firmware limit, not a kernel limit: the kernel load image is about
-290 KiB. The specification's 16 MiB headless target needs a leaner boot path and
+749 KiB. The specification's 16 MiB headless target needs a leaner boot path and
 is tracked in [roadmap.md](roadmap.md).
 
 ## Test disk
@@ -543,6 +548,23 @@ and the Shell title bar behind it becomes amber. The gate requires exit status
 33, the `desk` markers (`EXPECT_DESK=yes`) and a clean `e2fsck`; it prints
 `ok: workbench desktop objects and depth (exit 33)`.
 
+`make test-workbench-icons` proves the phase 6F icon dragging, send-to-front
+gadget and keyboard icon focus on the same machine setup, with
+[scripts/run-workbench-icons.py](../scripts/run-workbench-icons.py) in place of
+the desk driver and both a `usb-mouse` and a `usb-kbd` hotplugged. It boots with
+`wb.enable=1 wb.wait=$(WB_ICONS_WAIT) wb.desk=1 wb.ikeys=1
+wb.acts=$(WB_ICONS_ACTS)`. Enter focuses the `System:` volume and a second Enter
+activates it and opens the drawer, which must list 5 root entries. The pointer
+then grabs the 64x48 tile at (16,240) and drops it at (168,376): a `screendump`
+must show the amber selected frame at (168,376), the window body colour at
+(176,384) and the desktop colour `(16,32,48)` where the tile was. A click raises
+window 1, its depth box at (410,102) sends it to the back (the title at (90,96)
+turns idle grey `(128,128,128)`) and its front gadget at (394,102) raises it
+again (the title turns amber `(255,176,0)`). The gate requires exit status 33,
+the `icons` markers (`EXPECT_ICONS=yes`) and a clean `e2fsck`; it prints
+`ok: workbench icon dragging, send-to-front and keyboard focus (exit 33)`.
+Every pointer move is split into steps of at most 100 pixels.
+
 ## Interactive demo
 
 `make demo` is not a gate but a way to watch the system: it boots
@@ -551,13 +573,14 @@ already plugged in) into a real `DEMO_DISPLAY` window (GTK by default) instead
 of the headless gates. The command line carries
 `wb.enable=1 wb.wait=0 wb.hold=$(DEMO_HOLD_SEC)`:
 
-- `wb.enable=1` hands the framebuffer to the phase 6E desktop and opens the two
+- `wb.enable=1` hands the framebuffer to the phase 6F desktop and opens the two
   demo windows; adding `wb.shell=1` through `DEMO_CMDLINE` gives window 2 the
-  shell, while `wb.keys=1` lets Tab and the arrow keys drive the desktop.
+  shell, while `wb.keys=1` lets Tab and the arrow keys drive the desktop and
+  `wb.ikeys=1` plus `wb.desk=1` give the `System:` icon keyboard focus.
 - `wb.wait=0` turns the desktop self-test into a no-op, so the demo does not
   require a title-bar drag before the gate marker; the interactive desktop is
   the point, not the self-test.
-- `wb.hold=<seconds>` keeps the guest alive after `CRUGOS: phase 6e boot ok`
+- `wb.hold=<seconds>` keeps the guest alive after `CRUGOS: phase 6f boot ok`
   (`wb_hold()`), polling input once per timer tick, so the window stays on
   screen until the deadline or until you close it.
 

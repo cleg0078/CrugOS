@@ -39,6 +39,9 @@ static u32 g_actions_seen;
 /* Phase 6D: keyboard navigation (Tab focus, arrow moves, menu keys). */
 static int g_keys_mode;
 
+/* Phase 6F: keyboard focus for the desktop icon table and the front gadget. */
+static int g_icon_keys_mode;
+
 /* Phase 6E: desktop objects (the System: volume icon) and the drawer window
    that opens on a double click and lists the mounted root. */
 static int g_desk_mode;
@@ -149,6 +152,13 @@ static void wb_cmdline_token(const char *tok, usize len)
     if (used >= 0) {
         if (wb_parse_u32(tok + used, len - (usize)used, &value) == 0) {
             g_keys_mode = value ? 1 : 0;
+        }
+        return;
+    }
+    used = wb_prefix(tok, len, "wb.ikeys=");
+    if (used >= 0) {
+        if (wb_parse_u32(tok + used, len - (usize)used, &value) == 0) {
+            g_icon_keys_mode = value ? 1 : 0;
         }
         return;
     }
@@ -276,6 +286,14 @@ static void wb_drain_events(void)
         } else if (event.type == INTUITION_EVENT_DEPTH) {
             g_actions_seen++;
             kprintf("CRUGOS: wb action %u depth window %d\n",
+                    (unsigned)g_actions_seen, event.window);
+        } else if (event.type == INTUITION_EVENT_ICON_MOVE) {
+            g_actions_seen++;
+            kprintf("CRUGOS: wb action %u icon-move %d\n",
+                    (unsigned)g_actions_seen, event.index);
+        } else if (event.type == INTUITION_EVENT_FRONT) {
+            g_actions_seen++;
+            kprintf("CRUGOS: wb action %u front window %d\n",
                     (unsigned)g_actions_seen, event.window);
         }
     }
@@ -430,14 +448,41 @@ static int wb_shell_pump(void)
 /* Phase 6D: drain input.device and hand the decoded keys to intuition.  The
    shell window owns the keyboard when wb.shell=1, so keys mode leaves them
    for wb_shell_pump() instead. */
+/* Phase 6F: Enter in the icon table asks for activation; the desktop runs the
+   selected object (the System: volume opens its drawer). */
+static void wb_icon_keyboard_activate(void)
+{
+    int index = intuition_icon_selected();
+
+    if (index < 0 || !g_reporting) {
+        return;
+    }
+    g_actions_seen++;
+    kprintf("CRUGOS: wb action %u icon %d (keyboard)\n",
+            (unsigned)g_actions_seen, index);
+    kprintf("CRUGOS: wb icon activated (keyboard)\n");
+    if (index == 0) {
+        wb_open_drawer();
+    }
+}
+
 static void wb_key_pump(void)
 {
     int ch;
 
-    if (!g_keys_mode || g_shell_mode || !g_ready) {
+    if ((!g_keys_mode && !g_icon_keys_mode) || g_shell_mode || !g_ready) {
         return;
     }
     while ((ch = input_try_getc()) >= 0) {
+        if (g_icon_keys_mode) {
+            if (ch >= (int)INPUT_KEY_UP || ch == '\t' || ch == '\n' ||
+                ch == '\r' || ch == 0x1b) {
+                if (intuition_icon_key((u8)ch)) {
+                    wb_icon_keyboard_activate();
+                }
+            }
+            continue;
+        }
         if (ch >= (int)INPUT_KEY_UP || ch == '\t' || ch == '\n' ||
             ch == '\r' || ch == 0x1b) {
             intuition_key_event((u8)ch);
@@ -460,14 +505,14 @@ int wb_init(void)
         return -1;
     }
     g_reporting = (g_want_drags > 0u || g_menu_mode || g_keys_mode ||
-                   g_shell_mode || g_desk_mode)
+                   g_shell_mode || g_desk_mode || g_icon_keys_mode)
                       ? 1
                       : 0;
     fb_set_text_enabled(0);
     intuition_init();
     intuition_set_reporting(g_reporting);
     top = intuition_open(80, 90, 360, 220, "Workbench",
-                         "CrugOS Workbench\nphase 6e\nsoftware rendered");
+                         "CrugOS Workbench\nphase 6f\nsoftware rendered");
     shell_id = intuition_open(480, 300, 320, 200, "Shell", "4.OS\ncrugos>");
     intuition_set_menus(top, wb_menus_top, 2u);
     intuition_add_gadget(top, 12, 60, 96, 22, "Run");
@@ -507,6 +552,10 @@ int wb_init(void)
     if (g_desk_mode) {
         kprintf("CRUGOS: wb icon ready ('System:', volume)\n");
     }
+    if (g_icon_keys_mode) {
+        kprintf("CRUGOS: wb icons ready (%u object(s), keyboard focus)\n",
+                (unsigned)intuition_icon_count());
+    }
     return 0;
 }
 
@@ -540,7 +589,8 @@ int wb_selftest(void)
         return 1;
     }
     want = g_want_drags;
-    want_actions = (g_menu_mode || g_keys_mode || g_desk_mode)
+    want_actions = (g_menu_mode || g_keys_mode || g_desk_mode ||
+                    g_icon_keys_mode)
                        ? (g_want_actions ? g_want_actions : 1u)
                        : 0u;
     want_commands = g_shell_mode ? (g_want_commands ? g_want_commands : 1u) : 0u;
@@ -583,6 +633,11 @@ int wb_selftest(void)
     if (g_desk_mode) {
         kprintf("CRUGOS: wb desk selftest ok (%u drawer(s))\n",
                 (unsigned)g_drawers);
+    }
+    if (g_icon_keys_mode) {
+        kprintf("CRUGOS: wb icons selftest ok (%u move(s), %u front(s))\n",
+                (unsigned)intuition_icon_moves(),
+                (unsigned)intuition_front_count());
     }
     /* Keep the finished desktop on screen for a moment so the gate's last
        screendump does not race the rest of the boot to the exit. */

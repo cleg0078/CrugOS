@@ -144,9 +144,11 @@ both self-test outcomes.
   one sprite and, from phase 6A, the software desktop described in
   [workbench.md](workbench.md) (menus, gadgets and the event queue since
   phase 6B, the shell window since phase 6C, resize grips and keyboard
-  navigation since phase 6D, and desktop objects with a depth gadget since
-  phase 6E, whose `make test-workbench-desk` gate checks the icon frame, the
-  selected frame, the drawer and the stacking-order title bars in
+  navigation since phase 6D, desktop objects with a depth gadget since phase
+  6E, and icon dragging, a send-to-front gadget and keyboard focus for the icon
+  table since phase 6F, whose `make test-workbench-desk` and
+  `make test-workbench-icons` gates check the icon frame, the selected frame,
+  the drawer, the stacking-order title bars and a dragged tile in
   `screendump`s).
 - Relative motion only, no acceleration curve, no wheel scrolling of the
   console, no click handling beyond recording the button mask.

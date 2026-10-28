@@ -54,6 +54,13 @@ static struct icon g_icons[INTUITION_MAX_ICONS];
 static u32 g_icon_count;
 static int g_icon_sel = -1;
 static u64 g_icon_clicks;
+/* Phase 6F: icon dragging, the send-to-front gadget and keyboard icon focus. */
+static u64 g_icon_moves;
+static u64 g_fronts;
+static int g_icon_drag = -1;
+static i32 g_icon_dx;
+static i32 g_icon_dy;
+static int g_icon_drag_moved;
 static u64 g_depths;
 
 static struct window g_win[INTUITION_MAX_WINDOWS];
@@ -274,6 +281,23 @@ static int depth_hit(const struct window *w, i32 px, i32 py)
            py < cy + (i32)INTUITION_DEPTH_SIZE;
 }
 
+/* The front gadget (phase 6F): a 12x12 box another sixteen pixels to the left.
+   Pressing it raises the window above every other window; pressing it on the
+   frontmost window changes nothing. */
+static i32 front_box_x(const struct window *w)
+{
+    return close_box_x(w) - 32;
+}
+
+static int front_hit(const struct window *w, i32 px, i32 py)
+{
+    i32 cx = front_box_x(w);
+    i32 cy = w->y + (i32)INTUITION_BORDER + 4;
+
+    return px >= cx && px < cx + (i32)INTUITION_FRONT_SIZE && py >= cy &&
+           py < cy + (i32)INTUITION_FRONT_SIZE;
+}
+
 /* Move one window to the bottom of the stack without touching the others.
    Returns 1 when the stack changed and 0 when the window was already at the
    bottom (or unknown), so a depth press on the backmost window is a no-op. */
@@ -440,6 +464,16 @@ static void win_draw_title(struct window *w)
                   12u, 12u, INTUITION_TITLE_TEXT_RGB);
     fb_fill_rect((u32)depth_box_x(w) + 4, (u32)w->y + INTUITION_BORDER + 8u,
                  4u, 4u, INTUITION_TITLE_TEXT_RGB);
+    /* The front gadget (phase 6F): a box with a small up arrow, which lifts
+       this window above every other window. */
+    fb_fill_rect((u32)front_box_x(w), (u32)w->y + INTUITION_BORDER + 4u, 12u,
+                 12u, active ? INTUITION_WINDOW_RGB : INTUITION_DESKTOP_RGB);
+    fb_frame_rect((u32)front_box_x(w), (u32)w->y + INTUITION_BORDER + 4u,
+                  12u, 12u, INTUITION_TITLE_TEXT_RGB);
+    fb_fill_rect((u32)front_box_x(w) + 4, (u32)w->y + INTUITION_BORDER + 9u,
+                 4u, 2u, INTUITION_TITLE_TEXT_RGB);
+    fb_fill_rect((u32)front_box_x(w) + 5, (u32)w->y + INTUITION_BORDER + 7u,
+                 2u, 2u, INTUITION_TITLE_TEXT_RGB);
 }
 
 static void win_draw_gadgets(struct window *w)
@@ -712,6 +746,12 @@ void intuition_init(void)
     g_icon_count = 0u;
     g_icon_sel = -1;
     g_icon_clicks = 0u;
+    g_icon_moves = 0u;
+    g_fronts = 0u;
+    g_icon_drag = -1;
+    g_icon_dx = 0;
+    g_icon_dy = 0;
+    g_icon_drag_moved = 0;
     g_depths = 0u;
     for (i = 0; i < INTUITION_MAX_ICONS; i++) {
         memset(&g_icons[i], 0, sizeof(g_icons[i]));
@@ -955,6 +995,60 @@ u64 intuition_icon_clicks(void)
     return g_icon_clicks;
 }
 
+u64 intuition_icon_moves(void)
+{
+    return g_icon_moves;
+}
+
+u64 intuition_front_count(void)
+{
+    return g_fronts;
+}
+
+/* Phase 6F: the desktop icon table takes keyboard focus.  Tab, Right and Down
+   walk the table forwards, Left and Up walk backwards, Enter asks the caller to
+   activate the selected object and Escape drops the selection. */
+int intuition_icon_key(u8 key)
+{
+    int sel = g_icon_sel;
+    int next = sel;
+
+    if (g_icon_count == 0u) {
+        return 0;
+    }
+    if (key == INPUT_KEY_RIGHT || key == INPUT_KEY_DOWN || key == '\t') {
+        next = sel < 0 ? 0 : (int)(((u32)sel + 1u) % g_icon_count);
+    } else if (key == INPUT_KEY_LEFT || key == INPUT_KEY_UP) {
+        next = sel <= 0 ? (int)g_icon_count - 1 : sel - 1;
+    } else if (key == '\n' || key == '\r') {
+        if (sel < 0) {
+            g_icon_sel = 0;
+            if (g_reporting) {
+                kprintf("CRUGOS: wb icon '%s' focused\n", g_icons[0].label);
+            }
+            intuition_redraw();
+            return 0;
+        }
+        return 1;
+    } else if (key == 0x1b) {
+        if (sel >= 0) {
+            g_icon_sel = -1;
+            intuition_redraw();
+        }
+        return 0;
+    } else {
+        return 0;
+    }
+    if (next != sel) {
+        g_icon_sel = next;
+        if (g_reporting) {
+            kprintf("CRUGOS: wb icon '%s' focused\n", g_icons[next].label);
+        }
+        intuition_redraw();
+    }
+    return 0;
+}
+
 u64 intuition_depth_count(void)
 {
     return g_depths;
@@ -1003,6 +1097,11 @@ static void icon_press(i32 px, i32 py)
     }
     event_push(INTUITION_EVENT_ICON, 0, index, 0u, g_icons[index].x,
                g_icons[index].y);
+    /* Remember where inside the tile the press landed, so motion can drag it. */
+    g_icon_drag = index;
+    g_icon_dx = px - g_icons[index].x;
+    g_icon_dy = py - g_icons[index].y;
+    g_icon_drag_moved = 0;
     intuition_redraw();
 }
 
@@ -1067,6 +1166,27 @@ static void press(i32 px, i32 py)
         intuition_redraw();
         return;
     }
+    /* Phase 6F: the front gadget raises a covered window and does nothing at
+       all when the window already owns the front of the stack. */
+    if (front_hit(w, px, py)) {
+        if (g_order_count > 0u && g_order[g_order_count - 1u] == id) {
+            return;
+        }
+        prev = g_active;
+        win_raise(id);
+        g_active = id;
+        if (prev != id) {
+            event_push(INTUITION_EVENT_ACTIVATE, id, -1, 0u, w->x, w->y);
+        }
+        if (g_reporting) {
+            kprintf("CRUGOS: wb window %d sent to front\n", id);
+        }
+        event_push(INTUITION_EVENT_FRONT, id, -1, 0u, w->x, w->y);
+        g_fronts++;
+        g_actions++;
+        intuition_redraw();
+        return;
+    }
     prev = g_active;
     win_raise(id);
     g_active = id;
@@ -1124,6 +1244,25 @@ static void press(i32 px, i32 py)
 
 static void release(i32 px, i32 py)
 {
+    /* Phase 6F: ending an icon drag queues the new tile origin once. */
+    if (g_icon_drag >= 0) {
+        int index = g_icon_drag;
+        struct icon *ic = &g_icons[index];
+
+        g_icon_drag = -1;
+        if (g_icon_drag_moved) {
+            if (g_reporting) {
+                kprintf("CRUGOS: wb icon '%s' dropped at (%d, %d)\n",
+                        ic->label, (int)ic->x, (int)ic->y);
+            }
+            event_push(INTUITION_EVENT_ICON_MOVE, 0, index, 0u, ic->x, ic->y);
+            g_icon_moves++;
+            g_actions++;
+        }
+        g_icon_drag_moved = 0;
+        intuition_redraw();
+        return;
+    }
     if (g_resize > 0) {
         struct window *w = win_find(g_resize);
         int id = g_resize;
@@ -1230,6 +1369,50 @@ static void motion(i32 px, i32 py, i32 dx, i32 dy)
         if (!w || !gadget_contains(w, g_gadget, px, py)) {
             g_gadget_win = 0;
             g_gadget = -1;
+            intuition_redraw();
+        }
+        return;
+    }
+    if (g_icon_drag >= 0 && (dx != 0 || dy != 0)) {
+        struct icon *ic = &g_icons[g_icon_drag];
+        i32 nx = px - g_icon_dx;
+        i32 ny = py - g_icon_dy;
+
+        /* Phase 6F: the first INTUITION_ICON_DRAG_MIN pixels are a dead zone so
+         * a shaky click does not nudge the object. */
+        if (!g_icon_drag_moved) {
+            i32 ddx = nx - ic->x;
+            i32 ddy = ny - ic->y;
+
+            if (ddx > -(i32)INTUITION_ICON_DRAG_MIN &&
+                ddx < (i32)INTUITION_ICON_DRAG_MIN &&
+                ddy > -(i32)INTUITION_ICON_DRAG_MIN &&
+                ddy < (i32)INTUITION_ICON_DRAG_MIN) {
+                return;
+            }
+        }
+
+        /* The whole tile stays on the desktop, exactly like intuition_add_icon. */
+        if (nx < 0) {
+            nx = 0;
+        }
+        if (ny < 0) {
+            ny = 0;
+        }
+        if ((u32)nx + INTUITION_ICON_WIDTH > g_screen_w) {
+            nx = (i32)g_screen_w - (i32)INTUITION_ICON_WIDTH;
+        }
+        if ((u32)ny + INTUITION_ICON_HEIGHT > g_screen_h) {
+            ny = (i32)g_screen_h - (i32)INTUITION_ICON_HEIGHT;
+        }
+        if (nx != ic->x || ny != ic->y) {
+            ic->x = nx;
+            ic->y = ny;
+            g_icon_drag_moved = 1;
+            if (g_reporting) {
+                kprintf("CRUGOS: wb icon '%s' drag to (%d, %d)\n", ic->label,
+                        (int)nx, (int)ny);
+            }
             intuition_redraw();
         }
         return;

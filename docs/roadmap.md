@@ -1,6 +1,6 @@
 # Roadmap
 
-The specification defines 40 phases/gates. Phase 0 established the smallest
+The specification defines 41 phases/gates. Phase 0 established the smallest
 end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
 phase 1 makes the kernel own physical memory, page tables, exceptions and
 timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
@@ -33,7 +33,9 @@ a command set over the mounted ext4 root; phase 6D makes every window resizable
 from a corner grip and lets Tab, the arrow keys and Enter drive focus, window
 movement and the menu popups; phase 6E adds desktop objects that select or open
 a `System:` drawer, and a depth gadget that sends a window to the back of the
-stacking order. Release
+stacking order; phase 6F makes those icons draggable, gives every title bar a
+send-to-front gadget beside the depth box and gives the icon table keyboard
+focus. Release
 `v0.23.1` adds packaging rather than a spec phase: `make iso` produces a hybrid
 UEFI ISO that boots from a USB stick or a CD-ROM, with the kernel's
 `storage=none` token so an image with no root filesystem still passes the boot
@@ -668,8 +670,9 @@ change for memory management, storage, SMP or drivers.
 - limits: no Shift-Tab (the input layer delivers one byte per key and carries no
   modifier state), no sub-menus, no keyboard text entry outside the 6C shell,
   12x12 grips that are not themeable, body text re-laid out from the top-left
-  rather than reflowed, and no send-to-back in the stacking order (the phase 6E
-  depth gadget sends a window back, but nothing sends one forward).
+  rather than reflowed, and no send-to-back in the stacking order at that point
+  (the phase 6E depth gadget later sends a window back and the phase 6F front
+  gadget sends one forward).
 - All 39 gates pass at `v0.26.0`.
 
 ## Phase 6E - desktop objects and window depth (done)
@@ -724,6 +727,67 @@ change for memory management, storage, SMP or drivers.
 - docs: README, workbench, boot, build, versioning, gfx and iso describe the
   objects, the drawer, the painter API, `wb.desk=1` and the gate.
 - All 40 gates pass at `v0.27.0`.
+
+## Phase 6F - icon dragging, send-to-front and keyboard icons (done)
+
+- `include/crug/intuition.h` + `kernel/gfx/intuition.c`: the icon table became
+  interactive. `INTUITION_ICON_DRAG_MIN` (4) is the first-motion dead zone (a
+  wiggle under 4 pixels on both axes does not move the tile), and
+  two events were added: `INTUITION_EVENT_ICON_MOVE` (type 9) with the object
+  index and its new origin, and `INTUITION_EVENT_FRONT` (type 10);
+  `intuition_icon_moves()` and `intuition_front_count()` count drags and
+  raises.
+- dragging: a left press inside a tile selects it and grabs it with the offset
+  from the tile origin to the cursor; pointer motion moves the tile to the
+  cursor minus that offset, clamped to `[0, screen width - 64]` x
+  `[0, screen height - 48]`, so a tile never leaves the desktop. The release
+  queues `ICON_MOVE` with the index and the final origin, increments
+  `intuition_icon_moves()` and the action count and prints
+  `CRUGOS: wb icon '<label>' dropped at (x, y)`; motion prints
+  `CRUGOS: wb icon '<label>' drag to (x, y)`, and the tile stays selected, so
+  the amber frame travels with it.
+- send-to-front gadget: a 12x12 `INTUITION_FRONT_SIZE` box at
+  `close_box_x - 32`, twelve pixels left of the depth box, drawn as an up arrow
+  in every title bar. A press raises that window, makes it active, queues
+  `INTUITION_EVENT_FRONT`, increments `intuition_front_count()` and the action
+  count and prints `CRUGOS: wb window N sent to front`; pressing the gadget of
+  the already-frontmost window is a no-op with no event, no count and no
+  redraw. A window repaint is now five frames (window, close box, depth box,
+  front box, resize grip).
+- keyboard icon focus: `intuition_icon_key(u8 key)` drives the table. Tab,
+  Right and Down select the next object and Left and Up the previous one, both
+  wrapping; Enter selects the first object when nothing is selected and on the
+  next press returns 1 so the caller activates it (the `System:` volume opens
+  its drawer); Escape clears the selection. A selection change prints
+  `CRUGOS: wb icon '<label>' focused` and repaints the idle and selected frames.
+- `kernel/gfx/workbench.c` reads `wb.ikeys=<0|1>` before `wb.desk=`; the shell
+  window still owns the keyboard while `wb.shell=1`. Icon mode prints
+  `CRUGOS: wb icons ready (N object(s), keyboard focus)`, forwards Tab, Enter,
+  Escape and the arrows to `intuition_icon_key()`, and an activation counts an
+  action and prints `CRUGOS: wb action N icon I (keyboard)` and
+  `CRUGOS: wb icon activated (keyboard)`. The self-test accepts icon mode and
+  prints `CRUGOS: wb icons selftest ok (N move(s), M front(s))`. The Workbench
+  body text is now `phase 6f`.
+- `make test-workbench-icons` boots `wb.enable=1 wb.wait=30 wb.desk=1
+  wb.ikeys=1 wb.acts=5` with both a `usb-mouse` and a `usb-kbd`: Enter focuses
+  the `System:` volume, Enter activates it and opens the drawer (5 root
+  entries), the pointer drags the tile from (16,240) to (168,376) and a
+  `screendump` proves the amber frame at the new origin, the window body at
+  (176,384) and the desktop colour at the old spot, then the depth box at
+  (410,102) sends window 1 back and the front gadget at (394,102) raises it
+  again; the gate requires exit status 33 and a clean `e2fsck`.
+- `scripts/boot-check.py` gained `EXPECT_ICONS` at positional argv[23] and its
+  `ok` line reports an `icons` field; the phase marker is
+  `CRUGOS: phase 6f boot ok`.
+- `tests/host/test_intuition.c` gained `test_intuition_icon_drag`,
+  `test_intuition_front` and `test_intuition_icon_keys`; the window-draw frame
+  assertion is 75 because one repaint paints five frames, and `make test-host`
+  reports 3054 checks.
+- the kernel file is 230056 B (224 KiB) and the load image 749 KiB against the
+  1024 KiB stretch and 2048 KiB hard budgets.
+- docs: README, workbench, boot, build, versioning, gfx and iso describe icon
+  dragging, the send-to-front gadget, `wb.ikeys=1` and the gate.
+- All 41 gates pass at `v0.28.0`.
 
 ## Bootable media - hybrid UEFI ISO (done, `v0.23.1`)
 
@@ -784,16 +848,16 @@ change for memory management, storage, SMP or drivers.
   validation, AAAA/PTR/SRV, search domains, negative caching) on top of the
   phase 4B-4D stack, richer socket semantics (bind, options, non-blocking, more
   than four sockets); IPv6, fragmentation and reassembly.
-- Software framebuffer -> VirtIO-GPU -> vendor GPU drivers: with the phase 6E
-  desktop objects and depth gadget in place, the next Workbench work is icon
-  dragging and renaming, a drawer that refreshes and scrolls while it stays
-  open, a send-to-front gadget, keyboard focus for the icon table and reflowing
-  a body (and relaying out its painter) when its window is resized, followed by
-  sub-menus on top of the phase 6B menu bar, a gadget toolkit on top of its
-  event queue and richer shell semantics (quoting, a working directory) on top
-  of the shell, the phase 5D cursor, the phase 5B pointer stack and the phase 5C
-  audio stack; application bundles (phase 7, specification section 35) are the
-  next layer above the desktop.
+- Software framebuffer -> VirtIO-GPU -> vendor GPU drivers: with the phase 6F
+  desktop in place (window resizing, the depth and front gadgets and icon
+  dragging are done), the next Workbench work is renaming an icon, a drawer that
+  refreshes and scrolls while it stays open, reflowing a body (and relaying out
+  its painter) when its window is resized, followed by sub-menus on top of the
+  phase 6B menu bar, a gadget toolkit on top of its event queue and richer shell
+  semantics (quoting, a working directory) on top of the shell, the phase 5D
+  cursor, the phase 5B pointer stack and the phase 5C audio stack; application
+  bundles (phase 7, specification section 35) are the next layer above the
+  desktop.
 - Workbench userspace, `.app` bundles, `.crpkg` packages, capability model.
 - POSIX-like layer: 64-bit UID/GID, ACLs, process groups, signals.
 

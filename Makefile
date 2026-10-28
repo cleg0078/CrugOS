@@ -31,6 +31,7 @@
 #   make test-workbench-shell  type commands into the Workbench shell window
 #   make test-workbench-keys  resize a window and drive the desktop from the keyboard
 #   make test-workbench-desk  open a drawer from the desktop volume icon and send it back
+#   make test-workbench-icons  drag a desktop icon, raise a window and drive the icons by keyboard
 #   make crypt-disk  build the AES-256-XTS crypt test disk
 #   make test-crypt  boot from an encrypted root and verify the disk
 #   make test-crypt-recovery  unlock the encrypted root with the recovery keyslot
@@ -97,6 +98,7 @@ EXPECT_MENU ?= no
 EXPECT_SHELL ?= no
 EXPECT_KEYS ?= no
 EXPECT_DESK ?= no
+EXPECT_ICONS ?= no
 
 # QEMU / firmware options.
 MEMORY_MB ?= 512
@@ -141,6 +143,9 @@ WB_KEYS_RUN_TIMEOUT_SEC ?= 240
 WB_DESK_WAIT ?= 30
 WB_DESK_ACTS ?= 3
 WB_DESK_RUN_TIMEOUT_SEC ?= 240
+WB_ICONS_WAIT ?= 30
+WB_ICONS_ACTS ?= 5
+WB_ICONS_RUN_TIMEOUT_SEC ?= 240
 
 # Interactive demo (make demo): a real QEMU window with a USB keyboard and
 # mouse, the Workbench desktop and a hold so the window stays open.
@@ -277,7 +282,7 @@ HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
         test-crypt-keyboard test-crypt-keyboard-wrong crypt-run test-net test-tcp \
         test-net-dns test-usb-hotplug test-usb-mouse test-audio test-gfx \
         test-workbench test-workbench-menu test-workbench-shell test-workbench-keys \
-        test-workbench-desk \
+        test-workbench-desk test-workbench-icons \
         iso check-iso test-iso usb \
         crash-disk \
         check-disk size check-efi repro test-host preflight version options clean distclean help
@@ -293,11 +298,11 @@ esp: $(KERNEL) $(LOADER)
 	$(Q)cp $(LOADER) $(ESP)/EFI/BOOT/$(LOADER_EFI_NAME)
 	$(Q)cp $(KERNEL) $(ESP)/crugos/kernel.elf
 	$(Q)printf '%s\n' "$(CRUGOS_VERSION)" > $(ESP)/crugos/version
+	$(Q)rm -f $(ESP)/crugos/cmdline.txt
 	$(Q)cmdline=""; \
 	if [ -n "$(CRYPT_PASS)" ]; then cmdline="crypt.pass=$(CRYPT_PASS)"; fi; \
 	if [ -n "$(CMDLINE_EXTRA)" ]; then cmdline="$$cmdline $(CMDLINE_EXTRA)"; fi; \
-	if [ -n "$$cmdline" ]; then printf '%s\n' "$$cmdline" > $(ESP)/crugos/cmdline.txt; \
-	else rm -f $(ESP)/crugos/cmdline.txt; fi
+	if [ -n "$$cmdline" ]; then printf '%s\n' "$$cmdline" > $(ESP)/crugos/cmdline.txt; fi
 	@echo "  ESP   $(ESP) ($(CRUGOS_VERSION))"
 
 $(KERNEL_OBJECTS): VERSION
@@ -642,6 +647,17 @@ test-workbench-desk: esp
 	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no $(EXPECT_DESK)
 	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 
+test-workbench-icons: EXPECT_ICONS := yes
+test-workbench-icons: esp
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(PYTHON) scripts/run-workbench-icons.py --repo $(CURDIR) \
+		--disk $(abspath $(DISK_IMG)) --serial-log $(abspath $(SERIAL_LOG)) \
+		--exit-code $(abspath $(QEMU_EXIT)) --acts $(WB_ICONS_ACTS) \
+		--wb-wait $(WB_ICONS_WAIT) --run-timeout $(WB_ICONS_RUN_TIMEOUT_SEC) \
+		--qemu-extra "$(WB_QEMU_EXTRA)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no $(EXPECT_ICONS)
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
 test:
 	$(Q)rm -f $(DISK_IMG)
 	$(Q)$(MAKE) --no-print-directory run
@@ -868,6 +884,10 @@ options:
 	@printf '  %-16s %s\n' WB_DESK_WAIT "$(WB_DESK_WAIT) (seconds)"
 	@printf '  %-16s %s\n' WB_DESK_ACTS "$(WB_DESK_ACTS)"
 	@printf '  %-16s %s\n' WB_DESK_RUN_TIMEOUT_SEC "$(WB_DESK_RUN_TIMEOUT_SEC)"
+	@printf '  %-16s %s\n' EXPECT_ICONS "$(EXPECT_ICONS)"
+	@printf '  %-16s %s\n' WB_ICONS_WAIT "$(WB_ICONS_WAIT) (seconds)"
+	@printf '  %-16s %s\n' WB_ICONS_ACTS "$(WB_ICONS_ACTS)"
+	@printf '  %-16s %s\n' WB_ICONS_RUN_TIMEOUT_SEC "$(WB_ICONS_RUN_TIMEOUT_SEC)"
 	@printf '  %-16s %s\n' MEMORY_MB "$(MEMORY_MB)"
 	@printf '  %-16s %s\n' SMP "$(SMP)"
 	@printf '  %-16s %s\n' TIMEOUT_SEC "$(TIMEOUT_SEC)"

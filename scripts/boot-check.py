@@ -39,7 +39,7 @@ REQUIRED_MARKERS = (
     "CRUGOS: selftest ok",
     "CRUGOS: nvme ready",
     "CRUGOS: ahci ready",
-    "CRUGOS: phase 6e boot ok",
+    "CRUGOS: phase 6f boot ok",
 )
 # A rejected unlock stops before scheduling, storage mounting and self-tests.
 WRONG_CRYPT_MARKERS = (
@@ -111,13 +111,14 @@ def main() -> int:
             argv.append(arg)
     sys.argv = [sys.argv[0]] + argv
 
-    if len(sys.argv) not in tuple(range(3, 24)):
+    if len(sys.argv) not in tuple(range(3, 25)):
         print("usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE "
               "[VERSION_FILE [EXPECT_AVX2 [EXPECT_RAID [EXPECT_NVME "
               "[EXPECT_REBUILD [EXPECT_AHCI [EXPECT_CRYPT [EXPECT_AES "
               "[EXPECT_NET [EXPECT_TCP [EXPECT_DNS [EXPECT_USB "
               "[EXPECT_MOUSE [EXPECT_AUDIO [EXPECT_GFX [EXPECT_WB "
-              "[EXPECT_MENU [EXPECT_SHELL [EXPECT_KEYS [EXPECT_DESK]]]]]]]]]]]]]]]]]]]] "
+              "[EXPECT_MENU [EXPECT_SHELL [EXPECT_KEYS [EXPECT_DESK "
+              "[EXPECT_ICONS]]]]]]]]]]]]]]]]]]]]] "
               "[--storage=none]",
               file=sys.stderr)
         return 2
@@ -144,6 +145,7 @@ def main() -> int:
     expect_shell = sys.argv[20] if len(sys.argv) >= 21 else "no"
     expect_keys = sys.argv[21] if len(sys.argv) >= 22 else "no"
     expect_desk = sys.argv[22] if len(sys.argv) >= 23 else "no"
+    expect_icons = sys.argv[23] if len(sys.argv) >= 24 else "no"
 
     if not serial_path.exists():
         return fail(f"missing serial log {serial_path}", "")
@@ -184,6 +186,8 @@ def main() -> int:
         return fail(f"invalid EXPECT_KEYS {expect_keys!r}", text)
     if expect_desk not in ("no", "yes"):
         return fail(f"invalid EXPECT_DESK {expect_desk!r}", text)
+    if expect_icons not in ("no", "yes"):
+        return fail(f"invalid EXPECT_ICONS {expect_icons!r}", text)
 
     required = list(REQUIRED_MARKERS)
     if storage_mode == "none":
@@ -458,6 +462,36 @@ def main() -> int:
         if not re.search(r"CRUGOS: wb desk selftest ok \([1-9]\d* drawer\(s\)\)", text):
             return fail("expected the Workbench to count at least one drawer", text)
 
+    if expect_icons == "yes":
+        for marker in (
+            "CRUGOS: wb desktop ready",
+            "CRUGOS: wb icons ready",
+            "CRUGOS: wb selftest ok",
+            "CRUGOS: wb icons selftest ok",
+        ):
+            if marker not in text:
+                return fail(f"missing serial marker: {marker!r}", text)
+        if not re.search(r"CRUGOS: wb icons ready \([1-9]\d* object\(s\), keyboard focus\)", text):
+            return fail("expected the icon table to report keyboard focus", text)
+        if not re.search(r"CRUGOS: wb icon 'System:' drag to \(\d+, \d+\)", text):
+            return fail("expected a desktop icon drag", text)
+        if not re.search(r"CRUGOS: wb icon 'System:' dropped at \(\d+, \d+\)", text):
+            return fail("expected the icon drag to end", text)
+        if not re.search(r"CRUGOS: wb action \d+ icon-move 0", text):
+            return fail("expected the Workbench to queue an icon move", text)
+        if not re.search(r"CRUGOS: wb icon 'System:' focused", text):
+            return fail("expected the keyboard to focus a desktop icon", text)
+        if "CRUGOS: wb icon activated (keyboard)" not in text:
+            return fail("expected Enter to activate the selected icon", text)
+        if not re.search(r"CRUGOS: wb action \d+ front window \d+", text):
+            return fail("expected the front gadget to queue an event", text)
+        if not re.search(r"CRUGOS: wb window \d+ sent to front", text):
+            return fail("expected the front gadget to raise a window", text)
+        if not re.search(r"CRUGOS: wb drawer '.+' opened \([1-9]\d* entries\)", text):
+            return fail("expected the keyboard to open a drawer", text)
+        if not re.search(r"CRUGOS: wb icons selftest ok \([1-9]\d* move\(s\), [1-9]\d* front\(s\)\)", text):
+            return fail("expected the Workbench to count icon moves and fronts", text)
+
     if expect_rebuild == "no" and "CRUGOS: raid rebuilt" in text:
         return fail("unexpected RAID member rebuild during boot", text)
     if expect_rebuild != "no":
@@ -492,6 +526,7 @@ def main() -> int:
           "usb", expect_usb, "mouse", expect_mouse, "audio", expect_audio,
           "gfx", expect_gfx, "wb", expect_wb, "menu", expect_menu,
           "shell", expect_shell, "keys", expect_keys, "desk", expect_desk,
+          "icons", expect_icons,
           "storage", storage_mode,
           "QEMU exit status", status)
     for line in boot_report:

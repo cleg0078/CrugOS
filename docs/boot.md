@@ -45,8 +45,9 @@ read the non-secret `net.tcp=` / `net.serve=` / `net.dns=` /
 `gfx.wait=` / `gfx.moves=`, phase 6A adds `wb.enable=` / `wb.wait=` /
 `wb.drag=` / `wb.hold=`, phase 6B adds `wb.menu=` / `wb.acts=`, phase 6C
 adds `wb.shell=1` / `wb.sh=` for the shell window, phase 6D adds
-`wb.keys=1` for keyboard navigation of the desktop, and phase 6E adds
-`wb.desk=1` for desktop objects and the depth gadget. A boot
+`wb.keys=1` for keyboard navigation of the desktop, phase 6E adds
+`wb.desk=1` for desktop objects and the depth gadget, and phase 6F adds
+`wb.ikeys=1` for keyboard focus of the icon table. A boot
 medium that ships no block device (the hybrid
 ISO) passes `storage=none`, which is the one token that changes the storage
 contract instead of adding work to it. The
@@ -128,14 +129,18 @@ post-snapshot allocations cannot push it over capacity.
    `CRUGOS: gfx framebuffer absent` or
    `CRUGOS: gfx ready (1024x768, cursor at 512,384)`. `wb_cmdline` then reads
    `wb.enable=`, `wb.wait=<seconds>`, `wb.drag=<n>`, `wb.menu=<0|1>`,
-   `wb.acts=<n>`, `wb.hold=<seconds>`, `wb.keys=<0|1>` and `wb.desk=<0|1>`,
-   and `wb_init` builds the desktop only when the token was supplied: it takes
+   `wb.acts=<n>`, `wb.hold=<seconds>`, `wb.keys=<0|1>`, `wb.desk=<0|1>` and
+   `wb.ikeys=<0|1>` (parsed before `wb.desk=`, and still ignored while
+   `wb.shell=1` owns the keyboard), and `wb_init` builds the desktop only when
+   the token was supplied: it takes
    the framebuffer away from the text console and prints `CRUGOS: wb desktop
    ready (1024x768, 2 window(s))`, followed by `CRUGOS: wb keys ready (window 2
    active)` when `wb.keys=1` asked for keyboard navigation and by
    `CRUGOS: wb icon ready ('System:', volume)` when `wb.desk=1` asked for the
-   desktop object. Without the token the framebuffer console keeps its text
-   mode and no Workbench line appears.
+   desktop object and by `CRUGOS: wb icons ready (N object(s), keyboard focus)`
+   when `wb.ikeys=1` asked for the icon table's keyboard focus. Without the
+   token the framebuffer console keeps its text mode and no Workbench line
+   appears.
 9. `net_init`: reset `net.device` and `tcp_init`, then probe legacy virtio-net
    PCI functions (up to four `eth0`..`eth3`) and register them, bind the DHCP
    client to UDP port 68 and read the `net.tcp=<port>` / `net.serve=<seconds>`
@@ -210,14 +215,15 @@ post-snapshot allocations cannot push it over capacity.
     `gfx.moves=` pointer reports within `gfx.wait=` seconds when those tokens
     were supplied and is silent otherwise; then the Workbench check, which shows
     the desktop and waits for `wb.drag=` title-bar drags and, with `wb.menu=1`,
-    `wb.keys=1` or `wb.desk=1`, for `wb.acts=` menu, gadget, close, resize,
-    icon and depth actions within `wb.wait=` seconds when `wb.enable=` enabled
-    it; with `wb.shell=1` it also waits for `wb.sh=` typed shell commands, and
-    with `wb.desk=1` it opens the `System:` drawer and prints
-    `CRUGOS: wb desk selftest ok (N drawer(s))`. The whole check is silent
-    unless `wb.enable=` enabled it.
+    `wb.keys=1`, `wb.desk=1` or `wb.ikeys=1`, for `wb.acts=` menu, gadget, close,
+    resize, icon, icon-move, depth and front actions within `wb.wait=` seconds
+    when `wb.enable=` enabled it; with `wb.shell=1` it also waits for `wb.sh=`
+    typed shell commands, with `wb.desk=1` it opens the `System:` drawer and
+    prints `CRUGOS: wb desk selftest ok (N drawer(s))`, and with `wb.ikeys=1` it
+    prints `CRUGOS: wb icons selftest ok (N move(s), M front(s))`. The whole
+    check is silent unless `wb.enable=` enabled it.
 14. `report_boot`, `storage_lock` (wipes the passphrase, the volume keys and
-    the bounce buffer), `CRUGOS: phase 6e boot ok`, then `wb_hold` (only when
+    the bounce buffer), `CRUGOS: phase 6f boot ok`, then `wb_hold` (only when
     `wb.hold=` was given: the guest stays alive with the desktop on screen until
     the deadline), `arch_exit_qemu(0x10)`.
 
@@ -384,6 +390,7 @@ CRUGOS: gfx ready (1024x768, cursor at 512,384)
 CRUGOS: wb desktop ready (1024x768, 2 window(s))  # only with wb.enable=1
 CRUGOS: wb keys ready (window 2 active)    # only with wb.keys=1
 CRUGOS: wb icon ready ('System:', volume)  # only with wb.desk=1
+CRUGOS: wb icons ready (1 object(s), keyboard focus)  # only with wb.ikeys=1
 CRUGOS: usb keyboard ready (endpoint 0x81, 8 byte reports)  # USB keyboard attached
 CRUGOS: usb key 'a'                       # one per decoded key while usb.wait= is set
 CRUGOS: usb mouse ready (endpoint 0x81, 4 byte reports)     # USB mouse attached
@@ -459,12 +466,21 @@ CRUGOS: wb window 3 sent to back
 CRUGOS: wb action 2 icon 0
 CRUGOS: wb action 3 depth window 3
 CRUGOS: wb desk selftest ok (1 drawer(s))
+CRUGOS: wb icon 'System:' focused            # only with wb.ikeys=1
+CRUGOS: wb action 4 icon 0 (keyboard)
+CRUGOS: wb icon activated (keyboard)
+CRUGOS: wb icon 'System:' drag to (168, 376)
+CRUGOS: wb icon 'System:' dropped at (168, 376)
+CRUGOS: wb action 5 icon-move 0
+CRUGOS: wb window 1 sent to front
+CRUGOS: wb action 6 front window 1
+CRUGOS: wb icons selftest ok (1 move(s), 1 front(s))
 CRUGOS: sh run 'ver'
-CRUGOS: sh out CrugOS 0.27.0 (phase 6e), x86_64
+CRUGOS: sh out CrugOS 0.28.0 (phase 6f), x86_64
 CRUGOS: wb selftest ok (1 drag(s), 1 action(s))
 CRUGOS: sh selftest ok (1 command(s))
 CRUGOS: selftest ok
-CRUGOS: phase 6e boot ok
+CRUGOS: phase 6f boot ok
 ```
 
 The `virtio : net eth0 mac ...` line, the lease, the ARP resolution, the echo
@@ -505,8 +521,12 @@ window lines. `make demo`
 boots the same desktop interactively instead of headlessly: it passes
 `wb.enable=1 wb.wait=0 wb.hold=<seconds>`, so the log shows the desktop, the two
 windows, `CRUGOS: wb holding desktop for <seconds> s` and
-`CRUGOS: wb hold finished` before the guest exits with status 33. See
-[workbench.md](workbench.md) and [build.md](build.md).
+`CRUGOS: wb hold finished` before the guest exits with status 33.
+`make test-workbench-icons` keeps `wb.desk=1` and adds `wb.ikeys=1 wb.acts=5`,
+and hotplugs a `usb-kbd` as well as a `usb-mouse`, so the log carries the icon
+focus, activation, drag, drop and send-to-front lines and
+`CRUGOS: wb icons selftest ok`. See [workbench.md](workbench.md) and
+[build.md](build.md).
 
 The `audio` lines appear only on machines with a USB audio function: a default
 `q35` boot prints `CRUGOS: audio device absent`, while `make test-audio` adds
@@ -531,13 +551,13 @@ replaced by the skip marker, and the USB device the firmware booted from shows
 up in the USB lines as an unsupported mass-storage function:
 
 ```
-CRUGOS: version 0.27.0
+CRUGOS: version 0.28.0
 CRUGOS: usb controller ready (xhci, 8 port(s))
 CRUGOS: usb device 46f4:0001 on port 1 (speed 4)
 CRUGOS: usb device class 8 on port 1 (unsupported)
 CRUGOS: storage skipped (storage=none)
 CRUGOS: selftest ok
-CRUGOS: phase 6e boot ok
+CRUGOS: phase 6f boot ok
 ```
 
 `kernel/core/report.c` prints the machine description between them: kernel
@@ -600,3 +620,7 @@ reading the byte queue. See [input.md](input.md) for the scancode decoder and
   authentication or firewalling. At most four NICs and four UDP port bindings.
 - `SMEP`/`SMAP` are enabled only when the CPU reports them; `qemu64` does not.
 - No shutdown/reset path; QEMU's debug port is the exit mechanism.
+- Desktop objects are draggable (one at a time), keyboard-focusable and
+  selectable, but they cannot be renamed, there is no multi-select and no
+  rubber-band selection, and a drawer is a snapshot of the root directory: it
+  does not refresh itself and it does not scroll.

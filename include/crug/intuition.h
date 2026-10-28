@@ -37,6 +37,10 @@
 #define INTUITION_ICON_SELECTED_BORDER_RGB 0x00FFB000u
 /* The depth gadget in a title bar, four pixels left of the close gadget. */
 #define INTUITION_DEPTH_SIZE 12u
+/* Phase 6F: the send-to-front gadget, sixteen pixels left of the depth box,
+   and how far a pointer must move before an icon press becomes a drag. */
+#define INTUITION_FRONT_SIZE 12u
+#define INTUITION_ICON_DRAG_MIN 4u
 
 /* What a desktop object represents; the Workbench decides what a press on it
    means, intuition.device only reports the icon index. */
@@ -82,6 +86,8 @@ struct intuition_menu {
 #define INTUITION_EVENT_RESIZE 6u   /* a resize-grip drag finished */
 #define INTUITION_EVENT_ICON 7u     /* a desktop icon was pressed */
 #define INTUITION_EVENT_DEPTH 8u    /* a window was sent to the back */
+#define INTUITION_EVENT_ICON_MOVE 9u /* a desktop icon was dragged */
+#define INTUITION_EVENT_FRONT 10u   /* a window was sent to the front */
 
 struct intuition_event {
     u32 type;
@@ -117,6 +123,14 @@ int intuition_icon_rect(int index, i32 *x, i32 *y, u32 *w, u32 *h);
 int intuition_icon_selected(void);
 u32 intuition_icon_count(void);
 u64 intuition_icon_clicks(void);
+/* Icon drags that moved a tile (phase 6F). */
+u64 intuition_icon_moves(void);
+/* Windows sent to the front through their front gadget (phase 6F). */
+u64 intuition_front_count(void);
+/* Drive the desktop icon table from the keyboard (phase 6F): Tab,
+   Right/Down and Left/Up move the selection, Enter returns 1 when the caller
+   should activate the selected object, Escape clears the selection. */
+int intuition_icon_key(u8 key);
 /* Windows sent to the back through their depth gadget. */
 u64 intuition_depth_count(void);
 /* Install a body painter: the callback receives the body rectangle in screen
