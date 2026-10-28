@@ -56,8 +56,9 @@ parsed by `heap_cmdline()` right after `heap_init()`, and phase H3 adds
 fault injector, parsed by `trap_cmdline()` right after `heap_cmdline()`, and
 phase U1 adds `user.test=`, parsed by `user_test_cmdline()` right after
 `trap_cmdline()`: `user.test=1` runs three ring-3 programs from `/bin` after the
-kernel self-test, and phase U2's `user.test=2` also runs the two-instance
-isolation pair. A boot
+kernel self-test, phase U2's `user.test=2` also runs the two-instance
+isolation pair, and phase U3's `user.test=3` adds the scripted ring-3 shell
+(`/bin/sh` reading `/etc/sh.rc`) as a final stage. A boot
 medium that ships no block device (the hybrid
 ISO) passes `storage=none`, which is the one token that changes the storage
 contract instead of adding work to it. The
@@ -254,11 +255,12 @@ post-snapshot allocations cannot push it over capacity.
     `/bin/fault` one at a time, joins each thread and checks the exit codes 0,
     0 and -14. `user.test=2` runs the same three and then `/bin/iso` twice in
     two address spaces at once, checking the isolation lines below as well as
-    the same exit codes. A mismatch exits 35 before the report. Without the
-    token it prints nothing.
-14. The user self-test of step 13, when it ran, has already joined its three
-    threads; then `report_boot`, `storage_lock` (wipes the passphrase, the
-    volume keys and the bounce buffer), `CRUGOS: phase u2 boot ok`, then
+    the same exit codes. `user.test=3` runs levels 1 and 2 and then `/bin/sh`
+    with the script `/etc/sh.rc`, expecting exit 7. A mismatch exits 35 before
+    the report. Without the token it prints nothing.
+14. The user self-test of step 13, when it ran, has already joined its threads;
+    then `report_boot`, `storage_lock` (wipes the passphrase, the volume keys
+    and the bounce buffer), `CRUGOS: phase u3 boot ok`, then
     `wb_hold` (only when
     `wb.hold=` was given: the guest stays alive with the desktop on screen until
     the deadline), `trap_test_run()` (only when `trap.test=` was given, so the
@@ -527,7 +529,7 @@ CRUGOS: wb window 1 sent to front
 CRUGOS: wb action 6 front window 1
 CRUGOS: wb icons selftest ok (1 move(s), 1 front(s))
 CRUGOS: sh run 'ver'
-CRUGOS: sh out CrugOS 0.36.0 (phase u2), x86_64
+CRUGOS: sh out CrugOS 0.37.0 (phase u3), x86_64
 CRUGOS: wb selftest ok (1 drag(s), 1 action(s))
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb drawer selftest ok (3 scroll(s), 1 refresh(es))
@@ -542,7 +544,7 @@ CRUGOS: user program /bin/badptr finished (exit 0)
 CRUGOS: user fault writing above the window
 CRUGOS: trap report page fault vector=14 error=0x6 ist=0 from=user
 CRUGOS: trap fault present=no write=yes user=yes reserved=no instruction=no cr2=0x10000000000
-CRUGOS: user fault page fault at rip=0x0000008000010054 err=0x0000000000000006 tid 10
+CRUGOS: user fault page fault at rip=0x0000008000010064 err=0x0000000000000006 tid 10
 CRUGOS: user fault killed tid 10 code -14
 CRUGOS: user program /bin/fault finished (exit -14)
 CRUGOS: user isolation start
@@ -550,13 +552,29 @@ CRUGOS: user isolation frames 0x28000 vs 0x38000 at 0x8000030000
 CRUGOS: iso tid 11 word 0x15500b00 ok
 CRUGOS: iso tid 12 word 0x15500c00 ok
 CRUGOS: user isolation ok (2 program(s), 0 mismatch(es))
+CRUGOS: user shell start
+CRUGOS: sh start (argc 2)
+CRUGOS: sh cmd ver
+CRUGOS: sh cmd echo
+CRUGOS: sh cmd cat
+CRUGOS: sh cat /hello.txt 16 byte(s)
+CRUGOS: sh cmd ls
+CRUGOS: sh cmd write
+CRUGOS: storage remounted read-write
+CRUGOS: storage remounted read-only
+CRUGOS: sh write /shout.txt 22 byte(s)
+CRUGOS: sh cmd cat
+CRUGOS: sh cat /shout.txt 22 byte(s)
+CRUGOS: sh cmd exit
+CRUGOS: sh exit 7
+CRUGOS: user shell finished (exit 7)
 CRUGOS: user selftest ok (3 program(s), 1 fault(s))
-boot   : pmm=28671 us cpu=418 us vm=708 us traps=346 us timer=65333 us heap=464 us storage=96362 us sched=300 us syscall=102 us total=192709 us
-CRUGOS: phase u2 boot ok
+boot   : pmm=30266 us cpu=453 us vm=731 us traps=517 us timer=65587 us heap=411 us storage=96353 us sched=328 us syscall=98 us total=194748 us
+CRUGOS: phase u3 boot ok
 ```
 
 With `trap.test=<recipe>` the same boot ends differently: the injector runs after
-`CRUGOS: phase u2 boot ok`, injects exactly one fault and the guest exits 35
+`CRUGOS: phase u3 boot ok`, injects exactly one fault and the guest exits 35
 instead of 33. A `trap.test=de` boot ends:
 
 ```
@@ -587,7 +605,9 @@ With `user.test=1` the kernel runs three ring-3 programs after the kernel
 self-test, so the user markers appear after `CRUGOS: selftest ok`, before the
 `boot   :` report line and before the phase marker; `user.test=2` runs those
 three plus the two-instance isolation pair, whose five lines sit between the
-fault program and the summary. A `make test-user2` boot ends:
+fault program and the summary, and `user.test=3` then runs `/bin/sh` on
+`/etc/sh.rc`, whose shell lines sit between the isolation summary and the
+`user selftest ok` line. A `make test-user3` boot ends:
 
 ```
 CRUGOS: user selftest start
@@ -598,7 +618,7 @@ CRUGOS: user program /bin/badptr finished (exit 0)
 CRUGOS: user fault writing above the window
 CRUGOS: trap report page fault vector=14 error=0x6 ist=0 from=user
 CRUGOS: trap fault present=no write=yes user=yes reserved=no instruction=no cr2=0x10000000000
-CRUGOS: user fault page fault at rip=0x0000008000010054 err=0x0000000000000006 tid 10
+CRUGOS: user fault page fault at rip=0x0000008000010064 err=0x0000000000000006 tid 10
 CRUGOS: user fault killed tid 10 code -14
 CRUGOS: user program /bin/fault finished (exit -14)
 CRUGOS: user isolation start
@@ -606,9 +626,25 @@ CRUGOS: user isolation frames 0x28000 vs 0x38000 at 0x8000030000
 CRUGOS: iso tid 11 word 0x15500b00 ok
 CRUGOS: iso tid 12 word 0x15500c00 ok
 CRUGOS: user isolation ok (2 program(s), 0 mismatch(es))
+CRUGOS: user shell start
+CRUGOS: sh start (argc 2)
+CRUGOS: sh cmd ver
+CRUGOS: sh cmd echo
+CRUGOS: sh cmd cat
+CRUGOS: sh cat /hello.txt 16 byte(s)
+CRUGOS: sh cmd ls
+CRUGOS: sh cmd write
+CRUGOS: storage remounted read-write
+CRUGOS: storage remounted read-only
+CRUGOS: sh write /shout.txt 22 byte(s)
+CRUGOS: sh cmd cat
+CRUGOS: sh cat /shout.txt 22 byte(s)
+CRUGOS: sh cmd exit
+CRUGOS: sh exit 7
+CRUGOS: user shell finished (exit 7)
 CRUGOS: user selftest ok (3 program(s), 1 fault(s))
-boot   : pmm=28671 us cpu=418 us vm=708 us traps=346 us timer=65333 us heap=464 us storage=96362 us sched=300 us syscall=102 us total=192709 us
-CRUGOS: phase u2 boot ok
+boot   : pmm=30266 us cpu=453 us vm=731 us traps=517 us timer=65587 us heap=411 us storage=96353 us sched=328 us syscall=98 us total=194748 us
+CRUGOS: phase u3 boot ok
 ```
 
 Both user excerpts keep the lines the check asserts; a real boot also prints the
@@ -623,12 +659,18 @@ the window, so the fault is real: the phase H3 report prints first with
 `/bin/iso` is the isolation proof: its `.iso` section pins a writable page at
 `0x0000008000030000`, two instances write `0x15500000` plus the tid shifted
 left 8 bits to the same virtual address and re-check their own word after 300
-yields, and the kernel prints the two distinct physical frames. No other gate
-may print a `CRUGOS: user` line: `scripts/boot-check.py` takes the user
-expectation as `EXPECT_USER` (argv[27]) and the isolation expectation as
-`EXPECT_USERS` (argv[28]), so the plain boot markers above stay the contract
-for every gate except `make test-user` (gate 48) and `make test-user2`
-(gate 49; see [userspace.md](userspace.md)).
+yields, and the kernel prints the two distinct physical frames. `/bin/sh` is
+the shell proof: `user.test=3` points it at `/etc/sh.rc`, it opens and reads the
+script through `SYS_OPEN`/`SYS_READ`, runs `ver`, `echo`, `cat`, `ls`, `write`
+and `exit`, and the `write` remounts the root read-write, writes `/shout.txt`
+and returns it to read-only, so `check-disk --expect-shell-write` finds the 22
+bytes after a clean umount. No other gate may print a `CRUGOS: user` line:
+`scripts/boot-check.py` takes the user expectation as `EXPECT_USER`
+(argv[27]), the isolation expectation as `EXPECT_USERS` (argv[28]) and the
+shell expectation as `EXPECT_USHELL` (argv[29]), so the plain boot markers
+above stay the contract for every gate except `make test-user` (gate 48),
+`make test-user2` (gate 49) and `make test-user3` (gate 50; see
+[userspace.md](userspace.md)).
 
 The `virtio : net eth0 mac ...` line, the lease, the ARP resolution, the echo
 reply and `net selftest ok` appear only when a NIC is present and the network
@@ -716,14 +758,14 @@ replaced by the skip marker, and the USB device the firmware booted from shows
 up in the USB lines as an unsupported mass-storage function:
 
 ```
-CRUGOS: version 0.36.0
+CRUGOS: version 0.37.0
 CRUGOS: usb controller ready (xhci, 8 port(s))
 CRUGOS: usb device 46f4:0001 on port 1 (speed 4)
 CRUGOS: usb device class 8 on port 1 (unsupported)
 CRUGOS: storage skipped (storage=none)
 CRUGOS: heap check ok (6 slab(s), 8 object(s), 1 large block(s))
 CRUGOS: selftest ok
-CRUGOS: phase u2 boot ok
+CRUGOS: phase u3 boot ok
 ```
 
 `kernel/core/report.c` prints the machine description between them: kernel
@@ -756,8 +798,10 @@ reading the byte queue. See [input.md](input.md) for the scancode decoder and
   slot 1 holds the thread's 512 GiB to 1 TiB window. Two user programs can run
   at once and the same virtual address maps to different frames, but that is
   isolation between user programs, not against the kernel: slot 0 is still
-  shared, there is no fork/exec at runtime, no `argv`/environment, and there is
-  still no `SYSCALL` MSR gateway; `int 0x80` reaches the same dispatcher.
+  shared. Phase U3 adds file descriptors and an exec-time `argv` block, but
+  there is still no fork, no runtime exec, no environment, no pipes or seek,
+  and descriptors are per thread; there is still no `SYSCALL` MSR gateway,
+  `int 0x80` reaches the same dispatcher.
 - RAID support is RAID1 and RAID10: one `md0` array. A fully blank member is
   rebuilt at boot before ext4 mounts; there is no online rebuild, no hot
   spare, no scrub, no write-intent bitmap and no generation bump. The kernel

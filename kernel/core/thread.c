@@ -298,6 +298,8 @@ static void thread_destroy(thread *t)
         return;
     if (t == g_sched.current)
         panic("sched: cannot destroy current thread");
+    /* A program that exits without closing its files still flushes them. */
+    ufile_close_all(&t->files);
     if (t->space) {
         /* The thread is already off the CPU, so its root is not the active one
            and its tables can be walked and released page by page. */
@@ -331,6 +333,7 @@ thread *thread_create(const char *name, void (*entry)(void *), void *arg,
     t = (thread *)kzalloc(sizeof(thread));
     if (!t)
         return 0;
+    ufile_table_init(&t->files);
     base = pmm_alloc_pages(pages);
     if (base == 0) {
         kfree(t);

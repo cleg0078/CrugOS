@@ -85,19 +85,31 @@ if [ "$mode" = crash ]; then
     debugfs -w -R "write $tmp/crash.txt /simulate-crash" "$fs_image" >/dev/null
 fi
 
-# Optional ring-3 programs (make test-user / test-user2): the kernel loads
-# /bin/hello, /bin/badptr, /bin/fault and /bin/iso from the root filesystem.
+# Optional ring-3 programs (make test-user / test-user2 / test-user3): the
+# kernel loads /bin/hello, /bin/badptr, /bin/fault, /bin/iso and the shell
+# /bin/sh from the root filesystem, plus the script /etc/sh.rc it runs.
 # USER_DIR comes from the environment so the raid/nvme/ahci/crypt call sites
 # keep their positional arguments unchanged.
 if [ -n "${USER_DIR:-}" ]; then
     debugfs -w -R "mkdir /bin" "$fs_image" >/dev/null 2>&1 || true
-    for prog in hello badptr fault iso; do
+    for prog in hello badptr fault iso sh; do
         if [ ! -f "$USER_DIR/$prog" ]; then
             echo "mkdisk: missing user program $USER_DIR/$prog" >&2
             exit 1
         fi
         debugfs -w -R "write $USER_DIR/$prog /bin/$prog" "$fs_image" >/dev/null
     done
+    debugfs -w -R "mkdir /etc" "$fs_image" >/dev/null 2>&1 || true
+    shell_script=$tmp/sh.rc
+    printf '%s\n' \
+        'ver' \
+        'echo hello from the user shell' \
+        'cat /hello.txt' \
+        'ls /' \
+        'write /shout.txt hello-from-user-shell' \
+        'cat /shout.txt' \
+        'exit 7' > "$shell_script"
+    debugfs -w -R "write $shell_script /etc/sh.rc" "$fs_image" >/dev/null
 fi
 
 if [ "$mode" = crypt ]; then

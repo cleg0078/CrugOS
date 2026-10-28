@@ -2,6 +2,7 @@
 """Verify the writable ext4 self-test persisted on a CrugOS GPT disk.
 
 usage: check-disk.py DISK_IMAGE [--crypt-tool MCRYPT --crypt-password PASS]
+       [--expect-shell-write]
 """
 
 import struct
@@ -59,14 +60,19 @@ def main():
     args = sys.argv[1:]
     if not args or args[0].startswith("--"):
         print("usage: check-disk.py DISK_IMAGE "
-              "[--crypt-tool MCRYPT --crypt-password PASS]", file=sys.stderr)
+              "[--crypt-tool MCRYPT --crypt-password PASS] "
+              "[--expect-shell-write]", file=sys.stderr)
         return 2
     disk = Path(args[0])
     crypt_tool = None
     crypt_password = None
     rest = args[1:]
+    expect_shell_write = False
     while rest:
         option = rest.pop(0)
+        if option == "--expect-shell-write":
+            expect_shell_write = True
+            continue
         value = rest.pop(0) if rest else None
         if value is None:
             print("check-disk: %s needs a value" % option, file=sys.stderr)
@@ -123,7 +129,13 @@ def main():
             stat = run(["debugfs", "-R", "stat %s" % stale, str(fs_image)])
             if "Inode:" in stat.stdout:
                 return fail("stale self-test file remains: %s" % stale)
-        print("ok: ext4 root is clean, /hello.txt and /selftest/b.txt persisted",
+        if expect_shell_write:
+            shout = debugfs_dump(fs_image, "/shout.txt", tmpdir / "shout.txt")
+            if shout != b"hello-from-user-shell\n":
+                return fail("unexpected /shout.txt contents from the user shell")
+        print("ok: ext4 root is clean, /hello.txt and /selftest/b.txt persisted" +
+              (", /shout.txt written by the ring-3 shell"
+               if expect_shell_write else ""),
               "(encrypted)" if crypt_tool else "")
         return 0
     except (OSError, ValueError, RuntimeError) as exc:

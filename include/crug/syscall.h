@@ -22,8 +22,19 @@
 #define SYS_SOCKET_ACCEPT 14u
 #define SYS_RESOLVE 15u
 #define SYS_WRITE 16u
-#define SYS_MAX 17u
+#define SYS_OPEN 17u
+#define SYS_READ 18u
+#define SYS_CLOSE 19u
+#define SYS_LISTDIR 20u
+#define SYS_MAX 21u
 
+/* Open flags for SYS_OPEN (phase U3). SYS_O_RDONLY is the zero flag. */
+#define SYS_O_RDONLY 0u
+#define SYS_O_WRONLY 1u
+#define SYS_O_CREAT 2u
+#define SYS_O_TRUNC 4u
+
+#define SYS_ENOENT (-2ll)
 #define SYS_EINVAL (-22ll)
 #define SYS_ENOSYS (-38ll)
 #define SYS_ENOMEM (-12ll)

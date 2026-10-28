@@ -116,8 +116,13 @@ callers; the in-kernel path keeps the identity-map check, which is why the
 self-test above is still meaningful. The syscall layer copies through kernel
 bounce buffers (`SYS_WRITE` moves at most 4096 bytes in 256-byte chunks), so no
 user pointer is dereferenced twice and a fault part-way through reports one
-clean error. See [userspace.md](userspace.md) for the window, the page walk and
-the syscall split.
+clean error. Phase U3 adds the file syscalls on the same boundary: `SYS_OPEN`
+passes its path through `uaccess_user_str`, `SYS_READ`/`SYS_WRITE` move the
+caller's buffer through `uaccess_user_read`/`uaccess_user_write` and
+`SYS_LISTDIR` writes the listing back with `uaccess_user_write`, each through a
+kernel bounce buffer, while a CPL0 caller keeps the `harden_range_ok()`
+identity path. See [userspace.md](userspace.md) for the window, the page walk
+and the syscall split.
 
 ## Image gate
 
@@ -136,7 +141,7 @@ must print.
 
 | Case | Patch | Required marker | Exit |
 | --- | --- | --- | --- |
-| `control` | none | `CRUGOS: phase u2 boot ok` (any phase id matches), `CRUGOS: ext4 ready`, `CRUGOS: storage ready`, `CRUGOS: writable storage ok`, `CRUGOS: selftest ok` | 33 |
+| `control` | none | `CRUGOS: phase u3 boot ok` (any phase id matches), `CRUGOS: ext4 ready`, `CRUGOS: storage ready`, `CRUGOS: writable storage ok`, `CRUGOS: selftest ok` | 33 |
 | `geometry-bpg` | superblock `+0x20` (`s_blocks_per_group`) = 100000 | `CRUGOS: ext4 mount rejected (geometry)` | 35 |
 | `geometry-ipg` | superblock `+0x28` (`s_inodes_per_group`) = 100000 | `CRUGOS: ext4 mount rejected (geometry)` | 35 |
 | `root-extent` | root inode `eh_max` (`inode + 44`) = 5, inode checksum recomputed | `CRUGOS: ext4 mount rejected (root extent)` | 35 |
@@ -298,7 +303,10 @@ ok: hardening pass 1 rejected 6 crafted image(s) (control boot exit 33)
   Phase U1 answers the pointer half with the user copy boundary above and the
   fault half with the per-thread kill path. Phase U2 gives every ring-3 thread
   its own PML4, so two programs run at once with private windows and the same
-  virtual address resolving to different frames. What remains is that slot 0
+  virtual address resolving to different frames, and phase U3 puts the file
+  syscalls on the same copy boundary, so a ring-3 descriptor names a kernel
+  object the caller cannot corrupt (the table is per thread). What remains is
+  that slot 0
   of every space is still the shared kernel identity map: this is isolation
   between user programs, not kernel-address isolation, and there is no
   per-process resource accounting.

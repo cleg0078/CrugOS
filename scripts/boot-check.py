@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Verify a CrugOS boot: serial markers, guest version, CPU policy, storage mode, encryption, networking, TCP, DNS, USB, HID mice, audio, the framebuffer cursor, the Workbench desktop, its menus and gadgets, its shell window, its keyboard
 navigation, its desktop objects, its scrollable drawer, the ring-3 userspace
-selftest, then the exit code.
+selftest and the ring-3 shell that reads a script and writes a file, then the
+exit code.
 
 Pass --storage=none anywhere on the command line when the boot medium ships no
 block device (the hybrid ISO does): the storage, journal, GPT and ext4 markers
@@ -12,7 +13,8 @@ usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE \
     [EXPECT_AHCI [EXPECT_CRYPT [EXPECT_AES [EXPECT_NET [EXPECT_TCP \
     [EXPECT_DNS [EXPECT_USB [EXPECT_MOUSE [EXPECT_AUDIO \
     [EXPECT_GFX [EXPECT_WB [EXPECT_MENU [EXPECT_SHELL [EXPECT_KEYS [EXPECT_DESK \
-    [EXPECT_ICONS [EXPECT_DRAWER [EXPECT_SELECT [EXPECT_HEAP [EXPECT_USER]]]]]]]]]]]]]]]]]]]]]]]] \
+    [EXPECT_ICONS [EXPECT_DRAWER [EXPECT_SELECT [EXPECT_HEAP \
+    [EXPECT_USER [EXPECT_USERS [EXPECT_USHELL]]]]]]]]]]]]]]]]]]]]]]]]] \
     [--storage=none]
 """
 
@@ -41,7 +43,7 @@ REQUIRED_MARKERS = (
     "CRUGOS: selftest ok",
     "CRUGOS: nvme ready",
     "CRUGOS: ahci ready",
-    "CRUGOS: phase u2 boot ok",
+    "CRUGOS: phase u3 boot ok",
 )
 # A rejected unlock stops before scheduling, storage mounting and self-tests.
 WRONG_CRYPT_MARKERS = (
@@ -113,7 +115,7 @@ def main() -> int:
             argv.append(arg)
     sys.argv = [sys.argv[0]] + argv
 
-    if len(sys.argv) not in tuple(range(3, 30)):
+    if len(sys.argv) not in tuple(range(3, 31)):
         print("usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE "
               "[VERSION_FILE [EXPECT_AVX2 [EXPECT_RAID [EXPECT_NVME "
               "[EXPECT_REBUILD [EXPECT_AHCI [EXPECT_CRYPT [EXPECT_AES "
@@ -121,7 +123,7 @@ def main() -> int:
               "[EXPECT_MOUSE [EXPECT_AUDIO [EXPECT_GFX [EXPECT_WB "
               "[EXPECT_MENU [EXPECT_SHELL [EXPECT_KEYS [EXPECT_DESK "
               "[EXPECT_ICONS [EXPECT_DRAWER [EXPECT_SELECT [EXPECT_HEAP "
-              "[EXPECT_USER [EXPECT_USERS]]]]]]]]]]]]]]]]]]]]]]]]] "
+              "[EXPECT_USER [EXPECT_USERS [EXPECT_USHELL]]]]]]]]]]]]]]]]]]]]]]]]] "
               "[--storage=none]",
               file=sys.stderr)
         return 2
@@ -154,6 +156,7 @@ def main() -> int:
     expect_heap = sys.argv[26] if len(sys.argv) >= 27 else "no"
     expect_user = sys.argv[27] if len(sys.argv) >= 28 else "no"
     expect_users = sys.argv[28] if len(sys.argv) >= 29 else "no"
+    expect_ushell = sys.argv[29] if len(sys.argv) >= 30 else "no"
 
     if not serial_path.exists():
         return fail(f"missing serial log {serial_path}", "")
@@ -206,6 +209,8 @@ def main() -> int:
         return fail(f"invalid EXPECT_USER {expect_user!r}", text)
     if expect_users not in ("no", "yes"):
         return fail(f"invalid EXPECT_USERS {expect_users!r}", text)
+    if expect_ushell not in ("no", "yes"):
+        return fail(f"invalid EXPECT_USHELL {expect_ushell!r}", text)
 
     required = list(REQUIRED_MARKERS)
     if storage_mode == "none":
@@ -614,6 +619,23 @@ def main() -> int:
     elif "CRUGOS: user isolation start" in text:
         return fail("unexpected isolation selftest without EXPECT_USERS=yes", text)
 
+    if expect_ushell == "yes":
+        for marker in (
+            "CRUGOS: user shell start",
+            "CRUGOS: user shell finished (exit 7)",
+            "CRUGOS: sh start (argc 2)",
+            "CRUGOS: sh exit 7",
+        ):
+            if marker not in text:
+                return fail(f"missing serial marker: {marker!r}", text)
+        if not re.search(r"CRUGOS: sh write /shout\.txt 22 byte\(s\)", text):
+            return fail("expected the ring-3 shell to write /shout.txt", text)
+        for marker in ("CRUGOS: sh error", "CRUGOS: user shell failed"):
+            if marker in text:
+                return fail(f"the ring-3 shell reported {marker!r}", text)
+    elif "CRUGOS: user shell start" in text:
+        return fail("unexpected ring-3 shell without EXPECT_USHELL=yes", text)
+
     if expect_rebuild == "no" and "CRUGOS: raid rebuilt" in text:
         return fail("unexpected RAID member rebuild during boot", text)
     if expect_rebuild != "no":
@@ -650,7 +672,7 @@ def main() -> int:
           "shell", expect_shell, "keys", expect_keys, "desk", expect_desk,
           "icons", expect_icons, "drawer", expect_drawer,
           "select", expect_select, "heap", expect_heap, "user", expect_user,
-          "isolated", expect_users,
+          "isolated", expect_users, "ushell", expect_ushell,
           "storage", storage_mode,
           "QEMU exit status", status)
     for line in boot_report:

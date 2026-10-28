@@ -34,6 +34,8 @@ void test_shell_functions(void);
 void test_harden_functions(void);
 void test_heap_functions(void);
 void test_trap_functions(void);
+void test_argv_functions(void);
+void test_ufile_functions(void);
 void test_uaccess_functions(void);
 void test_exec_functions(void);
 void test_vm_space_functions(void);
@@ -66,6 +68,8 @@ int main(void)
     RUN(test_harden_functions);
     RUN(test_heap_functions);
     RUN(test_trap_functions);
+    RUN(test_argv_functions);
+    RUN(test_ufile_functions);
     RUN(test_uaccess_functions);
     RUN(test_exec_functions);
     RUN(test_vm_space_functions);

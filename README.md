@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase U2 per-process address space (`v0.36.0`)
+## Status: phase U3 ring-3 shell with file syscalls (`v0.37.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -57,7 +57,11 @@ seven-entry GDT, a fixed 512 GiB to 1 TiB user window, an ELF loader that maps
 and a trap path that kills only the faulting user thread. Phase U2 gives every
 ring-3 thread its own PML4: the window is no longer a shared range in the
 kernel's tables, two programs run at once with the same virtual address pointing
-at different frames, and `make test-user2` is the 49th gate.
+at different frames, and `make test-user2` is the 49th gate. Phase U3 gives ring
+3 the filesystem: `SYS_OPEN`, `SYS_READ`, `SYS_WRITE`, `SYS_CLOSE` and
+`SYS_LISTDIR`, a per-thread descriptor table, an `argc`/`argv` block on the
+initial stack, and `/bin/sh`, which reads `/etc/sh.rc` from the disk image and
+writes `/shout.txt` back; `make test-user3` is the 50th gate.
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -1030,6 +1034,62 @@ the 49th gate.
   checks, the kernel is 263056 B (256 KiB) on disk and 832574 B (813 KiB)
   loaded, and all 49 gates pass.
 
+Phase U3 puts a real shell at CPL3: four file syscalls reach the mounted ext4
+root, the kernel passes `argc`/`argv` on the initial stack, and `/bin/sh` reads
+`/etc/sh.rc` from the disk image and writes `/shout.txt` back, which makes
+`make test-user3` the 50th gate.
+
+- `include/crug/syscall.h` gains `SYS_OPEN` (17), `SYS_READ` (18), `SYS_CLOSE`
+  (19) and `SYS_LISTDIR` (20), `SYS_MAX` becomes 21 and `SYS_ENOENT` (-2) is the
+  new missing-path error; `SYS_WRITE` (16) now writes to an open file when
+  `fd >= 3` and keeps the console behaviour for 1 and 2;
+- `include/crug/ufile.h`/`kernel/fs/ufile.c` hold the per-thread descriptor
+  table: 8 slots starting at fd 3, whole-file read snapshots and a 64 KiB write
+  buffer, a 64-byte path cap, and `thread_destroy()` calling `ufile_close_all()`;
+  a writable close creates/rewrites/truncates the file, fsyncs it and brackets
+  the flush with `storage_remount_rw()`/`storage_remount_ro()`, which is why the
+  log shows `storage remounted read-write` then `read-only`;
+- `kernel/exec/argv.c` builds the initial `argc`/`argv`/`envp` block in a 4 KiB
+  area at the top of the user stack (16 args, 2048 bytes of strings, 16-byte
+  aligned); `elf_exec_run_args(path, argc, argv, out)` starts the thread with
+  `rsp` at `argc`, `user/start.S` loads the three values and `elf_exec_run()`
+  stays the `argc == 0` wrapper;
+- `user/sh.c`, `user/sh.ld` and `scripts/mkdisk.sh` add `/bin/sh` and
+  `/etc/sh.rc`: the shell runs `ver`, `echo`, `cat`, `ls`, `write` and `exit`
+  with static buffers (no user heap yet), reads `argv[1]` or `/etc/sh.rc`, and
+  the shipped script writes `hello-from-user-shell` (22 bytes with the newline);
+- `kernel/core/user_test.c` understands `user.test=3`: the U1 trio, the U2
+  isolation pair and then the shell, expecting exit 7; `make test-user3` is the
+  50th gate and sets `EXPECT_USER=yes`, `EXPECT_USERS=yes` and the new
+  `EXPECT_USHELL=yes` (`argv[29]`, guard now 3..30) under
+  `SHELL_RUN_TIMEOUT_SEC` (240), and runs
+  `check-disk --expect-shell-write`, which asserts `/shout.txt` contains
+  `hello-from-user-shell\n` after a clean umount and `e2fsck`;
+- `make test-host` reports 3663 checks, the kernel is 267976 B (261 KiB) on disk
+  and 842046 B (822 KiB) loaded (`.text` 190790 B, `.rodata` 28608 B, `.bss`
+  622592 B), and all 50 gates pass.
+
+The user part of that gate log:
+
+```
+CRUGOS: user shell start
+CRUGOS: sh start (argc 2)
+CRUGOS: sh cmd ver
+CRUGOS: sh cmd echo
+CRUGOS: sh cmd cat
+CRUGOS: sh cat /hello.txt 16 byte(s)
+CRUGOS: sh cmd ls
+CRUGOS: sh cmd write
+CRUGOS: storage remounted read-write
+CRUGOS: storage remounted read-only
+CRUGOS: sh write /shout.txt 22 byte(s)
+CRUGOS: sh cmd cat
+CRUGOS: sh cat /shout.txt 22 byte(s)
+CRUGOS: sh cmd exit
+CRUGOS: sh exit 7
+CRUGOS: user shell finished (exit 7)
+```
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -1038,9 +1098,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.36.0 (phase u2) -- Amiga-inspired microkernel bring-up
+CrugOS 0.37.0 (phase u3) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.36.0
+CRUGOS: version 0.37.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -1089,7 +1149,7 @@ CRUGOS: tcp http served (72 bytes)
 CRUGOS: net selftest ok
 CRUGOS: gfx ready (1024x768, cursor at 512,384)
 CRUGOS: selftest ok
-kernel : 0x0000000000100000 size=256 KiB
+kernel : 0x0000000000100000 size=261 KiB
 boot   : cpu=0 acpi_rsdp=0x1f77e000 fdt=0x0 initrd=0x0
 memory : 36 regions, usable 474080 KiB (462 MiB)
 pmm    : total=118520 free=118462 bitmap=131072 B
@@ -1099,9 +1159,9 @@ entropy: ca02033c50b53413
 wx     : audit ok, identity map 0..4 GiB, guard unmapped
 heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
-boot   : pmm=28671 us cpu=418 us vm=708 us traps=346 us timer=65333 us heap=464 us storage=96362 us sched=300 us syscall=102 us total=192709 us
+boot   : pmm=30266 us cpu=453 us vm=731 us traps=517 us timer=65587 us heap=411 us storage=96353 us sched=328 us syscall=98 us total=194748 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase u2 boot ok
+CRUGOS: phase u3 boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -1311,6 +1371,7 @@ make test-trap   # inject eight crafted faults and check the report, IST and pan
 make test-fuzz   # mutate a real disk image and fuzz the mount path
 make test-user   # boot with user.test=1 and run three ring-3 programs
 make test-user2  # boot with user.test=2, run the three programs and the isolation pair
+make test-user3  # boot with user.test=3 and run the scripted ring-3 shell
 make iso         # build a bootable hybrid UEFI ISO (build/x86_64/crugos.iso)
 make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
@@ -1318,7 +1379,7 @@ make usb         # write the ISO to a USB block device (USB_DEV=/dev/sdX)
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
 make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows/menus/gadgets, resize grips, keyboard focus and keys, icon dragging, the send-to-front gadget and keyboard icon focus, the body input handler, the text grid and the shell, the user-window and uaccess validators, the per-space page-table tests, and the ELF exec mapper)
 make check-disk  # e2fsck + persisted-file checks on the latest test disk
-make user        # build the four ring-3 programs the disk image carries
+make user        # build the five ring-3 programs the disk image carries
 make disk        # generate the GPT/ext4 test disk
 make raid-disks  # generate the two RAID1 member disks
 make raid10-disks  # generate the four RAID10 member disks
@@ -1343,6 +1404,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `EXPECT_USB`, `EXPECT_MOUSE`, `EXPECT_AUDIO`, `EXPECT_GFX`, `EXPECT_WB`,
 `EXPECT_MENU`, `EXPECT_SHELL`, `EXPECT_KEYS`, `EXPECT_DESK`, `EXPECT_ICONS`,
 `EXPECT_DRAWER`, `EXPECT_SELECT`, `EXPECT_HEAP`, `EXPECT_USER`, `EXPECT_USERS`,
+`EXPECT_USHELL`,
 `AUDIO_RUN_TIMEOUT_SEC`, `AUDIO_QEMU_EXTRA`, `GFX_WAIT`, `GFX_MOVES`,
 `GFX_RUN_TIMEOUT_SEC`, `GFX_QEMU_EXTRA`, `WB_WAIT`, `WB_DRAG`,
 `WB_RUN_TIMEOUT_SEC`, `WB_QEMU_EXTRA`, `WB_MENU_WAIT`, `WB_MENU_ACTS`,
@@ -1355,7 +1417,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `WB_SELECT_FILL`, `WB_SELECT_RUN_TIMEOUT_SEC`, `HARDEN_TIMEOUT_SEC`,
 `HEAP_STRESS_OPS`, `HEAP_RUN_TIMEOUT_SEC`, `TRAP_TIMEOUT_SEC`, `FUZZ_CASES`,
 `FUZZ_CRYPT_CASES`, `FUZZ_SEED`, `FUZZ_TIMEOUT_SEC`, `USER_RUN_TIMEOUT_SEC`,
-`USER2_RUN_TIMEOUT_SEC`,
+`USER2_RUN_TIMEOUT_SEC`, `SHELL_RUN_TIMEOUT_SEC`,
 `DEMO_DISPLAY`, `DEMO_HOLD_SEC`,
 `DEMO_TIMEOUT_SEC`, `DEMO_CMDLINE`, `DEMO_MACHINE_EXTRA`, `DEMO_QEMU_EXTRA`,
 `ISO_IMAGE`, `ISO_STAGE`, `ISO_FAT_IMG`, `ISO_SIZE_MB`, `ISO_VOLID`,

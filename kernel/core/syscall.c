@@ -9,6 +9,8 @@
 #include <crug/string.h>
 #include <crug/net.h>
 #include <crug/uaccess.h>
+#include <crug/ext4.h>
+#include <crug/storage.h>
 
 static i64 syscall_port_create(void)
 {
@@ -98,11 +100,129 @@ static i64 syscall_write(const trap_frame *frame)
     return (i64)done;
 }
 
+/* Phase U3: the fd table lives on the thread and reaches ext4 through this
+   backend, which keeps kernel/fs/ufile.c free of filesystem headers. */
+static int ufile_be_lookup(void *ctx, const char *path, u32 *ino)
+{
+    return ext4_lookup((struct ext4_fs *)ctx, path, ino);
+}
+
+static int ufile_be_read(void *ctx, const char *path, void *buf, usize cap,
+                         u64 *size)
+{
+    return ext4_read_file((struct ext4_fs *)ctx, path, buf, cap, size);
+}
+
+static int ufile_be_create(void *ctx, const char *path, u16 mode)
+{
+    return ext4_create((struct ext4_fs *)ctx, path, mode);
+}
+
+static int ufile_be_write(void *ctx, const char *path, const void *buf,
+                          usize len)
+{
+    return ext4_write_file((struct ext4_fs *)ctx, path, buf, len);
+}
+
+static int ufile_be_truncate(void *ctx, const char *path, u64 size)
+{
+    return ext4_truncate((struct ext4_fs *)ctx, path, size);
+}
+
+static int ufile_be_fsync(void *ctx)
+{
+    return ext4_fsync((struct ext4_fs *)ctx);
+}
+
+/* The boot leaves the root mounted read-only, so a flush asks for a short
+   read-write window and hands the volume back afterwards. */
+static int ufile_be_begin_write(void *ctx)
+{
+    (void)ctx;
+    return storage_remount_rw();
+}
+
+static int ufile_be_end_write(void *ctx)
+{
+    (void)ctx;
+    return storage_remount_ro();
+}
+
+static const struct ufile_backend g_ufile_backend = {
+    ufile_be_lookup,
+    ufile_be_read,
+    ufile_be_create,
+    ufile_be_write,
+    ufile_be_truncate,
+    ufile_be_fsync,
+    ufile_be_begin_write,
+    ufile_be_end_write
+};
+
+/* Shared bounce buffers: one syscall is in flight at a time per CPU. */
+static u8 g_io_buf[SYS_USER_IO_MAX];
+static char g_path_buf[SYS_USER_NAME_MAX];
+
+/* Copies a user path into the kernel buffer, or hands back the CPL0 pointer. */
+static const char *syscall_path(const trap_frame *frame, int user, u64 uaddr)
+{
+    if (user) {
+        if (uaccess_user_str(g_path_buf, uaddr, sizeof(g_path_buf)) != 0)
+            return 0;
+        return g_path_buf;
+    }
+    if (uaddr == 0 || !harden_range_ok(uaddr, 1, HARDEN_IDENTITY_LIMIT))
+        return 0;
+    return (const char *)(uintptr)uaddr;
+}
+
+/* SYS_WRITE(3..10, buf, len): append to an open file through ufile. */
+static i64 syscall_file_write(const trap_frame *frame, int user)
+{
+    thread *cur = sched_current();
+    u64 len = frame->rdx;
+    u64 done = 0;
+
+    if (!cur)
+        return SYS_EBADF;
+    if (len > SYS_USER_IO_MAX)
+        len = SYS_USER_IO_MAX;
+    if (len == 0)
+        return 0;
+    if (frame->rsi == 0)
+        return SYS_EFAULT;
+    if (user) {
+        while (done < len) {
+            u64 n = len - done;
+            i64 put;
+
+            if (n > SYS_WRITE_CHUNK)
+                n = SYS_WRITE_CHUNK;
+            if (uaccess_user_read(g_io_buf, frame->rsi + done, n) != 0)
+                return SYS_EFAULT;
+            put = ufile_write(&cur->files, (u32)frame->rdi, g_io_buf, (u32)n);
+            if (put < 0)
+                return put;
+            done += n;
+        }
+        return (i64)done;
+    }
+    if (!harden_range_ok(frame->rsi, len, HARDEN_IDENTITY_LIMIT))
+        return SYS_EFAULT;
+    return ufile_write(&cur->files, (u32)frame->rdi,
+                       (const void *)(uintptr)frame->rsi, (u32)len);
+}
+
 void syscall_dispatch(trap_frame *frame)
 {
     i64 ret;
     u64 nr = frame->rax;
     int user = from_user(frame);
+
+    if (nr >= SYS_MAX) {
+        frame->rax = (u64)SYS_ENOSYS;
+        return;
+    }
 
     switch (nr) {
     case SYS_PING:
@@ -378,8 +498,138 @@ void syscall_dispatch(trap_frame *frame)
         ret = 0;
         break;
     }
+    case SYS_OPEN: {
+        thread *cur = sched_current();
+        struct ext4_fs *fs = storage_root();
+        const char *path;
+
+        if (!cur || !fs) {
+            ret = SYS_EIO;
+            break;
+        }
+        path = syscall_path(frame, user, frame->rdi);
+        if (!path || path[0] == 0) {
+            ret = SYS_EFAULT;
+            break;
+        }
+        ret = (i64)ufile_open(&cur->files, &g_ufile_backend, fs, path,
+                              (u32)frame->rsi, (u16)frame->rdx);
+        break;
+    }
+    case SYS_READ: {
+        thread *cur = sched_current();
+        u64 fd = frame->rdi;
+        u64 uaddr = frame->rsi;
+        u64 len = frame->rdx;
+        i64 got;
+
+        if (len > SYS_USER_IO_MAX)
+            len = SYS_USER_IO_MAX;
+        if (len == 0 || fd == 0u) {
+            ret = 0;
+            break;
+        }
+        if (!cur) {
+            ret = SYS_EBADF;
+            break;
+        }
+        if (uaddr == 0) {
+            ret = SYS_EFAULT;
+            break;
+        }
+        if (user && uaccess_check(uaddr, len) != 0) {
+            ret = SYS_EFAULT;
+            break;
+        }
+        if (!user && !harden_range_ok(uaddr, len, HARDEN_IDENTITY_LIMIT)) {
+            ret = SYS_EFAULT;
+            break;
+        }
+        got = ufile_read(&cur->files, (u32)fd, g_io_buf, (u32)len);
+        if (got < 0) {
+            ret = got;
+            break;
+        }
+        if (user) {
+            if (uaccess_user_write(uaddr, g_io_buf, (usize)got) != 0) {
+                ret = SYS_EFAULT;
+                break;
+            }
+        } else {
+            memcpy((void *)(uintptr)uaddr, g_io_buf, (usize)got);
+        }
+        ret = got;
+        break;
+    }
+    case SYS_CLOSE: {
+        thread *cur = sched_current();
+        u64 fd = frame->rdi;
+
+        if (fd <= 2u) {
+            ret = 0;
+            break;
+        }
+        if (!cur) {
+            ret = SYS_EBADF;
+            break;
+        }
+        ret = (i64)ufile_close(&cur->files, (u32)fd);
+        break;
+    }
+    case SYS_LISTDIR: {
+        struct ext4_fs *fs = storage_root();
+        const char *path;
+        u64 cap = frame->rdx;
+        usize used;
+        int n;
+
+        if (!fs) {
+            ret = SYS_EIO;
+            break;
+        }
+        path = syscall_path(frame, user, frame->rdi);
+        if (!path) {
+            ret = SYS_EFAULT;
+            break;
+        }
+        if (frame->rsi == 0 || cap == 0) {
+            ret = SYS_EFAULT;
+            break;
+        }
+        if (cap > SYS_USER_IO_MAX)
+            cap = SYS_USER_IO_MAX;
+        if (user && uaccess_check(frame->rsi, cap) != 0) {
+            ret = SYS_EFAULT;
+            break;
+        }
+        if (!user && !harden_range_ok(frame->rsi, cap, HARDEN_IDENTITY_LIMIT)) {
+            ret = SYS_EFAULT;
+            break;
+        }
+        n = ext4_list(fs, path, (char *)g_io_buf, (usize)cap);
+        if (n < 0) {
+            ret = SYS_EIO;
+            break;
+        }
+        used = (usize)n + 1u;
+        if (used > (usize)cap)
+            used = (usize)cap;
+        if (user) {
+            if (uaccess_user_write(frame->rsi, g_io_buf, used) != 0) {
+                ret = SYS_EFAULT;
+                break;
+            }
+        } else {
+            memcpy((void *)(uintptr)frame->rsi, g_io_buf, used);
+        }
+        ret = (i64)n;
+        break;
+    }
     case SYS_WRITE:
-        ret = syscall_write(frame);
+        if (frame->rdi >= UFILE_FD_BASE)
+            ret = syscall_file_write(frame, user);
+        else
+            ret = syscall_write(frame);
         break;
     case SYS_EXIT:
         thread_kill_current(user ? (i64)frame->rdi : 0);

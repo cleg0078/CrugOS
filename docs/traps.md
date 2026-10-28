@@ -107,7 +107,7 @@ panic. The excerpt keeps only the policy-relevant lines; the report's
 CRUGOS: user fault writing above the window
 CRUGOS: trap report page fault vector=14 error=0x6 ist=0 from=user
 CRUGOS: trap fault present=no write=yes user=yes reserved=no instruction=no cr2=0x10000000000
-CRUGOS: user fault page fault at rip=0x0000008000010054 err=0x0000000000000006 tid 10
+CRUGOS: user fault page fault at rip=0x0000008000010064 err=0x0000000000000006 tid 10
 CRUGOS: user fault killed tid 10 code -14
 ```
 

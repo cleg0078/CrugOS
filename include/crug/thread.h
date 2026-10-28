@@ -27,6 +27,8 @@ typedef enum sched_class {
 #define THREAD_GUARD_PAGES 1u
 #define SCHED_CLASSES 4u
 
+#include <crug/ufile.h>
+
 /* A thread that enters ring 3 owns a private address space (phase U2). */
 #define THREAD_FLAG_USER 1u
 
@@ -62,6 +64,8 @@ typedef struct thread {
     u32 space_zero;
     /* Private address space; 0 for every kernel thread. */
     vm_space *space;
+    /* Open files: fds 3..10 index this table (phase U3). */
+    ufile_table files;
 } thread;
 
 void sched_init(void);

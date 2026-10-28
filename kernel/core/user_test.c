@@ -9,6 +9,9 @@
  *   /bin/fault   stores above the user window, so #PF must kill only that
  *                program; the kernel keeps running and sees exit -14
  *
+ * `user.test=3` adds /bin/sh, the ring-3 shell: it opens /etc/sh.rc, runs
+ * the script through the file syscalls, writes /shout.txt and exits 7.
+ *
  * `user.test=2` runs those three and then two concurrent instances of
  * /bin/iso, which write the SAME virtual address (0x8000030000, pinned by
  * user/iso.ld) and yield between write and check. The kernel asserts the two
@@ -151,6 +154,31 @@ static int user_isolation(void)
     return 0;
 }
 
+/* Phase U3: the ring-3 shell. argv carries the script it has to run. */
+static int user_shell(void)
+{
+    static const char *const argv[2] = { "/bin/sh", "/etc/sh.rc" };
+    elf_exec_result res;
+    thread *t;
+    i64 code;
+
+    kprintf("CRUGOS: user shell start\n");
+    memset(&res, 0, sizeof(res));
+    t = elf_exec_run_args("/bin/sh", 2, argv, &res);
+    if (!t) {
+        kprintf("CRUGOS: user selftest failed (/bin/sh did not start)\n");
+        return -1;
+    }
+    code = thread_join_code(t);
+    if (code != 7) {
+        kprintf("CRUGOS: user selftest failed (/bin/sh exited %lld, expected 7)\n",
+                code);
+        return -1;
+    }
+    kprintf("CRUGOS: user shell finished (exit 7)\n");
+    return 0;
+}
+
 int user_selftest(void)
 {
     if (!g_user_test)
@@ -164,6 +192,8 @@ int user_selftest(void)
     if (user_run_one("/bin/fault", -14) != 0)
         return -1;
     if (g_user_test >= 2 && user_isolation() != 0)
+        return -1;
+    if (g_user_test >= 3 && user_shell() != 0)
         return -1;
     kprintf("CRUGOS: user selftest ok (3 program(s), 1 fault(s))\n");
     return 0;

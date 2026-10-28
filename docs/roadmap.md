@@ -1,6 +1,6 @@
 # Roadmap
 
-The specification defines 49 phases/gates. Phase 0 established the smallest
+The specification defines 50 phases/gates. Phase 0 established the smallest
 end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
 phase 1 makes the kernel own physical memory, page tables, exceptions and
 timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
@@ -967,12 +967,13 @@ address-keyed page cookies, validated slab headers and a read-only integrity
 checker. Phase H3 then replaced the per-vector panic one-liner with a trap policy
 and put the four stack-destroying vectors on IST stacks, phase H4 took the
 mount path to the host with a seeded image fuzzer, phase U1 crossed into ring 3,
-and phase U2 gave every ring-3 thread its own PML4, so two programs now run at
-the same time without sharing a window. What remains is runtime `fork`/`exec`
-with `argv` and an environment (the kernel still starts one program per thread),
-weak EFI entropy, and the AHCI timeout bounce reuse. Those are the prerequisites
-for a shell that starts programs on its own, and several of the remaining
-Mediums stay reachable until then.
+phase U2 gave every ring-3 thread its own PML4, so two programs now run at the
+same time without sharing a window, and phase U3 put a real shell in ring 3 with
+file descriptors and an exec-time `argv` block. What remains is `fork` and
+runtime `exec` (the kernel still starts one program per thread) with an
+environment, weak EFI entropy, and the AHCI timeout bounce reuse. Those are the
+prerequisites for a shell that starts programs on its own, and several of the
+remaining Mediums stay reachable until then.
 
 ## Phase H2 - hardened kernel heap (done)
 
@@ -1286,6 +1287,59 @@ Mediums stay reachable until then.
 - docs: `docs/userspace.md` (reworked for U2) plus README, roadmap, versioning,
   build, boot, traps, hardening and iso.
 - All 49 gates pass at `v0.36.0`.
+
+## Phase U3 - a ring-3 shell with file syscalls (done)
+
+- Phase U3 gives ring 3 the filesystem. Four new syscalls reach the mounted
+  ext4 root, the kernel passes `argc`/`argv` on the initial stack, and `/bin/sh`
+  reads a script from the disk image and writes a file back. The phase adds the
+  file layer and one gate; the kernel image, the `BootInfo` v1 handoff and every
+  boot path are unchanged.
+- `include/crug/syscall.h` adds `SYS_OPEN` (17), `SYS_READ` (18), `SYS_CLOSE`
+  (19), `SYS_LISTDIR` (20) and `SYS_MAX` 21; `SYS_WRITE` (16) writes to an open
+  file when `fd >= 3`; `SYS_ENOENT` (-2) is the new missing-path error and any
+  number at or above `SYS_MAX` returns `SYS_ENOSYS`. Open flags are
+  `SYS_O_RDONLY` 0, `SYS_O_WRONLY` 1, `SYS_O_CREAT` 2 and `SYS_O_TRUNC` 4.
+- `include/crug/ufile.h`/`kernel/fs/ufile.c` hold a per-thread descriptor table:
+  `UFILE_FD_MAX` 8 slots starting at fd 3, `UFILE_MAX_BYTES` 64 KiB for the read
+  snapshot and the write buffer, `UFILE_PATH_MAX` 64, and `ufile_close_all()`
+  from `thread_destroy()` so a dying thread never leaks a descriptor. Fds 0/1/2
+  are permanent (stdin and the console).
+- A read-only open snapshots the whole file into the heap; a writable open
+  buffers and flushes on close (create when `SYS_O_CREAT` made the file, write
+  the buffer, otherwise truncate to zero, then fsync). The flush brackets the
+  filesystem with `begin_write`/`end_write`, which on ext4 are
+  `storage_remount_rw()`/`storage_remount_ro()` because the root boots
+  read-only - hence `CRUGOS: storage remounted read-write`/`read-only` around the
+  write.
+- `include/crug/exec.h` and `kernel/exec/argv.c` add the argument block: a
+  4 KiB area at the top of the four stack pages, 16-byte aligned, holding the
+  strings (`EXEC_ARGS_STR_MAX` 2048 bytes), `argv[]` (`EXEC_ARGS_MAX` 16),
+  `envp[]` and `argc`. `elf_exec_run_args(path, argc, argv, out)` starts the
+  thread with `rsp` at `argc`; `user/start.S` loads `rdi`/`rsi`/`rdx` and
+  `elf_exec_run()` stays the `argc == 0` wrapper.
+- `user/sh.c` and `user/sh.ld` add `/bin/sh` at CPL3 with text at
+  `0x8000010000` and data at `0x8000020000`. It supports `ver`, `echo TEXT`,
+  `cat FILE`, `ls PATH`, `write FILE TEXT` and `exit N`, reads `argv[1]` or
+  `/etc/sh.rc`, and uses static buffers because there is no user heap yet.
+  `scripts/mkdisk.sh` writes the shipped `/etc/sh.rc` alongside the programs.
+- `kernel/core/user_test.c` understands `user.test=3`: the U1 trio, the U2
+  isolation pair and then the shell, expecting exit 7. The shipped script reads
+  `/hello.txt` (16 bytes) and writes `/shout.txt` (22 bytes with the newline),
+  which exercises read and write on the same file layer.
+- `make test-user3` is the 50th gate: it rebuilds the disk with all five
+  programs, boots with `user.test=3` under `SHELL_RUN_TIMEOUT_SEC` (240 s), and
+  passes boot-check the new final `EXPECT_USHELL` argument (`argv[29]`, guard
+  `tuple(range(3, 31))`), so the line reports
+  `user yes isolated yes ushell yes`. It then runs check-disk with
+  `--expect-shell-write`, which asserts `/shout.txt` holds
+  `hello-from-user-shell\n` after a clean umount and `e2fsck`.
+- `make test-host` reports 3663 checks; the kernel is 267976 B (261 KiB) on disk
+  and 842046 B (822 KiB) loaded (`.text` 190790 B, `.rodata` 28608 B, `.bss`
+  622592 B), inside the 1 MiB stretch and 2 MiB hard budgets.
+- docs: `docs/userspace.md` (reworked for U3) plus README, roadmap, versioning,
+  build, boot and hardening.
+- All 50 gates pass at `v0.37.0`.
 
 ## Bootable media - hybrid UEFI ISO (done, `v0.23.1`)
 

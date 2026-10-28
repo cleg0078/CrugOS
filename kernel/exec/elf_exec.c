@@ -119,7 +119,8 @@ static void exec_unwind(exec_ctx *ctx)
     ctx->space = 0;
 }
 
-thread *elf_exec_run(const char *path, elf_exec_result *out)
+static thread *elf_exec_impl(const char *path, u32 argc,
+                             const char *const *argv, elf_exec_result *out)
 {
     struct ext4_fs *fs = storage_root();
     elf_ops ops;
@@ -127,8 +128,10 @@ thread *elf_exec_run(const char *path, elf_exec_result *out)
     exec_ctx ctx;
     thread *t;
     u8 *blob;
+    u8 args[EXEC_ARGS_BLOCK_MAX];
     u64 size = 0;
     u64 stack_va;
+    u64 rsp_va = USER_STACK_TOP - 8ull;
 
     if (!fs || !path || !out)
         return 0;
@@ -174,7 +177,26 @@ thread *elf_exec_run(const char *path, elf_exec_result *out)
         exec_unwind(&ctx);
         return 0;
     }
-    t = thread_create_user(path, image.entry, USER_STACK_TOP - 8ull,
+    if (argc != 0) {
+        u64 area = EXEC_ARGS_BLOCK_MAX;
+        u64 area_va = USER_STACK_TOP - area;
+        u64 rsp_off = 0;
+
+        /* The initial stack image lives at the very top of the user stack:
+           argc, argv[], NULL, envp[], NULL, then the strings. */
+        if (exec_args_build(args, area, area_va, argc, argv, 0, &rsp_off) != 0) {
+            kprintf("CRUGOS: exec %s failed (argv block)\n", path);
+            exec_unwind(&ctx);
+            return 0;
+        }
+        if (write_segment(&ctx, area_va, args, (usize)area, 0) != 0) {
+            kprintf("CRUGOS: exec %s failed (cannot write argv)\n", path);
+            exec_unwind(&ctx);
+            return 0;
+        }
+        rsp_va = area_va + rsp_off;
+    }
+    t = thread_create_user(path, image.entry, rsp_va,
                            ctx.space, SCHED_NORMAL);
     if (!t) {
         kprintf("CRUGOS: exec %s failed (cannot create a user thread)\n", path);
@@ -187,4 +209,15 @@ thread *elf_exec_run(const char *path, elf_exec_result *out)
     out->base = image.base;
     out->size = image.size;
     return t;
+}
+
+thread *elf_exec_run(const char *path, elf_exec_result *out)
+{
+    return elf_exec_impl(path, 0, 0, out);
+}
+
+thread *elf_exec_run_args(const char *path, u32 argc, const char *const *argv,
+                          elf_exec_result *out)
+{
+    return elf_exec_impl(path, argc, argv, out);
 }

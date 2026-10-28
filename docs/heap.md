@@ -210,7 +210,7 @@ heap   : total=122880 B used=9040 B slab_pages=28 large_pages=2
 and `boot-check.py` reports the line
 
 ```
-version 0.36.0 avx2 yes raid no nvme no rebuild no ahci no crypt no aes any net no tcp no dns no usb no mouse no audio no gfx no wb no menu no shell no keys no desk no icons no drawer no select no heap yes user no isolated no storage disk QEMU exit status 33
+version 0.37.0 avx2 yes raid no nvme no rebuild no ahci no crypt no aes any net no tcp no dns no usb no mouse no audio no gfx no wb no menu no shell no keys no desk no icons no drawer no select no heap yes user no isolated no ushell no storage disk QEMU exit status 33
 ```
 
 followed by `ok: ext4 root is clean, /hello.txt and /selftest/b.txt persisted`

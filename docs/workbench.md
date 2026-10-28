@@ -623,7 +623,7 @@ CRUGOS: wb window 2 drag start (512, 312)
 CRUGOS: wb window 2 drag to (557, 337)
 CRUGOS: wb window 2 moved to (570, 350)
 CRUGOS: wb selftest ok (1 drag(s), 0 action(s))
-CRUGOS: phase u2 boot ok
+CRUGOS: phase u3 boot ok
 ```
 
 The menu gate is a second boot and adds the action lines:
@@ -641,7 +641,7 @@ CRUGOS: wb menu 'Workbench' open (window 1)
 CRUGOS: wb menu 'Workbench' selected ('Quit')
 CRUGOS: wb action 4 menu window 1 item 2
 CRUGOS: wb selftest ok (0 drag(s), 4 action(s))
-CRUGOS: phase u2 boot ok
+CRUGOS: phase u3 boot ok
 ```
 
 The shell gate is a third boot: it adds `CRUGOS: wb shell ready (window 2,
@@ -668,7 +668,7 @@ CRUGOS: wb menu 'Workbench' item 1 highlighted ('Info')
 CRUGOS: wb menu 'Workbench' selected ('Info')
 CRUGOS: wb action 2 menu window 1 item 1
 CRUGOS: wb selftest ok (0 drag(s), 2 action(s))
-CRUGOS: phase u2 boot ok
+CRUGOS: phase u3 boot ok
 ```
 
 The desktop gate is a fifth boot: it selects the `System:` object, opens its
@@ -686,7 +686,7 @@ CRUGOS: wb window 3 sent to back
 CRUGOS: wb action 3 depth window 3
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb selftest ok (0 drag(s), 3 action(s))
-CRUGOS: phase u2 boot ok
+CRUGOS: phase u3 boot ok
 ```
 
 The icon gate is a sixth boot: it focuses the `System:` object from the
@@ -710,7 +710,7 @@ CRUGOS: wb window 1 sent to front
 CRUGOS: wb action 5 front window 1
 CRUGOS: wb icons selftest ok (1 move(s), 1 front(s))
 CRUGOS: wb selftest ok (0 drag(s), 5 action(s))
-CRUGOS: phase u2 boot ok
+CRUGOS: phase u3 boot ok
 ```
 
 The drawer gate is a seventh boot, the only one that fills the volume first:
@@ -736,7 +736,7 @@ CRUGOS: wb drawer refreshed (29 entries)
 CRUGOS: wb selftest ok (0 drag(s), 0 action(s))
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb drawer selftest ok (3 scroll(s), 1 refresh(es))
-CRUGOS: phase u2 boot ok
+CRUGOS: phase u3 boot ok
 ```
 
 The select gate is an eighth boot: same filled drawer, but the pointer now
@@ -759,7 +759,7 @@ CRUGOS: wb drawer scrollbar to (top 18 of 29)
 CRUGOS: wb drawer selected '<name>' (index 18 of 29)
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb select selftest ok (2 select(s), 1 scrollbar drag(s))
-CRUGOS: phase u2 boot ok
+CRUGOS: phase u3 boot ok
 ```
 
 | marker | when |

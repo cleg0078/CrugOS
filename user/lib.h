@@ -8,6 +8,16 @@
 #define U_SYS_YIELD 2u
 #define U_SYS_EXIT 8u
 #define U_SYS_WRITE 16u
+#define U_SYS_OPEN 17u
+#define U_SYS_READ 18u
+#define U_SYS_CLOSE 19u
+#define U_SYS_LISTDIR 20u
+
+/* SYS_OPEN flags (phase U3). U_O_RDONLY is the zero flag. */
+#define U_O_RDONLY 0u
+#define U_O_WRONLY 1u
+#define U_O_CREAT 2u
+#define U_O_TRUNC 4u
 
 /* Kernel ABI: nr in rax, arguments in rdi, rsi, rdx, then r10. */
 static inline i64 u_syscall3(u64 nr, u64 a, u64 b, u64 c)
@@ -85,6 +95,57 @@ static inline i64 u_puthex(u64 v)
         out[i] = digits[n - 1u - i];
     out[n] = 0;
     return u_puts(out);
+}
+
+static inline i64 u_write(u32 fd, const void *buf, u64 len)
+{
+    return u_syscall3(U_SYS_WRITE, (u64)fd, (u64)(uintptr)buf, len);
+}
+
+static inline i64 u_open(const char *path, u32 flags, u32 mode)
+{
+    return u_syscall3(U_SYS_OPEN, (u64)(uintptr)path, (u64)flags, (u64)mode);
+}
+
+static inline i64 u_read(u32 fd, void *buf, u32 len)
+{
+    return u_syscall3(U_SYS_READ, (u64)fd, (u64)(uintptr)buf, (u64)len);
+}
+
+static inline i64 u_close(u32 fd)
+{
+    return u_syscall3(U_SYS_CLOSE, (u64)fd, 0, 0);
+}
+
+static inline i64 u_listdir(const char *path, void *buf, u32 len)
+{
+    return u_syscall3(U_SYS_LISTDIR, (u64)(uintptr)path, (u64)(uintptr)buf,
+                      (u64)len);
+}
+
+static inline int u_strcmp(const char *a, const char *b)
+{
+    while (*a != 0 && *a == *b) {
+        a++;
+        b++;
+    }
+    return (int)((unsigned char)*a - (unsigned char)*b);
+}
+
+static inline i64 u_atoi(const char *s)
+{
+    i64 v = 0;
+    int neg = 0;
+
+    if (*s == (char)45) {
+        neg = 1;
+        s++;
+    }
+    while (*s >= (char)48 && *s <= (char)57) {
+        v = v * 10 + (i64)(*s - (char)48);
+        s++;
+    }
+    return neg ? -v : v;
 }
 
 static inline i64 u_write_bad_ptr(void)

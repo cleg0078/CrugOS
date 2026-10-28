@@ -6,16 +6,19 @@ belongs to user code, a copy boundary on every syscall pointer, and a fault
 policy that charges a ring-3 fault to the program instead of the kernel. Phase
 U2 then turned the single shared window into one PML4 per ring-3 thread, so two
 programs run at the same time with the same virtual address pointing at
-different frames.
+different frames. Phase U3 puts a real shell in ring 3: new file syscalls reach
+the ext4 root, the kernel passes `argc`/`argv` on the initial stack, and
+`/bin/sh` reads a script from the disk and writes a file back.
 
-The current gate is `make test-user2` (gate 49): it boots with `user.test=2`,
-runs the three U1 programs in sequence and then two instances of an isolation
-program concurrently, and checks that each sees its own word at the shared
-address.
+The current gate is `make test-user3` (gate 50): it boots with `user.test=3`,
+runs the three U1 programs and the U2 isolation pair, then runs `/bin/sh` on
+`/etc/sh.rc` and checks that the script's `write` created `/shout.txt` on the
+disk. `make test-user2` (gate 49) still covers the isolation pair alone.
 
 Nothing in these phases changes the boot paths, the disk image format or the
-loaded program ABI the UEFI loader uses. The kernel gains `SYS_WRITE` and one
-syscall mode switch; every non-user gate still boots with no user program at all.
+loaded program ABI the UEFI loader uses. The kernel gains `SYS_WRITE` and the
+file syscalls plus one syscall mode switch; every non-user gate still boots with
+no user program at all.
 
 ## Why ring 3 now
 
@@ -193,6 +196,9 @@ constants and the result struct. Each exec owns a fresh `vm_space`:
    something.
 7. The space is handed to `thread_create_user(path, entry, sp, space,
    SCHED_NORMAL)`, which makes the thread runnable with its own root.
+8. When the caller has arguments, `elf_exec_run_args` copies the argv block into
+   the top of the stack pages before the thread starts; the next section covers
+   the layout. `elf_exec_run` is the `argc == 0` wrapper.
 
 The entry point is checked by `harden_user_entry_ok`, and `thread_create_user`
 checks the initial user stack pointer with the same validator. A program whose
@@ -203,6 +209,27 @@ One bug worth remembering from landing U2: `vm_init` used to publish the root
 only after mapping the kernel sections, but the section mapper walks the root, so
 the boot page-faulted before the IDT existed. It now publishes
 `g_root`/`vm_space_set_kernel_root` immediately after allocating the root page.
+
+## Arguments on the user stack
+
+`kernel/exec/argv.c` builds the initial stack block, and
+`elf_exec_run_args(path, argc, argv, out)` is the entry point that uses it. The
+block lives in a 4 KiB area (`EXEC_ARGS_BLOCK_MAX`) at the top of the four stack
+pages and is 16-byte aligned; it holds the argument strings
+(`EXEC_ARGS_STR_MAX` 2048 bytes in total), the `argv[]` array
+(`EXEC_ARGS_MAX` 16 entries), the `envp[]` array, and the `argc` word.
+
+The thread is started with `rsp` pointing at that block, so a user program sees:
+
+| Register | Value |
+| --- | --- |
+| `rdi` | `argc` |
+| `rsi` | `argv` |
+| `rdx` | `envp` |
+
+`user/start.S` loads the three values from the initial stack before it aligns
+`rsp`, then calls `main(argc, argv, envp)`. `elf_exec_run(path, out)` is the old
+`argc == 0` wrapper, so the U1 programs still start with an empty argument list.
 
 ## The syscall boundary
 
@@ -243,12 +270,66 @@ int uaccess_user_str  (char *kdst, u64 uaddr, u64 cap);
 `uaccess_user_str` reports an unterminated string as `UACCESS_EFAULT`; it never
 scans past `cap`.
 
-`SYS_WRITE` (16) is the U1 call: `fd` must be 1 or 2, the length is clamped to
+`SYS_WRITE` (16) started as the console call: `fd` 1 or 2, the length clamped to
 4096 bytes, and the kernel copies in 256-byte chunks into a stack buffer
-(`SYS_BOUNCE_MAX` covers the larger message ports) and `kprintf`s each chunk.
-`SYS_MAX` is 17. `SYS_EXIT` (8) from CPL3 records the exit code and ends only that
-thread; the kernel continues. `SYS_EBUSY` (-16) is the error a caller gets when a
-thread cannot be created.
+(`SYS_BOUNCE_MAX` covers the larger message ports) and `kprintf`s each chunk. In
+U3 the same call also writes to an open file when `fd >= 3`; the console
+behaviour is unchanged. `SYS_MAX` is 21. `SYS_EXIT` (8) from CPL3 records the exit
+code and ends only that thread; the kernel continues. `SYS_EBUSY` (-16) is the
+error a caller gets when a thread cannot be created.
+
+## File descriptors and the file syscalls
+
+Phase U3 gives ring 3 a filesystem: four new calls in `kernel/core/syscall.c`
+export the mounted ext4 root, and `include/crug/ufile.h` / `kernel/fs/ufile.c`
+hold the per-thread descriptor table.
+
+| nr | Call | Arguments | Returns |
+| --- | --- | --- | --- |
+| 17 | `SYS_OPEN` | `(path, flags, mode)` | a descriptor, or a negative error |
+| 18 | `SYS_READ` | `(fd, buf, len)` | bytes read, 0 at end of file |
+| 19 | `SYS_CLOSE` | `(fd)` | 0 |
+| 20 | `SYS_LISTDIR` | `(path, buf, len)` | bytes written into the buffer |
+
+Descriptors 0, 1 and 2 are permanent: 0 is stdin (`SYS_READ` returns 0, i.e.
+EOF), 1 and 2 are the console for `SYS_WRITE`, and closing any of them is a no-op
+that returns 0. Files start at `UFILE_FD_BASE` (3), and the descriptor is simply
+`3 + slot` in a table with `UFILE_FD_MAX` (8) entries. The table is per thread:
+`thread_destroy` calls `ufile_close_all`, and a descriptor opened in one thread
+is not visible in another. `UFILE_PATH_MAX` is 64 bytes.
+
+Open flags are the four values in `include/crug/syscall.h`:
+
+| Flag | Value | Meaning |
+| --- | --- | --- |
+| `SYS_O_RDONLY` | 0 | read the file |
+| `SYS_O_WRONLY` | 1 | open for writing (the file must exist) |
+| `SYS_O_CREAT` | 2 | create the file if it is missing |
+| `SYS_O_TRUNC` | 4 | truncate it |
+
+Read-only opens snapshot the whole file into the heap at open time, so a later
+`SYS_READ` never touches the filesystem: the read path copies from that buffer
+and returns 0 once it is exhausted. `UFILE_MAX_BYTES` (64 KiB) caps both the
+snapshot and the write buffer.
+
+Writable opens buffer in the heap and flush on `SYS_CLOSE`:
+
+- when `SYS_O_CREAT` actually created the file, the flush creates it;
+- when bytes were buffered, the flush writes the whole buffer from offset 0;
+- otherwise the flush truncates the file to zero bytes;
+- the file is fsynced last.
+
+The flush brackets the filesystem with an optional `begin_write`/`end_write`
+hook. On the ext4 backend those hooks are `storage_remount_rw()` and
+`storage_remount_ro()`, because the boot mounts the root read-only and only a
+pending write should remount it; the serial log shows
+`CRUGOS: storage remounted read-write` and then
+`CRUGOS: storage remounted read-only` around the write.
+
+`SYS_LISTDIR` copies newline-separated names into the user buffer and NUL
+terminates the result, so a user program can list `/` without knowing the
+on-disk directory format. `SYS_MAX` is 21, and any number at or above it returns
+`SYS_ENOSYS`. `SYS_ENOENT` (-2) is the new error for a path that does not exist.
 
 ## Scheduler and user threads
 
@@ -278,7 +359,7 @@ H3, see [traps.md](traps.md)) and then branches on the classification:
   prints two lines and kills the faulting thread with code `-vector`:
 
   ```
-  CRUGOS: user fault page fault at rip=0x0000008000010054 err=0x0000000000000006 tid 10
+  CRUGOS: user fault page fault at rip=0x0000008000010064 err=0x0000000000000006 tid 10
   CRUGOS: user fault killed tid 10 code -14
   ```
 
@@ -303,7 +384,8 @@ exactly which program died.
 
 `user/` holds the sources and the linker scripts; `make user` builds them and
 `scripts/mkdisk.sh` writes them into `/bin` when `USER_DIR` is set. The U1 three
-run one after another; the U2 isolation pair runs at the same time.
+run one after another; the U2 isolation pair runs at the same time; the U3 shell
+runs last, on its own, after the pair has been joined.
 
 | Program | What it proves | Expected exit |
 | --- | --- | --- |
@@ -311,6 +393,7 @@ run one after another; the U2 isolation pair runs at the same time.
 | `/bin/badptr` | a kernel pointer is refused with `-EFAULT`, not dereferenced | 0 |
 | `/bin/fault` | a store above the window kills only the program | -14 |
 | `/bin/iso` | two instances at the same VA see different frames | 0 |
+| `/bin/sh` | a user program reads a script from ext4 and writes a file back | 7 |
 
 `hello.c` prints `CRUGOS: user hello from ring 3` and returns 0. `badptr.c` calls
 `SYS_WRITE` with `0x00100000` (a kernel address) and checks that the return value
@@ -327,10 +410,54 @@ address** maps to two different physical frames (it prints
 both and counts mismatches. Two words `0x15500b00` and `0x15500c00` mean tids 11
 and 12 both kept their own value.
 
+## The ring-3 shell
+
+`user/sh.c` is `/bin/sh`, linked by `user/sh.ld` (text R+X at
+`0x8000010000`, data R+W at `0x8000020000`, `ENTRY(_start)`). It is a real
+program at CPL3: every file it touches goes through `SYS_OPEN`, `SYS_READ`,
+`SYS_WRITE`, `SYS_CLOSE` and `SYS_LISTDIR`, and every character it prints goes
+through `SYS_WRITE` on fd 1.
+
+There is no user heap and no `malloc` in ring 3 yet: the shell keeps its line
+buffer, path buffer and command buffer as static arrays inside its data segment.
+
+With no argument the shell runs `/etc/sh.rc`; `argv[1]` overrides the script
+path. It executes one command per line:
+
+| Command | Effect |
+| --- | --- |
+| `ver` | print the version line |
+| `echo TEXT` | print `TEXT` |
+| `cat FILE` | read the file and write its bytes to the console |
+| `ls PATH` | list a directory |
+| `write FILE TEXT` | write `TEXT` plus a newline to `FILE` |
+| `exit N` | stop with exit code `N` |
+
+`scripts/mkdisk.sh` writes the shipped `/etc/sh.rc` into the disk image:
+
+```sh
+ver
+echo hello from the user shell
+cat /hello.txt
+ls /
+write /shout.txt hello-from-user-shell
+cat /shout.txt
+exit 7
+```
+
+That script is the write proof. `cat /hello.txt` reads 16 bytes that were placed
+in the image at build time; `write /shout.txt hello-from-user-shell` creates a
+new file through the syscall layer, and the two remount lines appear around the
+flush; the second `cat` reads back the 22 bytes the shell wrote (21 characters
+plus the newline that `write` appends). `exit 7` is the code `make test-user3`
+expects, and `check-disk --expect-shell-write` checks the bytes on disk after a
+clean umount and `e2fsck`.
+
 ## Building a user program
 
-A user program is a freestanding ELF64 linked by `user/user.ld` (the isolation
-program uses `user/iso.ld` because it needs the extra pinned section):
+A user program is a freestanding ELF64 linked by `user/user.ld`. The isolation
+program uses `user/iso.ld` because it needs the extra pinned section, and the
+shell uses `user/sh.ld` because it wants its data segment at a fixed address:
 
 | Rule | Value | Why |
 | --- | --- | --- |
@@ -340,11 +467,11 @@ program uses `user/iso.ld` because it needs the extra pinned section):
 | data | `PT_LOAD` R+W, `VM_NX` | writable, never executable |
 | segments | page aligned | the loader maps whole pages and refuses unaligned p_vaddr |
 
-`start.S` aligns the stack, calls `main`, and turns main's return value into
-`SYS_EXIT` - there are no arguments and no `argv`. It cannot use `cli` or `hlt`,
-which are privileged. `user/lib.h` is the whole runtime: inline `int $0x80`
-wrappers (`nr` in `rax`, arguments in `rdi`, `rsi`, `rdx`, then `r10`), plus
-`u_strlen`, `u_puts`, `u_putnum` and `u_exit`.
+`start.S` reads `argc`, `argv` and `envp` from the initial stack, aligns the
+stack, calls `main`, and turns main's return value into `SYS_EXIT`. It cannot use
+`cli` or `hlt`, which are privileged. `user/lib.h` is the whole runtime: inline
+`int $0x80` wrappers (`nr` in `rax`, arguments in `rdi`, `rsi`, `rdx`, then
+`r10`), plus `u_strlen`, `u_puts`, `u_putnum` and `u_exit`.
 
 The build rule is a single Makefile target:
 
@@ -352,17 +479,17 @@ The build rule is a single Makefile target:
 make user
 ```
 
-`USER_PROGRAMS` is `hello badptr fault iso`. The common rule compiles
+`USER_PROGRAMS` is `hello badptr fault iso sh`. The common rule compiles
 `user/*.c` with `-fcrug-kernel -ffreestanding -mcmodel=large -nostdlib -no-pie
--Wl,-T,user/user.ld` into `build/x86_64/user/<name>`; `iso` has an explicit rule
-of its own because it links with `user/iso.ld` and
-`ISO_LDFLAGS := -nostdlib -static -no-pie -Wl,--build-id=none
--Wl,-T,user/iso.ld`.
+-Wl,-T,user/user.ld` into `build/x86_64/user/<name>`; `iso` and `sh` have
+explicit rules of their own because they link with `user/iso.ld` and
+`user/sh.ld` (`ISO_LDFLAGS := -nostdlib -static -no-pie -Wl,--build-id=none
+-Wl,-T,user/iso.ld`).
 
 `scripts/mkdisk.sh` reads `USER_DIR` from the environment (the existing
 raid/nvme/crypt call sites are unchanged) and writes each program into `/bin`
-with `debugfs`. A missing program is a warning at disk-build time and a
-"did not start" failure at run time.
+with `debugfs`, plus the shipped `/etc/sh.rc` script. A missing program is a
+warning at disk-build time and a "did not start" failure at run time.
 
 ## Markers
 
@@ -381,32 +508,44 @@ with `debugfs`. A missing program is a warning at disk-build time and a
 | `CRUGOS: user isolation frames ... at 0x8000030000` | before the pair | the same VA has two different frames |
 | `CRUGOS: iso tid N word 0x... ok` | from `/bin/iso` | an instance kept its own word |
 | `CRUGOS: user isolation ok (2 program(s), 0 mismatch(es))` | end of pair | both instances kept their value |
+| `CRUGOS: user shell start` | `user.test=3` | the shell is about to run |
+| `CRUGOS: sh start (argc 2)` | from `/bin/sh` | `argv` arrived on the user stack |
+| `CRUGOS: sh cmd <name>` | from `/bin/sh` | one line of the script |
+| `CRUGOS: sh cat <path> <n> byte(s)` | from `/bin/sh` | `SYS_READ` returned `n` bytes |
+| `CRUGOS: sh write <path> <n> byte(s)` | from `/bin/sh` | the write buffer was flushed |
+| `CRUGOS: sh exit <n>` | from `/bin/sh` | the script asked for exit code `n` |
+| `CRUGOS: user shell finished (exit <n>)` | after join | the shell thread is gone |
+| `CRUGOS: storage remounted read-write` | kernel write flush | the root was remounted for a pending write |
+| `CRUGOS: storage remounted read-only` | kernel write flush | back to the read-only mount |
 | `CRUGOS: user selftest ok (3 program(s), 1 fault(s))` | end | the U1 programs behaved |
 
 The counting line is unchanged: it counts the sequential U1 programs, not the
-isolation pair. The crash report lines (`CRUGOS: trap report ...`) are
-documented in [traps.md](traps.md) and appear between the fault line and the
-kill line.
+isolation pair and not the shell. The crash report lines
+(`CRUGOS: trap report ...`) are documented in [traps.md](traps.md) and appear
+between the fault line and the kill line.
 
 ## The gate
 
-`make test-user2` is gate 49 and the only gate that sets both `EXPECT_USER=yes`
-and `EXPECT_USERS=yes`:
+`make test-user3` is gate 50 and the only gate that sets `EXPECT_USER=yes`,
+`EXPECT_USERS=yes` and `EXPECT_USHELL=yes`:
 
 ```sh
-make test-user2
+make test-user3
 ```
 
-It rebuilds the ESP and the disk with all four programs (`disk` depends on
-`user`), boots with `user.test=2` on the kernel command line under a
-`USER2_RUN_TIMEOUT_SEC` (240) budget, then runs `scripts/boot-check.py` with the
-new final argument `EXPECT_USERS` (`argv[28]`, with `EXPECT_USER` still at
-`argv[27]`) plus `check-disk`. The argument-count guard is now
-`tuple(range(3, 30))`. Every other gate keeps `EXPECT_USER=no` and
-`EXPECT_USERS=no`, so boot-check fails a plain boot that prints any user or
-isolation marker - the feature must be dormant unless the token is present.
-`make test-user` (gate 48) stays as it was, running `user.test=1` with the three
-U1 programs only.
+It rebuilds the ESP and the disk with all five programs (`disk` depends on
+`user`), boots with `user.test=3` on the kernel command line under a
+`SHELL_RUN_TIMEOUT_SEC` (240) budget, then runs `scripts/boot-check.py` with the
+new final argument `EXPECT_USHELL` (`argv[29]`; `EXPECT_USER` is `argv[27]` and
+`EXPECT_USERS` is `argv[28]`) plus `check-disk --expect-shell-write`. The
+argument-count guard is now `tuple(range(3, 31))`. Every other gate keeps the
+three flags at `no`, so boot-check fails a plain boot that prints any user,
+isolation or shell marker - the feature must be dormant unless the token is
+present.
+
+`make test-user` (gate 48) and `make test-user2` (gate 49) still run their own
+levels: `user.test=1` is the three U1 programs, `user.test=2` adds the isolation
+pair, and `user.test=3` adds the shell.
 
 Captured output from the gate in order (the report's `trap rip=` line and the two
 `trap regs` lines are elided - they carry the same frame the `user fault` line
@@ -419,16 +558,29 @@ CRUGOS: user program /bin/hello finished (exit 0)
 CRUGOS: user badptr blocked (EFAULT)
 CRUGOS: user program /bin/badptr finished (exit 0)
 CRUGOS: user fault writing above the window
-CRUGOS: user fault page fault at rip=0x0000008000010054 err=0x0000000000000006 tid 10
+CRUGOS: user fault page fault at rip=0x0000008000010064 err=0x0000000000000006 tid 10
 CRUGOS: user fault killed tid 10 code -14
 CRUGOS: user program /bin/fault finished (exit -14)
 CRUGOS: user isolation start
-CRUGOS: user isolation frames 0x28000 vs 0x38000 at 0x8000030000
-CRUGOS: iso tid 11 word 0x15500b00 ok
-CRUGOS: iso tid 12 word 0x15500c00 ok
 CRUGOS: user isolation ok (2 program(s), 0 mismatch(es))
+CRUGOS: user shell start
+CRUGOS: sh start (argc 2)
+CRUGOS: sh cmd ver
+CRUGOS: sh cmd echo
+CRUGOS: sh cmd cat
+CRUGOS: sh cat /hello.txt 16 byte(s)
+CRUGOS: sh cmd ls
+CRUGOS: sh cmd write
+CRUGOS: storage remounted read-write
+CRUGOS: storage remounted read-only
+CRUGOS: sh write /shout.txt 22 byte(s)
+CRUGOS: sh cmd cat
+CRUGOS: sh cat /shout.txt 22 byte(s)
+CRUGOS: sh cmd exit
+CRUGOS: sh exit 7
+CRUGOS: user shell finished (exit 7)
 CRUGOS: user selftest ok (3 program(s), 1 fault(s))
-CRUGOS: phase u2 boot ok
+CRUGOS: phase u3 boot ok
 ```
 
 Between `user fault writing above the window` and the `user fault page fault`
@@ -439,11 +591,12 @@ bits, same `cr2`).
 The boot check that accepts it:
 
 ```
-ok: boot markers found, version 0.36.0 avx2 yes raid no nvme no rebuild no ahci no crypt no aes any net no tcp no dns no usb no mouse no audio no gfx no wb no menu no shell no keys no desk no icons no drawer no select no heap no user yes isolated yes storage disk QEMU exit status 33
+ok: boot markers found, version 0.37.0 avx2 yes raid no nvme no rebuild no ahci no crypt no aes any net no tcp no dns no usb no mouse no audio no gfx no wb no menu no shell no keys no desk no icons no drawer no select no heap no user yes isolated yes ushell yes storage disk QEMU exit status 33
 ```
 
-The `user yes` and `isolated yes` fields are the user fields; all others are the
-same as the H4 gate. The boot timing line is unchanged in shape:
+The `user yes`, `isolated yes` and `ushell yes` fields are the user fields; all
+others are the same as the H4 gate. The boot timing line has the same shape
+(values vary by run):
 
 ```
 boot   : pmm=28671 us cpu=418 us vm=708 us traps=346 us timer=65333 us heap=464 us storage=96362 us sched=300 us syscall=102 us total=192709 us
@@ -452,7 +605,7 @@ boot   : pmm=28671 us cpu=418 us vm=708 us traps=346 us timer=65333 us heap=464 
 `check-disk` runs after the boot and reports the root filesystem intact:
 
 ```
-ok: ext4 root is clean, /hello.txt and /selftest/b.txt persisted
+ok: ext4 root is clean, /hello.txt and /selftest/b.txt persisted, /shout.txt written by the ring-3 shell
 ```
 
 Reading a failure:
@@ -463,13 +616,21 @@ Reading a failure:
   image - check the segment policy and the linker script;
 - `(... exited X, expected Y)` names the exact mismatch: badptr returning 0
   instead of a clean `-EFAULT`, or fault not dying with -14;
-- a missing `user isolation ...` line means `user.test=2` did not reach
-  `user_test.c`; a `iso tid ... word ... mismatch` line means two programs saw
+- a missing `user isolation ...` line means the level did not reach
+  `user_test.c`; an `iso tid ... word ... mismatch` line means two programs saw
   each other's write - the per-space mapping or the CR3 switch is broken;
+- a missing `user shell start` or `sh start` line means `user.test=3` did not
+  reach `user_test.c`, `/bin/sh` is missing from the disk, or the shell failed
+  before its first syscall;
+- a `user shell finished` exit other than 7 means the script stopped early or a
+  file syscall failed - the last `sh cmd` line says where;
+- a `check-disk` complaint about `/shout.txt` means the flush did not reach the
+  image: look for the two `storage remounted` lines and for a write error in the
+  serial log;
 - a panic during the run means a fault was classified `TRAP_FATAL` - the panic
   line names the vector;
-- an unexpected `CRUGOS: user ...` line on a non-user gate is itself a failure
-  (boot-check requires the matching `EXPECT_*` flag).
+- an unexpected `CRUGOS: user ...`, `iso ...` or `sh ...` line on a non-user gate
+  is itself a failure (boot-check requires the matching `EXPECT_*` flag).
 
 ## Limits
 
@@ -478,10 +639,19 @@ Reading a failure:
 - The user window's intermediate page tables (the PML4 slot 1 PDPT, its PD and
   its PTs) are created once per space and released only at `vm_space_destroy`;
   `vm_space_unmap_user_pages` frees the leaf frame, not the tables.
-- No `fork` or runtime `exec`: `elf_exec_run` is called by the kernel (selftest,
-  future shell), not by a program, and one program per thread is still the rule.
-- No `argv` or environment: the kernel enters at `_start` with an aligned stack
-  and nothing else; the test programs take no arguments.
+- No `fork` or runtime `exec`: `elf_exec_run` and `elf_exec_run_args` are called
+  by the kernel (selftest, shell launch), not by a program, and one program per
+  thread is still the rule.
+- `argv` exists only at exec time: the kernel builds the block and the shell
+  receives one script path. A program cannot start another program with
+  arguments, and nothing sets an environment variable.
+- No user heap and no `malloc` in ring 3: the shell and the test programs use
+  static buffers, so dynamic memory needs a ring-3 allocator first.
+- File descriptors are per thread, not per process: `thread_destroy` calls
+  `ufile_close_all`, and there is no way to share an open file between threads.
+- No pipes, append or seek: the five calls above are the whole interface. A read
+  is a 64 KiB snapshot taken at open time, and a writable open rewrites the file
+  from offset 0 on close.
 - No ring-3 preemption promises beyond the ordinary scheduler: the iretq enables
   interrupts before the first user instruction, and the timer path is the same as
   for kernel threads.

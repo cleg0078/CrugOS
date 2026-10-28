@@ -21,6 +21,7 @@
 #   make test-fuzz           mutate a real disk image and fuzz the mount path
 #   make test-user           run a ring-3 program and prove the user/kernel walls
 #   make test-user2          run two ring-3 programs at once and prove their spaces are isolated
+#   make test-user3          run a ring-3 shell that reads a script and writes a file
 #   make test-raid  boot RAID1 (two members) and verify member disks
 #   make test-raid10  boot RAID10 (four members) and verify member disks
 #   make test-nvme   boot from an NVMe namespace and verify the disk
@@ -112,6 +113,7 @@ EXPECT_SELECT ?= no
 EXPECT_HEAP ?= no
 EXPECT_USER ?= no
 EXPECT_USERS ?= no
+EXPECT_USHELL ?= no
 
 # QEMU / firmware options.
 MEMORY_MB ?= 512
@@ -190,6 +192,9 @@ USER_RUN_TIMEOUT_SEC ?= 240
 
 # Address-space isolation gate (make test-user2): two ring-3 programs at once.
 USER2_RUN_TIMEOUT_SEC ?= 240
+
+# Ring-3 shell gate (make test-user3): file syscalls, argv and /bin/sh.
+SHELL_RUN_TIMEOUT_SEC ?= 240
 
 # Interactive demo (make demo): a real QEMU window with a USB keyboard and
 # mouse, the Workbench desktop and a hold so the window stays open.
@@ -317,7 +322,7 @@ KERNEL_DEPS := $(KERNEL_OBJECTS:.o=.d)
 
 USER_ELF_DIR := $(BUILD)/user
 USER_OBJ := $(BUILD)/user/obj
-USER_PROGRAMS := hello badptr fault iso
+USER_PROGRAMS := hello badptr fault iso sh
 USER_ELF := $(patsubst %,$(USER_ELF_DIR)/%,$(USER_PROGRAMS))
 USER_FLAGS := -std=gnu11 -fcrug-kernel -ffreestanding -fno-pic -fno-pie \
               -mcmodel=large -fno-stack-protector -fno-builtin -fno-ident \
@@ -331,6 +336,10 @@ USER_LDFLAGS := -nostdlib -static -no-pie -Wl,--build-id=none \
 # its own script.
 ISO_LDFLAGS := -nostdlib -static -no-pie -Wl,--build-id=none \
                -Wl,-T,user/iso.ld
+# The shell has read-only text and read-write data segments, so it needs a
+# script that keeps them apart for the W^X mapping in elf_exec.c.
+SH_LDFLAGS := -nostdlib -static -no-pie -Wl,--build-id=none \
+              -Wl,-T,user/sh.ld
 
 LOADER_SOURCES := $(wildcard boot/efi/*.c)
 LOADER_OBJECTS := $(patsubst %,$(OBJ)/%.o,$(basename $(LOADER_SOURCES)))
@@ -343,7 +352,7 @@ HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
         mkcrypt crypt-disk raid-repair-disks raid10-repair-disks run demo test test-compat \
         test-raid test-raid-degraded test-raid10 test-raid10-degraded test-nvme test-ahci \
         test-raid-repair test-raid10-repair test-journal-csum test-journal-replay \
-        test-hardening test-heap test-trap test-fuzz test-user test-user2 \
+        test-hardening test-heap test-trap test-fuzz test-user test-user2 test-user3 \
         test-crypt test-crypt-recovery test-crypt-wrongkey test-crypt-tamper test-crypt-ni \
         test-crypt-prompt test-crypt-prompt-wrong test-crypt-prompt-timeout \
         test-crypt-keyboard test-crypt-keyboard-wrong crypt-run test-net test-tcp \
@@ -440,6 +449,11 @@ $(USER_ELF_DIR)/%: $(USER_OBJ)/start.o $(USER_OBJ)/%.o user/user.ld
 $(USER_ELF_DIR)/iso: $(USER_OBJ)/start.o $(USER_OBJ)/iso.o user/iso.ld
 	@mkdir -p $(dir $@)
 	$(Q)$(CC) $(USER_FLAGS) $(ISO_LDFLAGS) -o $@ $(USER_OBJ)/start.o $(USER_OBJ)/iso.o
+	@echo "  USRLD $@"
+
+$(USER_ELF_DIR)/sh: $(USER_OBJ)/start.o $(USER_OBJ)/sh.o user/sh.ld
+	@mkdir -p $(dir $@)
+	$(Q)$(CC) $(USER_FLAGS) $(SH_LDFLAGS) -o $@ $(USER_OBJ)/start.o $(USER_OBJ)/sh.o
 	@echo "  USRLD $@"
 
 user: $(USER_ELF)
@@ -991,6 +1005,22 @@ test-user2: esp user
 		$(EXPECT_USER) $(EXPECT_USERS)
 	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 
+# Ring-3 shell gate: boot with user.test=3, so the kernel also runs /bin/sh at
+# CPL3. The shell reads /etc/sh.rc through SYS_OPEN/SYS_READ, lists the root,
+# writes /shout.txt and exits 7; check-disk proves the file survived umount.
+test-user3: EXPECT_USER := yes
+test-user3: EXPECT_USERS := yes
+test-user3: EXPECT_USHELL := yes
+test-user3: esp user
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(MAKE) --no-print-directory disk
+	$(Q)$(MAKE) --no-print-directory run TIMEOUT_SEC=$(SHELL_RUN_TIMEOUT_SEC) \
+		CMDLINE_EXTRA="user.test=3"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION \
+		$(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no no \
+		$(EXPECT_USER) $(EXPECT_USERS) $(EXPECT_USHELL)
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG) --expect-shell-write
+
 check-disk:
 	@if [ -n "$(DISK_IMG)" ] && [ ! -f "$(DISK_IMG)" ]; then \
 		$(MAKE) --no-print-directory disk; \
@@ -1106,6 +1136,8 @@ options:
 	@printf '  %-16s %s\n' USER_RUN_TIMEOUT_SEC "$(USER_RUN_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' EXPECT_USERS "$(EXPECT_USERS)"
 	@printf '  %-16s %s\n' USER2_RUN_TIMEOUT_SEC "$(USER2_RUN_TIMEOUT_SEC) (seconds)"
+	@printf '  %-16s %s\n' EXPECT_USHELL "$(EXPECT_USHELL)"
+	@printf '  %-16s %s\n' SHELL_RUN_TIMEOUT_SEC "$(SHELL_RUN_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' FUZZ_CASES "$(FUZZ_CASES)"
 	@printf '  %-16s %s\n' FUZZ_CRYPT_CASES "$(FUZZ_CRYPT_CASES)"
 	@printf '  %-16s %s\n' FUZZ_SEED "$(FUZZ_SEED)"

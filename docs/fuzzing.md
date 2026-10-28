@@ -302,7 +302,7 @@ release. It:
    `FUZZ_SEED` and `FUZZ_TIMEOUT_SEC`, and fails on the first finding.
 
 It never boots QEMU, so its output has no kernel banner and no
-`CRUGOS: phase u2 boot ok` line. The green case prints:
+`CRUGOS: phase u3 boot ok` line. The green case prints:
 
 ```
 ok: fuzz selftest detected the injected crash (signal 11)
