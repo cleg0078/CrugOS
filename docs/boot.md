@@ -246,7 +246,7 @@ post-snapshot allocations cannot push it over capacity.
     `CRUGOS: heap check ok (S slab(s), O object(s), L large block(s))` and,
     when `heap.stress=` or `heap.guard=` was supplied, runs those passes too.
 14. `report_boot`, `storage_lock` (wipes the passphrase, the volume keys and
-    the bounce buffer), `CRUGOS: phase h3 boot ok`, then `wb_hold` (only when
+    the bounce buffer), `CRUGOS: phase h4 boot ok`, then `wb_hold` (only when
     `wb.hold=` was given: the guest stays alive with the desktop on screen until
     the deadline), `trap_test_run()` (only when `trap.test=` was given, so the
     fault lands after the phase marker) and `arch_exit_qemu(0x10)`.
@@ -514,18 +514,18 @@ CRUGOS: wb window 1 sent to front
 CRUGOS: wb action 6 front window 1
 CRUGOS: wb icons selftest ok (1 move(s), 1 front(s))
 CRUGOS: sh run 'ver'
-CRUGOS: sh out CrugOS 0.33.0 (phase h3), x86_64
+CRUGOS: sh out CrugOS 0.34.0 (phase h4), x86_64
 CRUGOS: wb selftest ok (1 drag(s), 1 action(s))
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb drawer selftest ok (3 scroll(s), 1 refresh(es))
 CRUGOS: wb select selftest ok (2 select(s), 1 scrollbar drag(s))
 CRUGOS: sh selftest ok (1 command(s))
 CRUGOS: selftest ok
-CRUGOS: phase h3 boot ok
+CRUGOS: phase h4 boot ok
 ```
 
 With `trap.test=<recipe>` the same boot ends differently: the injector runs after
-`CRUGOS: phase h3 boot ok`, injects exactly one fault and the guest exits 35
+`CRUGOS: phase h4 boot ok`, injects exactly one fault and the guest exits 35
 instead of 33. A `trap.test=de` boot ends:
 
 ```
@@ -547,7 +547,10 @@ CRUGOS: trap fault present=no write=yes user=no reserved=no instruction=no cr2=0
 
 A `trap.test=df`, `nmi`, `mc` or `db` boot reports `ist=1`, `ist=2`, `ist=3` and
 `ist=4`. The formatter, the classification matrix and the eight recipes are in
-[traps.md](traps.md); `make test-trap` is the gate.
+[traps.md](traps.md); `make test-trap` is the gate. Phase H4's
+`make test-fuzz` adds no line here: it mutates disk images on the host in a
+forked child and never boots QEMU, so it produces no serial output at all (see
+[fuzzing.md](fuzzing.md)).
 
 The `virtio : net eth0 mac ...` line, the lease, the ARP resolution, the echo
 reply and `net selftest ok` appear only when a NIC is present and the network
@@ -635,14 +638,14 @@ replaced by the skip marker, and the USB device the firmware booted from shows
 up in the USB lines as an unsupported mass-storage function:
 
 ```
-CRUGOS: version 0.33.0
+CRUGOS: version 0.34.0
 CRUGOS: usb controller ready (xhci, 8 port(s))
 CRUGOS: usb device 46f4:0001 on port 1 (speed 4)
 CRUGOS: usb device class 8 on port 1 (unsupported)
 CRUGOS: storage skipped (storage=none)
 CRUGOS: heap check ok (6 slab(s), 8 object(s), 1 large block(s))
 CRUGOS: selftest ok
-CRUGOS: phase h3 boot ok
+CRUGOS: phase h4 boot ok
 ```
 
 `kernel/core/report.c` prints the machine description between them: kernel

@@ -101,7 +101,7 @@ must print.
 
 | Case | Patch | Required marker | Exit |
 | --- | --- | --- | --- |
-| `control` | none | `CRUGOS: phase h3 boot ok` (any phase id matches), `CRUGOS: ext4 ready`, `CRUGOS: storage ready`, `CRUGOS: writable storage ok`, `CRUGOS: selftest ok` | 33 |
+| `control` | none | `CRUGOS: phase h4 boot ok` (any phase id matches), `CRUGOS: ext4 ready`, `CRUGOS: storage ready`, `CRUGOS: writable storage ok`, `CRUGOS: selftest ok` | 33 |
 | `geometry-bpg` | superblock `+0x20` (`s_blocks_per_group`) = 100000 | `CRUGOS: ext4 mount rejected (geometry)` | 35 |
 | `geometry-ipg` | superblock `+0x28` (`s_inodes_per_group`) = 100000 | `CRUGOS: ext4 mount rejected (geometry)` | 35 |
 | `root-extent` | root inode `eh_max` (`inode + 44`) = 5, inode checksum recomputed | `CRUGOS: ext4 mount rejected (root extent)` | 35 |
@@ -114,6 +114,17 @@ hostile case must not print `CRUGOS: ext4 ready` or `CRUGOS: storage ready`:
 the point is a clean refusal, not a crash that happens to stop the boot. A
 QEMU timeout (exit 124) fails the case; a still-running guest is not evidence of
 a rejection.
+
+Phase H4 adds the complementary host-side gate. `make test-fuzz` is not a
+crafted case and not a boot: per case it mutates a copy of the pristine disk
+image -- and the 256-byte crypt volume header -- forks a child and runs
+`gpt_parse()`, `ext4_mount()`, the read path and the write path in a host
+harness before the kernel ever sees the bytes, so the fail-closed property above
+is also probed with thousands of mutations no hand-written case covers. It
+cannot replace this gate: it runs in ring 3, never boots QEMU and starts every
+mutation from a clean image, so the crafted-image boot stays the only place
+where a rejection proves the kernel prints the right marker and exits 35. See
+[fuzzing.md](fuzzing.md) and gate 47 in [build.md](build.md).
 
 ## Ordering
 
@@ -236,9 +247,14 @@ ok: hardening pass 1 rejected 6 crafted image(s) (control boot exit 33)
 - The AHCI timeout path still reuses its bounce buffer after a failed command;
   the crypt pass bounds the buffers it owns but AHCI has no equivalent
   ownership check yet.
-- There is no host-side fuzzer for ext4, GPT or the crypt format. H1 proves
-  six specific crafted images (plus an unpatched control); a fuzzer that mutates whole images and runs
-  the mount path in a harness is the next step.
+- A host-side fuzzer now exists but is not this gate: phase H4's
+  `make test-fuzz` mutates whole disk images (and the crypt volume header) in a
+  forked host process and drives the real `kernel/fs/ext4.c`, `kernel/fs/gpt.c`
+  and `kernel/block/crypt_meta.c`, 20000 ext4 cases plus 2000 header cases per
+  sweep, with about 10580 cases mounting, 10535 walking a path, 2594 writing
+  and 0 crashes. It stops where a host process cannot follow: no ring-0-only
+  faults, no QEMU devices, no dirty-journal replay and no concurrency. See
+  [fuzzing.md](fuzzing.md).
 - Several Mediums become Critical once ring 3 exists: today a bad pointer in
   the syscall ABI is caught by the in-kernel self-test, but a DPL3 process
   would reach the same dispatcher directly. The validators are the part that

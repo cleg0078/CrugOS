@@ -27,7 +27,7 @@ SOURCES := main.c test_string.c test_printf.c test_elf.c test_bitmap.c test_vm_m
            ../../kernel/core/process.c \
            ../../boot/efi/elf.c
 
-.PHONY: all run clean
+.PHONY: all run clean fuzz
 
 all: $(BIN)
 
@@ -37,6 +37,18 @@ $(BIN): $(SOURCES)
 
 run: $(BIN)
 	./$(BIN)
+
+# The mount-path fuzzer is a separate binary: it installs its own stubs for the
+# physical memory manager and the kernel panic hook and links only the storage
+# stack, so it must not share the unit-test link line.
+FUZZ_BIN := $(BUILD)/fuzz-mount
+FUZZ_SOURCES := fuzz_mount.c ../../kernel/fs/ext4.c ../../kernel/fs/gpt.c ../../kernel/fs/journal.c ../../kernel/mm/heap.c ../../kernel/lib/string.c ../../kernel/lib/printf.c ../../kernel/lib/bitmap.c ../../kernel/lib/crc32c.c ../../kernel/lib/harden.c ../../kernel/block/block.c ../../kernel/block/crypt_meta.c ../../kernel/crypto/blake2b.c ../../kernel/crypto/argon2id.c ../../kernel/crypto/aes.c ../../kernel/crypto/xts.c ../../kernel/crypto/aesni.S
+
+fuzz: $(FUZZ_BIN)
+
+$(FUZZ_BIN): $(FUZZ_SOURCES)
+	@mkdir -p $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(FUZZ_SOURCES)
 
 clean:
 	rm -rf $(BUILD)

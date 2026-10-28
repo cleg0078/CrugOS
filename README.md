@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase H3 trap policy and crash reports (`v0.33.0`)
+## Status: phase H4 host mount-path fuzzer (`v0.34.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -49,7 +49,9 @@ tokens baked in. Phase H1 hardened the boot path against crafted images, phase
 H2 hardened the kernel heap with address-keyed page cookies, validated headers
 and a read-only integrity checker, and phase H3 gives every fault the same
 bounded report, classifies it for a kernel or a user frame, and delivers the
-four stack-destroying vectors on IST stacks.
+four stack-destroying vectors on IST stacks. Phase H4 takes the storage mount
+path to the host: it mutates real disk images and mounts every mutant in a
+forked child, 22000 cases per gate.
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -873,6 +875,46 @@ IST stacks so the handler still runs when the fault destroyed the stack.
   checks, the kernel is 253144 B (247 KiB) on disk and the load image 821986 B
   (802 KiB), and all 46 gates pass.
 
+Phase H4 attacks the mount path from the host instead of from QEMU: the kernel
+image, the `BootInfo` v1 ABI and every boot path are unchanged, and the release
+adds a fuzzer, its own link line and one more gate.
+
+- `tests/host/fuzz_mount.c` (about 890 lines) links the real `kernel/fs/ext4.c`,
+  `kernel/fs/gpt.c`, `kernel/fs/journal.c`, `kernel/block/block.c`,
+  `kernel/block/crypt_meta.c`, `kernel/mm/heap.c`, the `kernel/lib/*` helpers and
+  the `kernel/crypto/*` primitives against host stubs for `kprintf()` (silent
+  unless `--verbose-kernel`), `panic()` (exit 97) and the `pmm_*` allocator (a
+  32 MiB static arena), and serves the image through a bounds-checked in-memory
+  block device; it builds as a separate `tests/host/build/fuzz-mount` binary
+  because it installs its own stubs and must not share the unit-test link line;
+- it finds the `crugroot` partition with the real `gpt_parse()` -- callers test
+  `< 0`, because the function returns the partition count -- and weights six
+  mutation regions: superblock 22, group descriptors 14, inode table 16, root
+  directory block 16, a 64 KiB metadata window 17 and the whole partition 15;
+- each case forks, applies one to four mutations from eight kinds (one-byte XOR,
+  `0xFF` fill, zero fill, `u16`/`u32`/`u64` write, a 16-byte splice, a 16-byte
+  random fill) with edge-weighted values, runs `gpt_parse()` -> `ext4_mount()`
+  (25% read-write) -> lookup/list/read -> the write path (create, write,
+  truncate, fsync, rename, unlink, mkdir/rmdir) -> `ext4_umount()`, and encodes
+  how far it got in its exit code (0 rejected, 1 mounted, 2 walked a path,
+  3 wrote);
+- a signal, the panic code 97 or an exit code above 3 is a finding: the plan is
+  printed and the mutant image dumped under `build/x86_64/fuzz/`, and
+  `--selftest` forks a child that dereferences null so a green gate proves the
+  detector works; a pristine-image control mount runs before the first case;
+- the crypt leg mutates the 256-byte `struct crug_crypt_header` and calls
+  `crypt_meta_validate()`/`crypt_meta_scratch_bytes()` -- the on-disk header
+  parser, not the Argon2id unlock;
+- `make test-fuzz` is the 47th gate: it rebuilds `disk.img` and `crypt.img`,
+  runs the self-test and then 20000 ext4 cases plus 2000 header cases with
+  `FUZZ_SEED` 1337 and `FUZZ_TIMEOUT_SEC` 10, in about 23 seconds and without a
+  QEMU boot, so it prints no kernel version line; it reports about 10580 cases
+  mounted, 10535 that walked a path, 2594 that wrote and 0 crashes, four seeds
+  agree, and [docs/fuzzing.md](docs/fuzzing.md) records both that result and the
+  fault classes the harness cannot reach;
+- `make test-host` still reports 3400 checks, the kernel is still 253144 B
+  (247 KiB) on disk and 821986 B (802 KiB) loaded, and all 47 gates pass.
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -881,9 +923,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.33.0 (phase h3) -- Amiga-inspired microkernel bring-up
+CrugOS 0.34.0 (phase h4) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.33.0
+CRUGOS: version 0.34.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -944,7 +986,7 @@ heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
 boot   : pmm=28552 us cpu=438 us vm=626 us traps=360 us timer=65357 us heap=60 us storage=94487 us sched=354 us syscall=122 us total=190359 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase h3 boot ok
+CRUGOS: phase h4 boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -1151,6 +1193,7 @@ make test-workbench-select  # click drawer rows and drag its scrollbar
 make test-hardening  # craft hostile superblock/inode/crypt images and boot them
 make test-heap   # corrupt the kernel heap and prove the integrity checker catches it
 make test-trap   # inject eight crafted faults and check the report, IST and panic
+make test-fuzz   # mutate a real disk image and fuzz the mount path
 make iso         # build a bootable hybrid UEFI ISO (build/x86_64/crugos.iso)
 make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
@@ -1192,7 +1235,8 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `WB_ICONS_RUN_TIMEOUT_SEC`, `WB_DRAWER_WAIT`, `WB_DRAWER_ACTS`, `WB_DRAWER_FILL`,
 `WB_DRAWER_RUN_TIMEOUT_SEC`, `WB_SELECT_WAIT`, `WB_SELECT_ACTS`,
 `WB_SELECT_FILL`, `WB_SELECT_RUN_TIMEOUT_SEC`, `HARDEN_TIMEOUT_SEC`,
-`HEAP_STRESS_OPS`, `HEAP_RUN_TIMEOUT_SEC`, `TRAP_TIMEOUT_SEC`, `DEMO_DISPLAY`, `DEMO_HOLD_SEC`,
+`HEAP_STRESS_OPS`, `HEAP_RUN_TIMEOUT_SEC`, `TRAP_TIMEOUT_SEC`, `FUZZ_CASES`,
+`FUZZ_CRYPT_CASES`, `FUZZ_SEED`, `FUZZ_TIMEOUT_SEC`, `DEMO_DISPLAY`, `DEMO_HOLD_SEC`,
 `DEMO_TIMEOUT_SEC`, `DEMO_CMDLINE`, `DEMO_MACHINE_EXTRA`, `DEMO_QEMU_EXTRA`,
 `ISO_IMAGE`, `ISO_STAGE`, `ISO_FAT_IMG`, `ISO_SIZE_MB`, `ISO_VOLID`,
 `ISO_CMDLINE`, `ISO_DATE`, `ISO_RUN_TIMEOUT_SEC`, `EXPECT_ISO`, `ISO_IMG`,
@@ -1228,10 +1272,10 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/crypto/` | AES, XTS, AES-NI, BLAKE2b and Argon2id (shared with the host tools) |
 | `drivers/` | PCI, legacy virtio-blk, NVMe and AHCI/SATA block device drivers, legacy virtio-net, and the xHCI controller with its USB HID keyboard, mouse and Audio Class decoders (audio frames flow into `kernel/audio/`) |
 | `scripts/` | QEMU runner, disk/RAID1/RAID10/crypt image builders, the hybrid ISO builder (`mkiso.sh`, `mkfat.py`), boot/PE/disk/RAID/journal/crypt/ISO checks, the serial and keyboard prompt drivers, tamper helper, size and reproducibility gates |
-| `tests/host/` | host unit tests for freestanding code |
+| `tests/host/` | host unit tests for freestanding code and the mount-path fuzzer (`fuzz_mount.c`) |
 | `tools/` | host-side development tools (`gen-font.py`, `mkcrypt.c`, `gen-crc32c.py`) |
 | `docs/` | [build](docs/build.md), [boot](docs/boot.md), [storage](docs/storage.md), [checksums](docs/checksums.md), [crypto](docs/crypto.md), [input](docs/input.md), [network](docs/network.md),
-[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [USB/xHCI](docs/usb.md), [audio](docs/audio.md), [graphics](docs/gfx.md), [Workbench](docs/workbench.md), [bootable ISO](docs/iso.md), [kernel heap](docs/heap.md), [trap policy](docs/traps.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
+[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [USB/xHCI](docs/usb.md), [audio](docs/audio.md), [graphics](docs/gfx.md), [Workbench](docs/workbench.md), [bootable ISO](docs/iso.md), [kernel heap](docs/heap.md), [trap policy](docs/traps.md), [mount-path fuzzing](docs/fuzzing.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
 
 ## Versioning
 

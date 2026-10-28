@@ -18,6 +18,7 @@
 #   make test-hardening      boot crafted images and prove the kernel rejects them
 #   make test-heap           corrupt the kernel heap and prove the integrity checker catches it
 #   make test-trap           inject crafted CPU faults and check the crash reports
+#   make test-fuzz           mutate a real disk image and fuzz the mount path
 #   make test-raid  boot RAID1 (two members) and verify member disks
 #   make test-raid10  boot RAID10 (four members) and verify member disks
 #   make test-nvme   boot from an NVMe namespace and verify the disk
@@ -166,6 +167,13 @@ WB_SELECT_RUN_TIMEOUT_SEC ?= 240
 # Hardening gate (make test-hardening): how long each crafted image may boot.
 HARDEN_TIMEOUT_SEC ?= 120
 
+# Mount-path fuzzing gate (make test-fuzz): the harness is a host binary, so the
+# case count and the per-case timeout are the only knobs it needs.
+FUZZ_CASES ?= 20000
+FUZZ_CRYPT_CASES ?= 2000
+FUZZ_SEED ?= 1337
+FUZZ_TIMEOUT_SEC ?= 10
+
 # Heap gate (make test-heap): random allocation churn plus the corruption probes.
 HEAP_STRESS_OPS ?= 4000
 HEAP_RUN_TIMEOUT_SEC ?= 240
@@ -303,7 +311,7 @@ HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
         mkcrypt crypt-disk raid-repair-disks raid10-repair-disks run demo test test-compat \
         test-raid test-raid-degraded test-raid10 test-raid10-degraded test-nvme test-ahci \
         test-raid-repair test-raid10-repair test-journal-csum test-journal-replay \
-        test-hardening test-heap test-trap \
+        test-hardening test-heap test-trap test-fuzz \
         test-crypt test-crypt-recovery test-crypt-wrongkey test-crypt-tamper test-crypt-ni \
         test-crypt-prompt test-crypt-prompt-wrong test-crypt-prompt-timeout \
         test-crypt-keyboard test-crypt-keyboard-wrong crypt-run test-net test-tcp \
@@ -883,6 +891,16 @@ test-trap: esp
 		--exit-code $(abspath $(QEMU_EXIT)) \
 		--timeout $(TRAP_TIMEOUT_SEC)
 
+# Fuzzing gate: rebuild a known-good ext4 disk and crypt volume, then let the
+# host harness mutate them and mount every case in a forked child. A child that
+# dies on a signal or hits the kernel panic hook fails the gate.
+test-fuzz:
+	$(Q)rm -f $(DISK_IMG) $(CRYPT_IMG)
+	$(Q)$(MAKE) --no-print-directory disk crypt-disk
+	$(Q)$(MAKE) --no-print-directory -C tests/host fuzz
+	$(Q)tests/host/build/fuzz-mount --image $(abspath $(DISK_IMG)) --cases 1 --selftest
+	$(Q)tests/host/build/fuzz-mount --image $(abspath $(DISK_IMG)) --crypt-image $(abspath $(CRYPT_IMG)) --cases $(FUZZ_CASES) --crypt-cases $(FUZZ_CRYPT_CASES) --seed $(FUZZ_SEED) --timeout $(FUZZ_TIMEOUT_SEC) --crash-dir $(abspath $(BUILD_ROOT))/fuzz
+
 check-disk:
 	@if [ -n "$(DISK_IMG)" ] && [ ! -f "$(DISK_IMG)" ]; then \
 		$(MAKE) --no-print-directory disk; \
@@ -994,6 +1012,10 @@ options:
 	@printf '  %-16s %s\n' HEAP_STRESS_OPS "$(HEAP_STRESS_OPS)"
 	@printf '  %-16s %s\n' HEAP_RUN_TIMEOUT_SEC "$(HEAP_RUN_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' TRAP_TIMEOUT_SEC "$(TRAP_TIMEOUT_SEC) (seconds)"
+	@printf '  %-16s %s\n' FUZZ_CASES "$(FUZZ_CASES)"
+	@printf '  %-16s %s\n' FUZZ_CRYPT_CASES "$(FUZZ_CRYPT_CASES)"
+	@printf '  %-16s %s\n' FUZZ_SEED "$(FUZZ_SEED)"
+	@printf '  %-16s %s\n' FUZZ_TIMEOUT_SEC "$(FUZZ_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' MEMORY_MB "$(MEMORY_MB)"
 	@printf '  %-16s %s\n' SMP "$(SMP)"
 	@printf '  %-16s %s\n' TIMEOUT_SEC "$(TIMEOUT_SEC)"

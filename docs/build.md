@@ -46,6 +46,7 @@ make test-workbench-select  # click drawer rows and drag its scrollbar
 make test-hardening  # boot crafted superblock/inode/crypt images and assert the rejections
 make test-heap   # corrupt the kernel heap and prove the integrity checker catches it
 make test-trap   # inject eight crafted faults and check the report, IST and panic
+make test-fuzz   # mutate a real disk image and fuzz the mount path
 make iso         # build a bootable hybrid UEFI ISO (build/<arch>/crugos.iso)
 make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
@@ -179,6 +180,10 @@ options` prints the complete resolved set (including paths derived from
 | `HEAP_STRESS_OPS` | `4000` | operations the `heap.stress=` pass churns inside `make test-heap` |
 | `HEAP_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for the `make test-heap` boot |
 | `TRAP_TIMEOUT_SEC` | `60` | wall-clock budget in seconds for each boot of `make test-trap` |
+| `FUZZ_CASES` | `20000` | ext4 cases the `make test-fuzz` sweep runs |
+| `FUZZ_CRYPT_CASES` | `2000` | crypt-header cases the same sweep runs |
+| `FUZZ_SEED` | `1337` | seed for the harness PRNG, so a finding reproduces exactly |
+| `FUZZ_TIMEOUT_SEC` | `10` | per-case `alarm()` in seconds for the fuzz sweep; a case that overruns is a hang |
 | `DEMO_DISPLAY` | `gtk` | QEMU display `make demo` opens (any `-display` value, for example `sdl` or `none`) |
 | `DEMO_HOLD_SEC` | `600` | seconds `make demo` keeps the desktop on screen before the guest exits by itself |
 | `DEMO_TIMEOUT_SEC` | `900` | wall-clock budget for the whole `make demo` boot |
@@ -631,7 +636,7 @@ the pristine test disk and encrypted disk per case, patches exactly one field
 35 -- `CRUGOS: ext4 mount rejected (geometry)`, `CRUGOS: ext4 mount rejected
 (root extent)`, `CRUGOS: crypt unlock failed (kdf policy)` or `CRUGOS: crypt
 unlock failed (volume exceeds partition)` -- while the unpatched control must
-still reach `CRUGOS: phase h3 boot ok` (the driver accepts any phase id) and
+still reach `CRUGOS: phase h4 boot ok` (the driver accepts any phase id) and
 exit 33. Every case forbids
 `CRUGOS: panic` and `trap   : page fault`, a hostile case must not print
 `CRUGOS: ext4 ready` or `CRUGOS: storage ready`, and a QEMU timeout fails the
@@ -657,7 +662,7 @@ disk copies under `build/x86_64/trap/`, each with
 a `TRAP_TIMEOUT_SEC` (60 s) budget. Every hostile boot must print
 `CRUGOS: trap test <recipe>`, the report's vector, IST and `from=kernel`
 fragments, `CRUGOS PANIC: <name>` and `CRUGOS: panic`, and exit 35; the control
-must reach `CRUGOS: phase h3 boot ok` and `CRUGOS: selftest ok`, exit 33 and
+must reach `CRUGOS: phase h4 boot ok` and `CRUGOS: selftest ok`, exit 33 and
 never panic. No case may print `trap test unknown` or `trap test survived`, an
 exit 33 from a hostile case means the injection never ran, and a missing exit
 file or a 124 timeout is a hang. The driver prints
@@ -667,6 +672,34 @@ file or a 124 timeout is a hang. The driver prints
 directory, and `tests/host/test_trap.c` covers the same matrix on the host, so
 `make test-host` reports 3400 checks. `make size` reports a 253144 B (247 KiB)
 file and an 821986 B (802 KiB) load image.
+
+`make test-fuzz` is gate 47 and proves the phase H4 host mount-path fuzzer.
+Unlike every other gate it never boots QEMU: it deletes
+`build/x86_64/disk.img` and `build/x86_64/crypt.img`, rebuilds them with
+`make disk crypt-disk`, builds `tests/host/build/fuzz-mount`
+(`make -C tests/host fuzz`) and then runs the harness twice. The first run is
+`--cases 1 --selftest`: it forks a child that dereferences a null pointer and
+requires a fatal signal, so a green gate proves the detector itself works
+(`ok: fuzz selftest detected the injected crash (signal 11)`). The second is the
+sweep, `--cases $(FUZZ_CASES) --crypt-cases $(FUZZ_CRYPT_CASES) --seed
+$(FUZZ_SEED) --timeout $(FUZZ_TIMEOUT_SEC) --crash-dir build/x86_64/fuzz`,
+which loads the pristine disk, control-mounts it and then mutates a
+copy-on-write image per case in a forked child: `gpt_parse()` ->
+`ext4_mount()` (a quarter read-write) -> lookup/list/read -> the
+create/write/truncate/fsync/rename/unlink path -> `ext4_umount()`, plus a
+second leg that mutates the 256-byte crypt volume header and calls
+`crypt_meta_validate()`. A child that dies on a signal, exits 97 through the
+panic stub or exits above 3 prints `FAIL: ext4 case N ...`, dumps the mutant to
+the crash directory and fails the gate; a pristine image that does not mount
+and read `/hello.txt` fails the control mount instead. `FUZZ_CASES` (20000),
+`FUZZ_CRYPT_CASES` (2000), `FUZZ_SEED` (1337) and `FUZZ_TIMEOUT_SEC` (10 s per
+case) are the knobs and the sweep takes about 23 seconds. The gate ends with
+`fuzz: N case(s) mounted, N walked a path, N wrote` and
+`ok: fuzz 20000 ext4 case(s) and 2000 crypt header case(s), 0 crash(es)`; with
+the defaults about 10580 cases mount, 10535 walk a path and 2594 write. Because
+nothing boots, the output carries no kernel version line. The harness, its
+mutation regions and the fault classes it cannot reach are documented in
+[fuzzing.md](fuzzing.md).
 
 ## Interactive demo
 

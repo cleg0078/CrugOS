@@ -1,6 +1,6 @@
 # Roadmap
 
-The specification defines 46 phases/gates. Phase 0 established the smallest
+The specification defines 47 phases/gates. Phase 0 established the smallest
 end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
 phase 1 makes the kernel own physical memory, page tables, exceptions and
 timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
@@ -965,13 +965,13 @@ change for memory management, storage, SMP or drivers.
 Phase H2 closed the heap free-list and magic work (report items F7/F8) with
 address-keyed page cookies, validated slab headers and a read-only integrity
 checker. Phase H3 then replaced the per-vector panic one-liner with a trap policy
-and put the four stack-destroying vectors on IST stacks. What remains is a
-per-thread `rsp0` and the rest of ring 3, a hook that kills a user thread
-instead of panicking, EFI entropy, the AHCI timeout bounce reuse, and a host-side
-mount-path fuzzer for ext4, GPT and the crypt format. Those are prerequisites for
-a hostile process: a DPL3 frame would reach the syscall and trap paths that the
-crafted-image gate only exercises from ring 0, and several of the remaining
-Mediums become Critical once one can call them directly.
+and put the four stack-destroying vectors on IST stacks, and phase H4 took the
+mount path to the host with a seeded image fuzzer. What remains is a per-thread
+`rsp0` and the rest of ring 3, a hook that kills a user thread instead of
+panicking, weak EFI entropy, and the AHCI timeout bounce reuse. Those are
+prerequisites for a hostile process: a DPL3 frame would reach the syscall and
+trap paths that the crafted-image gate only exercises from ring 0, and several
+of the remaining Mediums become Critical once one can call them directly.
 
 ## Phase H2 - hardened kernel heap (done)
 
@@ -1082,6 +1082,72 @@ Mediums become Critical once one can call them directly.
 - docs: `docs/traps.md` plus README, roadmap, versioning, build, boot, hardening,
   heap, workbench and iso.
 - All 46 gates pass at `v0.33.0`.
+
+## Phase H4 - host mount-path fuzzer (done)
+
+- Phase H4 attacks the storage mount path from the host instead of from QEMU.
+  No kernel C file changes: `fuzz_mount.c` links the real ext4, GPT, journal,
+  block, crypt-metadata, heap, lib and crypto sources against host stubs, so the
+  kernel image, the `BootInfo` v1 ABI and every boot path stay byte-identical.
+- `tests/host/fuzz_mount.c` (about 890 lines) supplies `kprintf()` (silent
+  unless `--verbose-kernel`), a `panic()` that exits 97 and a `pmm_*` bump
+  allocator over a 32 MiB static arena, and presents the image through an
+  in-memory block device with strict bounds checks. It is a separate
+  `tests/host/build/fuzz-mount` binary because it installs its own stubs;
+  `tests/host/Makefile` gained `FUZZ_SOURCES` and a `fuzz` target that reuses
+  the unit-test flags.
+- It loads the `scripts/mkdisk.sh` images -- a 16 MiB GPT disk whose single
+  partition is `crugroot` at LBA 2048, and the encrypted `crypt.img` -- and
+  locates the partition with the real `gpt_parse()`. During bring-up the
+  harness rejected a pristine image with `fuzz: the image has no GPT partition`
+  because it tested for zero; the function returns the partition count, so
+  callers test `< 0`. `control_mount()` now mounts the untouched image and
+  requires `/hello.txt`, so a harness wiring bug cannot masquerade as a kernel
+  finding.
+- Six weighted mutation regions: the ext4 superblock (partition offset + 1024
+  bytes, 1024 bytes, weight 22), the group descriptor table (14), the inode
+  table (16), the root directory block (16), a 64 KiB metadata window at the
+  partition start (17) and the whole partition (15). Geometry comes from the
+  superblock and is clamped to sane ranges.
+- Per case it builds a plan, forks a child on its own copy-on-write image,
+  applies one to four mutations, arms `alarm(FUZZ_TIMEOUT_SEC)` and walks
+  `gpt_parse()` -> `ext4_mount()` (a quarter of the cases read-write) ->
+  `ext4_lookup("/")`/`/hello.txt` -> `ext4_list("/")` ->
+  `ext4_read_file("/hello.txt")`/`/selftest/b.txt` -> the write path (create,
+  write, truncate, fsync, mkdir, create/write/rename/unlink inside, rmdir,
+  rename, unlink, a 32-byte rewrite of `/hello.txt`) -> `ext4_umount()`. The
+  exit code encodes the depth (0 rejected, 1 mounted, 2 walked a path, 3 wrote)
+  and the parent counts it.
+- Eight mutation kinds (one-byte XOR, `0xFF` fill, zero fill,
+  `u16`/`u32`/`u64` write, a 16-byte splice, a 16-byte random fill) with values
+  weighted towards 0, 1, 2, `0xFFFF`, `0x7FFFFFFF`, `0x80000000`,
+  `0xFFFFFFFF`, all ones and `0x1000`; everything derives from `--seed`, so a
+  finding reproduces exactly.
+- A child that dies on a signal, exits 97 through the panic stub, or exits above
+  3 is a finding: `report_case()` prints the plan (`region=... rw=...
+  mutation(s)=...` and one line per mutation) and `dump_case()` writes
+  `fuzz-ext4-<N>.img` (or the 256-byte `fuzz-crypt-<N>.img`) under
+  `--crash-dir`. `--selftest` forks a null dereference and requires a fatal
+  signal, so a green gate proves the detector works at all.
+- The second leg copies the 256-byte `struct crug_crypt_header` out of
+  `crypt.img`, mutates it and calls
+  `crypt_meta_validate()`/`crypt_meta_scratch_bytes()` in a forked child: the
+  on-disk header parser, not the Argon2id unwrap.
+- `make test-fuzz` is the 47th gate: it removes and rebuilds `disk.img` and
+  `crypt.img`, builds `make -C tests/host fuzz`, runs the one-case self-test
+  and then `FUZZ_CASES` (20000) ext4 cases plus `FUZZ_CRYPT_CASES` (2000)
+  header cases with `FUZZ_SEED` (1337) and `FUZZ_TIMEOUT_SEC` (10) in roughly
+  23 seconds. It never boots QEMU, so it prints no kernel version string; a
+  green run ends with
+  `ok: fuzz 20000 ext4 case(s) and 2000 crypt header case(s), 0 crash(es)`.
+- With the defaults about 10580 cases mount, 10535 walk a path and 2594 exercise
+  the write path; seeds 1337, 7, 424242 and 999983 each ran 22000 cases with no
+  crash, as did a 60000-case sweep before the write leg existed. The harness
+  cannot see ring-0-only faults, device/DMA paths, dirty-journal replay, the
+  KDF, the GPT header or concurrency; those limits are in `docs/fuzzing.md`.
+- docs: `docs/fuzzing.md` plus README, roadmap, versioning, build, boot,
+  hardening, traps and workbench.
+- All 47 gates pass at `v0.34.0`.
 
 ## Bootable media - hybrid UEFI ISO (done, `v0.23.1`)
 
