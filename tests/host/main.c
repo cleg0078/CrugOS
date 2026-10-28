@@ -31,6 +31,7 @@ void test_gfx_functions(void);
 void test_intuition_functions(void);
 void test_textgrid_functions(void);
 void test_shell_functions(void);
+void test_harden_functions(void);
 
 int main(void)
 {
@@ -56,6 +57,7 @@ int main(void)
     RUN(test_intuition_functions);
     RUN(test_textgrid_functions);
     RUN(test_shell_functions);
+    RUN(test_harden_functions);
     printf("%d checks, %d failure(s)\n", tests_run, tests_failed);
     return tests_failed == 0 ? 0 : 1;
 }

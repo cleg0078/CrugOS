@@ -52,6 +52,15 @@ real bugs in this tree: **CSTS is `0x1C`** (not `0x18`) and **AQA is `0x24`**
 writing AQA at `0x20` silently lands in reserved space, so the controller never
 accepts the queue geometry.
 
+Phase H1 bounds the last row against the mapping. `CAP.DSTRD` gives the
+doorbell stride `4 << DSTRD`, and `nvme_doorbell()` computes
+`0x1000 + (2 * qid + (cq ? 1 : 0)) * stride + 4`; `nvme_setup()` rejects a
+stride below 4 or not a power of two, and both probe and every ring refuse an
+offset past `bar_size`, printing `nvme   : doorbell stride outside BAR0`. A
+lying device can therefore no longer make the driver write up to ~192 KiB past
+the BAR0 mapping: with the old unchecked offset, a hostile `DSTRD` and queue id
+landed outside the 16 KiB BAR.
+
 ## Queue setup
 
 1. Mask interrupts with `INTMS = 0xFFFFFFFF`.
@@ -139,6 +148,10 @@ metadata updates and flush.
 
 ## Failure modes
 
+- `nvme   : doorbell stride outside BAR0`: `CAP.DSTRD` produced a stride
+  below 4, a non-power-of-two stride, or a doorbell offset (or its 4-byte
+  write) past `bar_size`. A real controller does none of these; a lying one
+  does.
 - `nvme   : controller not ready`: CSTS never reached RDY. Check the CSTS
   offset (`0x1C`) and that AQA/ASQ/ACQ were written before `CC.EN`.
 - Create SQ fails with status `0x8201`: the Create CQ/Create SQ CDW10 or CDW11

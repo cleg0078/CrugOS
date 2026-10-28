@@ -34,6 +34,16 @@ void *memmove(void *dst, const void *src, usize n)
     return dst;
 }
 
+/* The compiler must not be able to drop this store: a plain memset over a
+   dead buffer is legal to elide, a volatile store is not. */
+void secure_zero(void *dst, usize n)
+{
+    volatile u8 *d = (volatile u8 *)dst;
+
+    while (n-- > 0)
+        *d++ = 0;
+}
+
 void *memset(void *dst, int value, usize n)
 {
     u8 *d = (u8 *)dst;

@@ -1,10 +1,12 @@
 /* CrugOS phase 2 syscall dispatcher. */
 #include <crug/syscall.h>
+#include <crug/harden.h>
 #include <crug/thread.h>
 #include <crug/process.h>
 #include <crug/msgport.h>
 #include <crug/heap.h>
 #include <crug/kernel.h>
+#include <crug/string.h>
 #include <crug/net.h>
 
 static i64 syscall_port_create(void)
@@ -76,6 +78,10 @@ void syscall_dispatch(trap_frame *frame)
             ret = SYS_EBADF;
             break;
         }
+        if (!harden_range_ok(frame->rdx, frame->r10, HARDEN_IDENTITY_LIMIT)) {
+            ret = SYS_EFAULT;
+            break;
+        }
         ret = msgport_send(p, frame->rsi, (const void *)(uintptr)frame->rdx,
                            (usize)frame->r10);
         break;
@@ -88,6 +94,12 @@ void syscall_dispatch(trap_frame *frame)
 
         if (!p) {
             ret = SYS_EBADF;
+            break;
+        }
+        if (!harden_range_ok(frame->rdx, frame->r10, HARDEN_IDENTITY_LIMIT) ||
+            (frame->rsi != 0 &&
+             !harden_range_ok(frame->rsi, sizeof(u64), HARDEN_IDENTITY_LIMIT))) {
+            ret = SYS_EFAULT;
             break;
         }
         n = msgport_recv(p, &type, (void *)(uintptr)frame->rdx, (usize)frame->r10);
@@ -271,6 +283,21 @@ static i64 syscall3(u64 nr, u64 a0, u64 a1, u64 a2)
     return ret;
 }
 
+/* The port frame carries a fourth argument in %r10 (see the interrupt frame in
+   kernel/arch/x86_64/isr.S), so the pointer-gate selftest needs its own
+   helper: GCC has no "r10" constraint other than a bound register variable. */
+static i64 syscall4(u64 nr, u64 a0, u64 a1, u64 a2, u64 a3)
+{
+    i64 ret;
+    register u64 r10 __asm__("r10") = a3;
+
+    __asm__ volatile("int $0x80"
+                     : "=a"(ret)
+                     : "a"(nr), "D"(a0), "S"(a1), "d"(a2), "r"(r10)
+                     : "rcx", "r11", "memory");
+    return ret;
+}
+
 int syscall_socket_selftest(u32 ip, u16 port)
 {
     /* Drive a full HTTP exchange through the socket syscalls only: connect,
@@ -315,6 +342,42 @@ int syscall_resolve_selftest(const char *host, u32 addr)
     return out == addr ? 0 : -1;
 }
 
+static int syscall_pointer_gate(void)
+{
+    /* Report item 3: a caller-supplied buffer pointer and length must be
+       validated before the kernel copies a payload or writes a u64 behind a
+       NULL/out-of-range pointer. These are the real syscall entry points, not
+       the helpers, so they exercise the %r10 frame slot as well. */
+    static u8 payload[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    u8 recv_buf[8];
+    u64 type = 0;
+    i64 h;
+
+    h = syscall0(SYS_PORT_CREATE);
+    if (h <= 0)
+        return 0;
+    if (syscall4(SYS_PORT_SEND, (u64)h, 0, 0, 8) != SYS_EFAULT)
+        goto fail;
+    if (syscall4(SYS_PORT_SEND, (u64)h, 0, 0x100000000ull, 8) != SYS_EFAULT)
+        goto fail;
+    if (syscall4(SYS_PORT_SEND, (u64)h, 0, (u64)(uintptr)payload, 8) != 0)
+        goto fail;
+    if (syscall4(SYS_PORT_RECV, (u64)h, 0, 0, 8) != SYS_EFAULT)
+        goto fail;
+    if (syscall4(SYS_PORT_RECV, (u64)h, (u64)(uintptr)&type,
+                 (u64)(uintptr)recv_buf, 8) != 8)
+        goto fail;
+    if (memcmp(recv_buf, payload, sizeof(payload)) != 0)
+        goto fail;
+    if (syscall1(SYS_HANDLE_CLOSE, (u64)h) != 0)
+        return 0;
+    return 1;
+fail:
+    (void)syscall1(SYS_HANDLE_CLOSE, (u64)h);
+    kprintf("CRUGOS: syscall selftest failed (pointer gate)\n");
+    return 0;
+}
+
 int syscall_selftest(void)
 {
     i64 r;
@@ -335,6 +398,8 @@ int syscall_selftest(void)
     if (syscall1(SYS_HANDLE_CLOSE, (u64)h) != 0)
         return 0;
     if (syscall1(SYS_HANDLE_CLOSE, (u64)h) != SYS_EBADF)
+        return 0;
+    if (!syscall_pointer_gate())
         return 0;
     return 1;
 }

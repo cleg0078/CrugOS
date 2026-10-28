@@ -1,5 +1,6 @@
 /* CrugOS typed message ports: O(1) enqueue/dequeue and blocking wait. */
 #include <crug/msgport.h>
+#include <crug/harden.h>
 #include <crug/heap.h>
 #include <crug/cpu.h>
 #include <crug/string.h>
@@ -51,6 +52,8 @@ int msgport_send(msgport *port, u64 type, const void *data, usize len)
     u64 flags;
 
     if (!port || len > MSGPORT_MAX_PAYLOAD)
+        return -1;
+    if (!harden_payload_ok(data, (u64)len))
         return -1;
     m = (struct message *)kmalloc(sizeof(struct message) + len);
     if (!m)

@@ -266,6 +266,9 @@ EFIAPI efi_status efi_main(efi_handle image, efi_system_table *system_table)
 
             memcpy(payload, cmdline, copy);
             payload[copy] = 0;
+            /* The pool copy held crypt.pass=...; the boot_info copy is wiped
+               by the kernel after parsing, this one must not survive. */
+            memset(cmdline, 0, (usize)cmdline_len);
             info->command_line = payload;
             info->command_line_len = copy;
             loader_print("CRUGOS loader: cmdline bytes ");

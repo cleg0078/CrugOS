@@ -5,11 +5,17 @@
 #include <crug/crc32c.h>
 #include <crug/kernel.h>
 #include <crug/journal.h>
+#include <crug/harden.h>
 #include "ext4_inode.h"
 #include "ext4_internal.h"
 
 #define EXT4_MAGIC 0xEF53u
 #define EXT4_EXT_MAGIC 0xF30Au
+
+/* An inline extent root lives inside the 60-byte i_block area; a leaf
+   node occupies a whole filesystem block with a 12-byte header in front. */
+#define EXT4_INLINE_EXTENT_BYTES 60u
+#define EXT4_MAX_EXTENT_DEPTH 5u
 
 #define EXT4_FEATURE_COMPAT_HAS_JOURNAL 0x0004u
 #define EXT4_FEATURE_COMPAT_DIR_INDEX 0x0040u
@@ -337,18 +343,20 @@ static int read_inode(struct ext4_fs *fs, u32 ino, struct ext4_inode *inode)
     return ret;
 }
 
-static int extent_map(struct ext4_fs *fs, const u8 *node, u32 lblk,
-                      u64 *phys, int depth)
+static int extent_map(struct ext4_fs *fs, const u8 *node, u32 node_bytes,
+                      u32 lblk, u64 *phys, int depth)
 {
     const struct ext4_extent_header *h;
     u32 i;
 
-    if (depth > 5)
+    if (depth > EXT4_MAX_EXTENT_DEPTH)
         return -1;
     h = (const struct ext4_extent_header *)node;
-    if (h->magic != EXT4_EXT_MAGIC)
-        return -1;
-    if (h->entries > h->max || h->max > (fs->block_size - 12u) / 12u)
+    /* node_bytes is what actually exists at `node`: 60 bytes for the inline
+       i_block root, block_size - 12 for an on-disk leaf block. Validating
+       against it (not just block_size) stops a crafted inline root from
+       making the entry loop read past the inode. */
+    if (!harden_extent_header_ok(node, node_bytes))
         return -1;
     if (h->depth == 0) {
         for (i = 0; i < h->entries; i++) {
@@ -392,7 +400,8 @@ static int extent_map(struct ext4_fs *fs, const u8 *node, u32 lblk,
             kfree(buf);
             return -1;
         }
-        ret = extent_map(fs, buf, lblk, phys, depth + 1);
+        ret = extent_map(fs, buf, fs->block_size - 12u, lblk, phys,
+                         depth + 1);
         kfree(buf);
         return ret;
     }
@@ -408,7 +417,8 @@ static int bmap(struct ext4_fs *fs, const struct ext4_inode *inode, u32 lblk,
     int ret;
 
     if (inode->flags & EXT4_EXTENTS_FL)
-        return extent_map(fs, (const u8 *)inode->block, lblk, phys, 0);
+        return extent_map(fs, (const u8 *)inode->block,
+                          EXT4_INLINE_EXTENT_BYTES, lblk, phys, 0);
     if (lblk < 12) {
         if (inode->block[lblk] == 0)
             return 1;
@@ -633,9 +643,15 @@ static int ext4_probe(struct ext4_fs *fs, struct block_device *bd)
     /* read_group_desc() copies into a 64-byte descriptor buffer. */
     if (blocks_hi != 0)
         return -1;
-    if (fs->blocks_per_group == 0 || fs->inodes_per_group == 0 ||
-        fs->inodes_count == 0 || fs->blocks_count == 0)
+    /* Group geometry becomes a bitmap index and a checksum length later on;
+       a crafted superblock with an absurd group size would read past the
+       4 KiB bitmap or index the wrong group. Bound it at mount time. */
+    if (!harden_ext4_geometry_ok(fs->block_size, fs->blocks_per_group,
+                                 fs->inodes_per_group, fs->blocks_count,
+                                 fs->inodes_count)) {
+        kprintf("CRUGOS: ext4 mount rejected (geometry)\n");
         return -1;
+    }
     if (fs->first_data_block != (fs->block_size == 1024u ? 1u : 0u))
         return -1;
     incompat = fs->feature_incompat;
@@ -677,6 +693,14 @@ static int ext4_probe(struct ext4_fs *fs, struct block_device *bd)
         return -1;
     if ((root.mode & 0xF000u) != 0x4000u)
         return -1;
+    /* The root inode is read during mount and used immediately; a crafted
+       inline extent root must be rejected before its entries are walked. */
+    if ((root.flags & EXT4_EXTENTS_FL) &&
+        !harden_extent_header_ok((const u8 *)(const void *)root.block,
+                                 EXT4_INLINE_EXTENT_BYTES)) {
+        kprintf("CRUGOS: ext4 mount rejected (root extent)\n");
+        return -1;
+    }
     return 0;
 }
 
@@ -1172,6 +1196,11 @@ static int free_block(struct ext4_fs *fs, u64 block)
     g = (u32)((block - fs->first_data_block) / fs->blocks_per_group);
     group_first = fs->first_data_block + g * fs->blocks_per_group;
     bit = (u32)(block - group_first);
+    /* blocks_per_group comes from the superblock: keep the bit inside the
+       group so a corrupt geometry cannot clear an unrelated bitmap bit. */
+    if (g >= fs->groups || bit >= fs->blocks_per_group ||
+        bit >= fs->block_size * 8u)
+        return -1;
     desc = gdt_desc(fs, g);
     bitmap = (u8 *)kmalloc(fs->block_size);
     if (!bitmap)
@@ -1309,12 +1338,17 @@ static void extent_init(struct ext4_inode *inode)
     h->generation = 0;
 }
 
-static int extent_add(struct ext4_extent_header *h, u32 lblk, u64 pblk,
-                      int *full)
+static int extent_add(struct ext4_extent_header *h, u32 node_bytes, u32 lblk,
+                      u64 pblk, int *full)
 {
     u32 pos;
 
     if (h->depth != 0)
+        return -1;
+    /* The header must describe entries that fit inside the bytes we own;
+       without this a crafted i_block header with max = 5 turns the memmove
+       below into a heap overwrite. */
+    if (!harden_extent_header_ok((const u8 *)(const void *)h, node_bytes))
         return -1;
     pos = 0;
     while (pos < h->entries) {
@@ -1426,7 +1460,7 @@ static int extent_insert(struct ext4_fs *fs, u32 ino,
     if (h->magic != EXT4_EXT_MAGIC)
         extent_init(inode);
     if (h->depth == 0) {
-        int ret = extent_add(h, lblk, pblk, &full);
+        int ret = extent_add(h, EXT4_INLINE_EXTENT_BYTES, lblk, pblk, &full);
 
         if (ret == 1)
             return extent_grow(fs, ino, inode, lblk, pblk);
@@ -1452,7 +1486,7 @@ static int extent_insert(struct ext4_fs *fs, u32 ino,
             kfree(leaf);
             return -1;
         }
-        ret = extent_add(leaf, lblk, pblk, &full);
+        ret = extent_add(leaf, fs->block_size - 12u, lblk, pblk, &full);
         if (ret == 0) {
             extent_block_set_csum(fs, ino, inode, (u8 *)(void *)leaf);
             ret = write_block(fs, leaf_block, leaf);

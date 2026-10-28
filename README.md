@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 6H drawer row selection and a draggable scrollbar (`v0.30.0`)
+## Status: phase H1 hardening pass 1 (`v0.31.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -731,6 +731,56 @@ Phase 6H makes the drawer rows selectable and its scrollbar draggable.
   describe the selectable rows, the draggable scrollbar, the body-input hook,
   the `wb.dsel=` token and the gate.
 
+Phase H1 is the first hardening pass: the boot path now validates the bytes an
+attacker can put there.
+
+- `include/crug/harden.h` and `kernel/lib/harden.c`: seven pure validators,
+  each host-tested in `tests/host/test_harden.c`. `harden_range_ok()` bounds
+  a register-supplied buffer against the 4 GiB identity map (`len == 0` is
+  fine, `addr == 0` and `len > limit` are rejected, otherwise
+  `addr <= limit - len` so the addition cannot wrap);
+  `harden_payload_ok()` rejects a NULL payload with a non-zero length;
+  `harden_extent_header_ok()` checks magic `0xF30A`, entries, depth and the
+  real node size (60 bytes for the inline root in `i_block`,
+  `block_size - 12 - csum` for a leaf); `harden_ext4_geometry_ok()` requires
+  a power-of-two block size of at least 1024, non-zero counts and
+  `s_blocks_per_group` / `s_inodes_per_group` at most `block_size * 8`;
+  `harden_nvme_doorbell_ok()` keeps a doorbell offset inside BAR0;
+  `harden_kdf_cost_ok()` bounds the Argon2id cost tuple; and
+  `harden_volume_ok()` keeps a crypt volume inside its parent partition;
+- `kernel/core/syscall.c`: `SYS_PORT_SEND` validates the `rdx`/`r10` buffer
+  and `SYS_PORT_RECV` validates the same buffer plus a non-zero `rsi` as an
+  8-byte writable range, both against `HARDEN_IDENTITY_LIMIT` and both
+  returning the new `SYS_EFAULT` (`-14`); `msgport_send()` rejects
+  `data == 0` with `len > 0`, closing the uninitialised-heap leak. The
+  self-test prints `CRUGOS: syscall selftest failed (pointer gate)` on
+  failure;
+- `kernel/fs/ext4.c`: the superblock geometry is checked before the
+  `metadata_csum` checksum (`CRUGOS: ext4 mount rejected (geometry)`) and the
+  root inline extent after `read_inode()` (`CRUGOS: ext4 mount rejected (root
+  extent)`), so a crafted image has to be self-consistent to reach the
+  validator; `extent_map()`/`extent_add()` validate every header against the
+  bytes the node owns, and `free_block()` re-checks the bit index;
+- `drivers/block/nvme.c`: a `CAP.DSTRD` that puts a doorbell past
+  `bar_size` is refused at probe (`nvme   : doorbell stride outside BAR0`)
+  instead of writing up to ~192 KiB past the mapping;
+- `kernel/block/crypt.c`: unlock enforces an Argon2id policy of
+  1024..65536 KiB, `t` 2..8, lanes 1..16 and `m >= 8 * lanes` on top of the
+  format ceiling (1 GiB / `t` 64, `mkcrypt` unchanged), and a header whose
+  volume exceeds its partition is refused; both refusals wipe the 16 KiB
+  header copy;
+- `kernel/lib/string.c`: `secure_zero()` wipes through volatile stores so the
+  compiler cannot elide the wipe; the crypt header/bounce/scratch/master paths
+  and `storage_wipe()` use it, and `boot/efi/main.c` zeroes the loader's
+  `cmdline.txt` pool copy so `crypt.pass=` does not survive in USABLE memory;
+- `make test-hardening` is the 44th gate: `scripts/run-hardening.py` patches
+  one field per case (geometry-bpg, geometry-ipg, root-extent, kdf-high,
+  kdf-low, volume-huge), boots the crafted image with
+  `HARDEN_TIMEOUT_SEC=120` and requires the rejection marker and exit 35 --
+  never a panic -- while the control boots to exit 33;
+- `make test-host` reports 3200 checks; the kernel is 239840 B (234 KiB) on
+  disk and the load image 778018 B (759 KiB); all 44 gates pass.
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -739,9 +789,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.30.0 (phase 6h) -- Amiga-inspired microkernel bring-up
+CrugOS 0.31.0 (phase h1) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.30.0
+CRUGOS: version 0.31.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -789,7 +839,7 @@ CRUGOS: tcp http served (72 bytes)
 CRUGOS: net selftest ok
 CRUGOS: gfx ready (1024x768, cursor at 512,384)
 CRUGOS: selftest ok
-kernel : 0x0000000000100000 size=224 KiB
+kernel : 0x0000000000100000 size=234 KiB
 boot   : cpu=0 acpi_rsdp=0x1f77e000 fdt=0x0 initrd=0x0
 memory : 36 regions, usable 474080 KiB (462 MiB)
 pmm    : total=118520 free=118462 bitmap=131072 B
@@ -801,7 +851,7 @@ heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
 boot   : pmm=28552 us cpu=438 us vm=626 us traps=360 us timer=65357 us heap=60 us storage=94487 us sched=354 us syscall=122 us total=190359 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase 6h boot ok
+CRUGOS: phase h1 boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -1005,6 +1055,7 @@ make test-workbench-desk   # select desktop objects and send a window to the bac
 make test-workbench-icons  # drag a desktop icon, raise a window by its front gadget and drive the icons from the keyboard
 make test-workbench-drawer  # scroll, refresh and resize the System: drawer
 make test-workbench-select  # click drawer rows and drag its scrollbar
+make test-hardening  # craft hostile superblock/inode/crypt images and boot them
 make iso         # build a bootable hybrid UEFI ISO (build/x86_64/crugos.iso)
 make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
@@ -1045,7 +1096,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `WB_DESK_RUN_TIMEOUT_SEC`, `WB_ICONS_WAIT`, `WB_ICONS_ACTS`,
 `WB_ICONS_RUN_TIMEOUT_SEC`, `WB_DRAWER_WAIT`, `WB_DRAWER_ACTS`, `WB_DRAWER_FILL`,
 `WB_DRAWER_RUN_TIMEOUT_SEC`, `WB_SELECT_WAIT`, `WB_SELECT_ACTS`,
-`WB_SELECT_FILL`, `WB_SELECT_RUN_TIMEOUT_SEC`, `DEMO_DISPLAY`, `DEMO_HOLD_SEC`,
+`WB_SELECT_FILL`, `WB_SELECT_RUN_TIMEOUT_SEC`, `HARDEN_TIMEOUT_SEC`, `DEMO_DISPLAY`, `DEMO_HOLD_SEC`,
 `DEMO_TIMEOUT_SEC`, `DEMO_CMDLINE`, `DEMO_MACHINE_EXTRA`, `DEMO_QEMU_EXTRA`,
 `ISO_IMAGE`, `ISO_STAGE`, `ISO_FAT_IMG`, `ISO_SIZE_MB`, `ISO_VOLID`,
 `ISO_CMDLINE`, `ISO_DATE`, `ISO_RUN_TIMEOUT_SEC`, `EXPECT_ISO`, `ISO_IMG`,

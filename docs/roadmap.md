@@ -1,6 +1,6 @@
 # Roadmap
 
-The specification defines 43 phases/gates. Phase 0 established the smallest
+The specification defines 44 phases/gates. Phase 0 established the smallest
 end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
 phase 1 makes the kernel own physical memory, page tables, exceptions and
 timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
@@ -907,6 +907,68 @@ change for memory management, storage, SMP or drivers.
 - docs: README, workbench, boot, build, versioning, gfx and iso describe the
   body-input hook, the selectable rows, the draggable scrollbar and the gate.
 - All 43 gates pass at `v0.30.0`.
+
+## Phase H1 - hardening pass 1 (done)
+
+- Phase H1 treats the bytes on the boot path as hostile: an inserted disk, a
+  crafted partition or filesystem image, a tampered ESP file and a PCIe device
+  that lies about its registers. CrugOS is ring-0 only, so this is the
+  adversarial surface that exists today; the review in `specs/fix-p1/REPORT.md`
+  counted 6 High, 16 Medium and 18 Low, and H1 closes the Highs reachable now.
+- `include/crug/harden.h` and `kernel/lib/harden.c` add seven pure validators,
+  one per input class: `harden_range_ok()` (a register-supplied buffer against
+  the 4 GiB identity map, no wrapping addition), `harden_payload_ok()` (a NULL
+  payload with a non-zero length), `harden_extent_header_ok()` (ext4 magic,
+  entries, depth and the real 60-byte `i_block` / leaf size),
+  `harden_ext4_geometry_ok()` (power-of-two block size and
+  `bpg`/`ipg` at most `block_size * 8`), `harden_nvme_doorbell_ok()`
+  (a doorbell inside BAR0), `harden_kdf_cost_ok()` (lanes 1..16,
+  `m >= 8 * lanes`) and `harden_volume_ok()` (a volume inside its partition).
+  `tests/host/test_harden.c` tests every boundary; the host suite reports 3200
+  checks.
+- `kernel/core/syscall.c`: `SYS_PORT_SEND` and `SYS_PORT_RECV` validate the
+  `rdx`/`r10` buffer, and `SYS_PORT_RECV` validates a non-zero `rsi` as an
+  8-byte writable range, returning `SYS_EFAULT` (`-14`) instead of writing
+  through a bad pointer. `msgport_send()` rejects `data == 0` with
+  `len > 0`, so the uninitialised-heap copy is gone. The in-kernel self-test
+  prints `CRUGOS: syscall selftest failed (pointer gate)` on failure.
+- `kernel/fs/ext4.c`: a crafted `s_blocks_per_group` / `s_inodes_per_group`
+  fails mount with `CRUGOS: ext4 mount rejected (geometry)` before the
+  superblock checksum is even verified, and a root inline extent whose
+  `eh_max` does not fit the inode's 60-byte `i_block` area fails after
+  `read_inode()` with `CRUGOS: ext4 mount rejected (root extent)`, so the
+  image must forge a valid inode checksum to get there. Either way
+  `storage_init()` fails, prints `CRUGOS: no root filesystem` and exits 35.
+- `drivers/block/nvme.c`: the doorbell offset from `CAP.DSTRD` is bounded
+  against `bar_size`; a lying stride is refused at probe
+  (`nvme   : doorbell stride outside BAR0`) instead of writing up to ~192 KiB
+  past BAR0.
+- `kernel/lib/string.c`: `secure_zero()` wipes through volatile stores so the
+  compiler cannot elide the wipe; the crypt header/bounce/scratch/master paths
+  and `storage_wipe()` use it. `boot/efi/main.c` also zeroes the loader's
+  `cmdline.txt` pool copy, because the kernel's `boot_info` wipe left
+  `crypt.pass=` in USABLE memory.
+- `kernel/block/crypt.c`: the unlock-time KDF policy (m 1024..65536 KiB, t 2..8,
+  lanes 1..16, `m >= 8 * lanes`) sits below the on-disk format ceiling
+  (1 GiB / t 64, `mkcrypt` unchanged), so a hostile header cannot force a
+  15-20 minute pre-authentication Argon2id. A `volume_sectors` past the parent
+  partition is refused too; both refusals wipe the 16 KiB header copy.
+- `make test-hardening` is the 44th gate: `scripts/run-hardening.py` patches
+  one field per case (geometry-bpg, geometry-ipg, root-extent, kdf-high,
+  kdf-low, volume-huge), boots each crafted image with `HARDEN_TIMEOUT_SEC`
+  (120 s) and requires the rejection marker, exit 35 and no panic, while the
+  control boots to exit 33.
+- docs: `docs/hardening.md` plus README, roadmap, versioning, build, boot,
+  crypto, storage, nvme, workbench and iso.
+- All 44 gates pass at `v0.31.0`.
+
+The next hardening steps are the trap policy and a per-CPU `rsp0` (report item
+3: a non-`#BP` exception still panics), the heap free-list and magic work
+(F7/F8), and host-side fuzzers for ext4, GPT and the crypt format. Those are
+prerequisites for ring 3: a DPL3 process would reach the syscall and trap paths
+that the crafted-image gate only exercises from ring 0, and several of the
+remaining Mediums become Critical once a hostile process can call them
+directly.
 
 ## Bootable media - hybrid UEFI ISO (done, `v0.23.1`)
 

@@ -42,10 +42,7 @@ static u32 g_crypt_prompt_timeout_ms = CRYPT_PROMPT_TIMEOUT_MS;
 /* Volunteer zeroization: memset can be elided, a volatile store cannot. */
 static void storage_wipe(void *ptr, usize len)
 {
-    volatile u8 *p = (volatile u8 *)ptr;
-
-    while (len-- > 0)
-        *p++ = 0;
+    secure_zero(ptr, len);
 }
 
 static void storage_wipe_passphrase(void)

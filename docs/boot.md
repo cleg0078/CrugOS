@@ -239,7 +239,7 @@ post-snapshot allocations cannot push it over capacity.
     `CRUGOS: wb select timeout (N/M)`. The whole
     check is silent unless `wb.enable=` enabled it.
 14. `report_boot`, `storage_lock` (wipes the passphrase, the volume keys and
-    the bounce buffer), `CRUGOS: phase 6h boot ok`, then `wb_hold` (only when
+    the bounce buffer), `CRUGOS: phase h1 boot ok`, then `wb_hold` (only when
     `wb.hold=` was given: the guest stays alive with the desktop on screen until
     the deadline), `arch_exit_qemu(0x10)`.
 
@@ -503,14 +503,14 @@ CRUGOS: wb window 1 sent to front
 CRUGOS: wb action 6 front window 1
 CRUGOS: wb icons selftest ok (1 move(s), 1 front(s))
 CRUGOS: sh run 'ver'
-CRUGOS: sh out CrugOS 0.30.0 (phase 6h), x86_64
+CRUGOS: sh out CrugOS 0.31.0 (phase h1), x86_64
 CRUGOS: wb selftest ok (1 drag(s), 1 action(s))
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb drawer selftest ok (3 scroll(s), 1 refresh(es))
 CRUGOS: wb select selftest ok (2 select(s), 1 scrollbar drag(s))
 CRUGOS: sh selftest ok (1 command(s))
 CRUGOS: selftest ok
-CRUGOS: phase 6h boot ok
+CRUGOS: phase h1 boot ok
 ```
 
 The `virtio : net eth0 mac ...` line, the lease, the ARP resolution, the echo
@@ -584,18 +584,28 @@ unlock prints `CRUGOS: crypt unlock failed` (or a `crypt locked` variant) and
 then `CRUGOS: no root filesystem`, and the kernel exits with status 35 (a
 deterministic boot failure, not a panic).
 
+Phase H1's crafted-image gate checks the same fail-closed property from the
+other direction. A disk whose superblock, root inode or crypt header has been
+patched is rejected with `CRUGOS: ext4 mount rejected (geometry)`,
+`CRUGOS: ext4 mount rejected (root extent)`,
+`CRUGOS: crypt unlock failed (kdf policy)` or
+`CRUGOS: crypt unlock failed (volume exceeds partition)` and the same status
+35; `make test-hardening` boots six such images plus an unpatched control and
+also forbids
+`CRUGOS: panic` and a page fault. See [hardening.md](hardening.md).
+
 A stick booted from the hybrid ISO is the same boot with the storage block
 replaced by the skip marker, and the USB device the firmware booted from shows
 up in the USB lines as an unsupported mass-storage function:
 
 ```
-CRUGOS: version 0.30.0
+CRUGOS: version 0.31.0
 CRUGOS: usb controller ready (xhci, 8 port(s))
 CRUGOS: usb device 46f4:0001 on port 1 (speed 4)
 CRUGOS: usb device class 8 on port 1 (unsupported)
 CRUGOS: storage skipped (storage=none)
 CRUGOS: selftest ok
-CRUGOS: phase 6h boot ok
+CRUGOS: phase h1 boot ok
 ```
 
 `kernel/core/report.c` prints the machine description between them: kernel

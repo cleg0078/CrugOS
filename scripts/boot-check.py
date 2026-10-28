@@ -40,7 +40,7 @@ REQUIRED_MARKERS = (
     "CRUGOS: selftest ok",
     "CRUGOS: nvme ready",
     "CRUGOS: ahci ready",
-    "CRUGOS: phase 6h boot ok",
+    "CRUGOS: phase h1 boot ok",
 )
 # A rejected unlock stops before scheduling, storage mounting and self-tests.
 WRONG_CRYPT_MARKERS = (

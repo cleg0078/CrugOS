@@ -93,7 +93,9 @@ The MAC covers the immutable header and the slot itself but not the other
 slots, so every slot can be sealed independently. Deleting another slot is a
 denial of service, not a forgery: the header still authenticates. `unseal`
 recomputes the MAC with a constant-time compare before it decrypts the master
-key, and all intermediate key material is wiped on every path.
+key, and all intermediate key material is wiped on every path through
+`secure_zero()` (volatile stores, so the compiler cannot elide the wipe; a
+plain `memset()` on a soon-dead buffer is a dead store).
 
 ## Ciphers
 
@@ -116,9 +118,20 @@ line `CRUGOS: crypt aes: software`/`aes-ni` names the path in use.
 **Argon2id.** `kernel/crypto/argon2id.c` implements RFC 9106 Argon2id v1.3
 (type 2) with the hybrid data-independent/data-dependent addressing of pass 0
 slices 0-1, BLAKE2b-512 prehash and `H'` expansion. It is verified against
-libargon2 vectors for 1 and 4 lanes. Parameters come from the header and are
-bounded by `m <= 1 GiB`, `t <= 64` and `lanes <= 16`; the default test volume
-uses `m = 4096 KiB`, `t = 3`, `p = 1`. The workspace is allocated from the PMM
+libargon2 vectors for 1 and 4 lanes. Parameters come from the header. The
+on-disk format bounds them at `m <= 1 GiB`, `t <= 64` and `lanes <= 16`, but
+the kernel refuses to spend more than a bounded amount before authentication:
+`crypt_unlock()` enforces a narrower unlock policy -- `m` 1024..65536 KiB, `t`
+2..8, `lanes` 1..16 and `m >= 8 * lanes` (Argon2 needs 8 KiB per lane, so the
+default test volume's `m = 4096 KiB`, `t = 3`, `p = 1` is inside it). A header
+outside that range fails before the KDF runs, prints
+`CRUGOS: crypt unlock failed (kdf policy)` and wipes the 16 KiB header copy.
+That stops a hostile header from demanding 1 GiB at `t = 64` (15-20 minutes of
+pre-authentication Argon2id on this host) and also refuses trivially cheap
+`t = 1` / `m = 512` headers instead of deriving a key from them.
+`tools/mkcrypt` is unchanged and still formats up to the format ceiling: the
+kernel, not the on-disk format, decides what it will pay. The workspace is
+allocated from the PMM
 as identity-mapped pages, is wiped before it is freed, and the fill loop is
 single-threaded even when `p > 1` (the lanes are still computed correctly;
 there is no threading layer in the kernel yet).
@@ -135,6 +148,10 @@ the `boot_info` allocation (up to 511 bytes) and sets `command_line`/
 `command_line_len`. `storage_parse_cmdline()` accepts `crypt.pass=<pass>`
 tokens (any whitespace-separated position) and immediately zeroes the loader
 page after copying the passphrase, because it is still mapped kernel memory.
+The loader also zeroes its own page-pool copy of `cmdline.txt` in
+`boot/efi/main.c` after handing it to the kernel: the kernel's wipe covers the
+`boot_info` page, not the loader allocation, and without the second wipe
+`crypt.pass=` would survive in USABLE memory for whatever runs next.
 
 `storage_parse_cmdline()` runs first in `storage_init()`, then the root policy
 is:
@@ -144,6 +161,14 @@ is:
    is `crugcrypt`: read the header, `crypt_unlock()`, mount ext4 over the
    returned `crypt0` device;
 3. otherwise assemble RAID1/RAID10 `md0` from `fd00` partitions and mount it.
+
+`crypt_unlock()` also bounds the header's `volume_sectors` against the
+partition the header was read from (`harden_volume_ok()`): `offset <= parent`
+and `volume <= parent - offset`. A header that describes a larger volume than
+its partition is refused with
+`CRUGOS: crypt unlock failed (volume exceeds partition)`, the 16 KiB header
+copy is wiped and storage init fails closed, so a crafted header cannot make
+the block layer address sectors past the end of the parent device.
 
 When the cmdline carries `crypt.pass=` (the automation path), the boot
 unlocks non-interactively and never prompts. Without it the kernel asks for the
@@ -169,8 +194,9 @@ the boot prints `CRUGOS: crypt locked (too many attempts)`. An empty line,
 Ctrl-C/Esc, an over-long line or a read timeout fails closed on the spot with
 `CRUGOS: crypt locked (no passphrase)`, and an interrupted attempt is wiped.
 The caller zeroes each line buffer immediately after use (on success, on a
-rejected attempt and on every early return), and
-`storage_wipe_passphrase()`/the loader-page wipe are unchanged.
+rejected attempt and on every early return); `storage_wipe_passphrase()` and
+the kernel-side wipes go through `secure_zero()`, and the loader's page-pool
+copy is zeroed in `boot/efi/main.c`.
 
 The per-attempt timeout defaults to 60 s and can be shortened or lengthened
 with the non-secret `crypt.prompt_timeout=<seconds>` token (clamped to 1..3600

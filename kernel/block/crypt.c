@@ -8,6 +8,7 @@
 #include <crug/aes.h>
 #include <crug/block.h>
 #include <crug/crypt.h>
+#include <crug/harden.h>
 #include <crug/heap.h>
 #include <crug/kernel.h>
 #include <crug/mm.h>
@@ -144,6 +145,22 @@ struct block_device *crypt_unlock(struct block_device *parent, u64 offset_sector
         kprintf("CRUGOS: crypt unlock failed (bad header)\n");
         return 0;
     }
+    if (!harden_kdf_cost_ok(h->kdf_m_cost_kib, h->kdf_t_cost, h->kdf_lanes,
+                            CRUG_CRYPT_UNLOCK_MIN_M_COST_KIB,
+                            CRUG_CRYPT_UNLOCK_MAX_M_COST_KIB,
+                            CRUG_CRYPT_UNLOCK_MIN_T_COST,
+                            CRUG_CRYPT_UNLOCK_MAX_T_COST)) {
+        secure_zero(header, CRUG_CRYPT_HEADER_BYTES);
+        kfree(header);
+        kprintf("CRUGOS: crypt unlock failed (kdf policy)\n");
+        return 0;
+    }
+    if (!harden_volume_ok(h->volume_sectors, parent->sectors, offset_sectors)) {
+        secure_zero(header, CRUG_CRYPT_HEADER_BYTES);
+        kfree(header);
+        kprintf("CRUGOS: crypt unlock failed (volume exceeds partition)\n");
+        return 0;
+    }
     volume_sectors = h->volume_sectors;
     m_cost = h->kdf_m_cost_kib;
     t_cost = h->kdf_t_cost;
@@ -164,11 +181,11 @@ struct block_device *crypt_unlock(struct block_device *parent, u64 offset_sector
             break;
         }
     }
-    memset(scratch, 0, (usize)scratch_bytes);
+    secure_zero(scratch, (usize)scratch_bytes);
     pmm_free_pages(pa, pages);
     if (found == CRUG_CRYPT_SLOT_COUNT) {
-        memset(master, 0, sizeof(master));
-        memset(header, 0, CRUG_CRYPT_HEADER_BYTES);
+        secure_zero(master, sizeof(master));
+        secure_zero(header, CRUG_CRYPT_HEADER_BYTES);
         kfree(header);
         kprintf("CRUGOS: crypt unlock failed\n");
         return 0;
@@ -178,8 +195,8 @@ struct block_device *crypt_unlock(struct block_device *parent, u64 offset_sector
     if (p == 0 || bd == 0) {
         kfree(p);
         kfree(bd);
-        memset(master, 0, sizeof(master));
-        memset(header, 0, CRUG_CRYPT_HEADER_BYTES);
+        secure_zero(master, sizeof(master));
+        secure_zero(header, CRUG_CRYPT_HEADER_BYTES);
         kfree(header);
         kprintf("CRUGOS: crypt unlock failed (no memory for device)\n");
         return 0;
@@ -188,8 +205,8 @@ struct block_device *crypt_unlock(struct block_device *parent, u64 offset_sector
     if (p->bounce == 0) {
         kfree(p);
         kfree(bd);
-        memset(master, 0, sizeof(master));
-        memset(header, 0, CRUG_CRYPT_HEADER_BYTES);
+        secure_zero(master, sizeof(master));
+        secure_zero(header, CRUG_CRYPT_HEADER_BYTES);
         kfree(header);
         kprintf("CRUGOS: crypt unlock failed (no memory for bounce buffer)\n");
         return 0;
@@ -197,8 +214,8 @@ struct block_device *crypt_unlock(struct block_device *parent, u64 offset_sector
     p->parent = parent;
     p->offset = offset_sectors + CRUG_CRYPT_HEADER_SECTORS;
     aes256_xts_set_key(&p->key, master);
-    memset(master, 0, sizeof(master));
-    memset(header, 0, CRUG_CRYPT_HEADER_BYTES);
+    secure_zero(master, sizeof(master));
+    secure_zero(header, CRUG_CRYPT_HEADER_BYTES);
     kfree(header);
 
     strncpy(bd->name, crypt_name(device_count), BLOCK_NAME_MAX - 1);
@@ -209,7 +226,7 @@ struct block_device *crypt_unlock(struct block_device *parent, u64 offset_sector
     bd->flush = crypt_flush;
     bd->priv = p;
     if (block_register(bd) != 0) {
-        memset(p->bounce, 0, CRYPT_BOUNCE_BYTES);
+        secure_zero(p->bounce, CRYPT_BOUNCE_BYTES);
         kfree(p->bounce);
         aes256_xts_wipe(&p->key);
         kfree(p);
@@ -234,6 +251,6 @@ void crypt_wipe_keys(struct block_device *bd)
     p = (struct crypt_priv *)bd->priv;
     aes256_xts_wipe(&p->key);
     if (p->bounce != 0)
-        memset(p->bounce, 0, CRYPT_BOUNCE_BYTES);
+        secure_zero(p->bounce, CRYPT_BOUNCE_BYTES);
     p->wiped = 1;
 }

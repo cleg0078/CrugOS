@@ -46,6 +46,14 @@
 #define CRUG_CRYPT_MAX_T_COST 64u
 #define CRUG_CRYPT_MAX_LANES 16u
 
+/* Unlock-time KDF policy. crypt_meta_validate() enforces the format-time
+   ceiling (1 GiB, t=64); boot additionally refuses a header that would force
+   a multi-minute pre-auth derivation or a trivially weak one. */
+#define CRUG_CRYPT_UNLOCK_MIN_M_COST_KIB 1024u
+#define CRUG_CRYPT_UNLOCK_MAX_M_COST_KIB 65536u
+#define CRUG_CRYPT_UNLOCK_MIN_T_COST 2u
+#define CRUG_CRYPT_UNLOCK_MAX_T_COST 8u
+
 #define CRUG_CRYPT_SLOT_EMPTY 0u
 #define CRUG_CRYPT_SLOT_ACTIVE 1u
 #define CRUG_CRYPT_SLOT_FLAG_PASSWORD 0u

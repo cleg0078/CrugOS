@@ -29,4 +29,26 @@ void test_string_functions(void)
     CHECK(memcmp("abc", "abc", 3) == 0);
     CHECK(memcmp("abc", "abd", 3) < 0);
     CHECK(memcmp("abd", "abc", 3) > 0);
+
+    {
+        u8 secret[8];
+        u8 i;
+
+        /* secure_zero must overwrite exactly the requested bytes and must
+         * leave the rest of the buffer alone, including a zero length. */
+        for (i = 0; i < sizeof(secret); i++) {
+            secret[i] = 0xAA;
+        }
+        secure_zero(secret, 3);
+        CHECK(secret[0] == 0);
+        CHECK(secret[1] == 0);
+        CHECK(secret[2] == 0);
+        CHECK(secret[3] == 0xAA);
+        secure_zero(secret, 0);
+        CHECK(secret[3] == 0xAA);
+        secure_zero(secret, sizeof(secret));
+        for (i = 0; i < sizeof(secret); i++) {
+            CHECK(secret[i] == 0);
+        }
+    }
 }

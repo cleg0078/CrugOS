@@ -296,8 +296,23 @@ and host tools are in [crypto.md](crypto.md).
   mount is refused while the journal is dirty, while `EXT4_MOUNT_RW` replays
   it first;
 - extent trees of depth up to 5, plus the legacy 12 direct blocks and single
-  indirect block;
+  indirect block; every extent header is checked against the bytes the node
+  really owns (60 for the inline root in `i_block`, `block_size - 12 - csum`
+  for a leaf) before its entries are followed or appended;
 - linear directories; `DIR_INDEX` (htree) is rejected.
+
+Phase H1 validates the geometry before it trusts it. `ext4_probe()` requires a
+power-of-two block size of at least 1024, non-zero block and inode counts, and
+`s_blocks_per_group` / `s_inodes_per_group` at most `block_size * 8` (one
+bitmap block's worth of bits). That check runs before the `metadata_csum`
+superblock checksum, so a crafted value is rejected with
+`CRUGOS: ext4 mount rejected (geometry)` without the attacker also having to
+fix the checksum. After `read_inode()` the root inode's inline extent root is
+validated against the real 60-byte `i_block` area (magic `0xF30A`, entries at
+most `eh_max`, depth at most 5 and `12 + eh_max * 12 <= 60`), so a bad header
+fails with `CRUGOS: ext4 mount rejected (root extent)` only after the inode
+checksum has authenticated. Either failure makes `storage_init()` print
+`CRUGOS: no root filesystem` and exit 35.
 
 Unsupported features are rejected at mount time rather than misread:
 `META_BG`, `INLINE_DATA`, `ENCRYPT`, an unknown checksum type and any unknown
@@ -364,6 +379,9 @@ descriptor, directory and extent leaf) are queued in the journal.
   sizes survive a remount.
 - `bg_itable_unused` shrinks when an inode inside the untouched tail is
   allocated, so the unused-inode area never claims a live inode.
+- Freeing re-checks the bit index before it clears it: a group at or past
+  `groups` or a bit at or past `blocks_per_group` is refused, so a corrupted
+  extent cannot make `free_block()` clear a bit in another group's bitmap.
 - Group descriptor free counters and the superblock free counts/state are
   written back; `ext4_umount()` marks the filesystem clean and flushes it
   after the final journal commit succeeds. If that commit fails the
@@ -532,6 +550,13 @@ scripts/check-raid.py build/x86_64/raid-a.img build/x86_64/raid-b.img
   the legacy model, or BAR0 is not an I/O BAR.
 - `storage: no usable GPT partition`: no protective MBR or bad CRCs; check
   with `sgdisk -p`.
+- `CRUGOS: ext4 mount rejected (geometry)`: `s_blocks_per_group` or
+  `s_inodes_per_group` is zero or larger than `block_size * 8`, so the bitmap
+  arithmetic would run past its block. Check with `dumpe2fs -h`.
+- `CRUGOS: ext4 mount rejected (root extent)`: the root inode's inline extent
+  root has the wrong magic, `eh_max` does not fit the 60-byte `i_block` area,
+  or its depth exceeds 5. The inode checksum was valid, so the image was
+  crafted, not merely truncated.
 - `storage: ext4 mount failed`: unsupported feature, unclean state, or a
   partition offset that does not point at the filesystem. `dumpe2fs -h` on the
   extracted partition shows the feature flags.

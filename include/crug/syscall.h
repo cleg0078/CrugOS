@@ -29,6 +29,7 @@
 #define SYS_EBADF (-9ll)
 #define SYS_EAGAIN (-11ll)
 #define SYS_EIO (-5ll)
+#define SYS_EFAULT (-14ll)
 
 #define SYSCALL_VECTOR 0x80u
 #define SYS_PING_MAGIC 0x43524731ull

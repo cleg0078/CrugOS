@@ -15,6 +15,7 @@
 #   make check-disk run e2fsck and file checks on the test disk
 #   make test-journal-csum  crash-stop after a journal commit, then replay it with e2fsck
 #   make test-journal-replay  reboot after a crash and replay the journal in the kernel
+#   make test-hardening      boot crafted images and prove the kernel rejects them
 #   make test-raid  boot RAID1 (two members) and verify member disks
 #   make test-raid10  boot RAID10 (four members) and verify member disks
 #   make test-nvme   boot from an NVMe namespace and verify the disk
@@ -159,6 +160,9 @@ WB_SELECT_ACTS ?= 3
 WB_SELECT_FILL ?= 24
 WB_SELECT_RUN_TIMEOUT_SEC ?= 240
 
+# Hardening gate (make test-hardening): how long each crafted image may boot.
+HARDEN_TIMEOUT_SEC ?= 120
+
 # Interactive demo (make demo): a real QEMU window with a USB keyboard and
 # mouse, the Workbench desktop and a hold so the window stays open.
 DEMO_DISPLAY ?= gtk
@@ -289,6 +293,7 @@ HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
         mkcrypt crypt-disk raid-repair-disks raid10-repair-disks run demo test test-compat \
         test-raid test-raid-degraded test-raid10 test-raid10-degraded test-nvme test-ahci \
         test-raid-repair test-raid10-repair test-journal-csum test-journal-replay \
+        test-hardening \
         test-crypt test-crypt-recovery test-crypt-wrongkey test-crypt-tamper test-crypt-ni \
         test-crypt-prompt test-crypt-prompt-wrong test-crypt-prompt-timeout \
         test-crypt-keyboard test-crypt-keyboard-wrong crypt-run test-net test-tcp \
@@ -836,6 +841,17 @@ test-journal-replay: esp crash-disk
 	$(Q)$(MAKE) --no-print-directory run DISK_IMG=$(CRASH_REPLAY_IMG)
 	$(Q)$(PYTHON) scripts/check-journal-replay.py $(SERIAL_LOG) $(QEMU_EXIT) $(CRASH_REPLAY_IMG)
 
+test-hardening: esp
+	$(Q)rm -f $(DISK_IMG) $(CRYPT_IMG)
+	$(Q)$(MAKE) --no-print-directory disk crypt-disk
+	$(Q)$(PYTHON) scripts/run-hardening.py --repo $(CURDIR) \
+		--disk $(abspath $(DISK_IMG)) \
+		--crypt-disk $(abspath $(CRYPT_IMG)) \
+		--crypt-pass "$(CRYPT_PASS)" \
+		--serial-log $(abspath $(SERIAL_LOG)) \
+		--exit-code $(abspath $(QEMU_EXIT)) \
+		--timeout $(HARDEN_TIMEOUT_SEC)
+
 check-disk:
 	@if [ -n "$(DISK_IMG)" ] && [ ! -f "$(DISK_IMG)" ]; then \
 		$(MAKE) --no-print-directory disk; \
@@ -942,6 +958,7 @@ options:
 	@printf '  %-16s %s\n' WB_SELECT_ACTS "$(WB_SELECT_ACTS)"
 	@printf '  %-16s %s\n' WB_SELECT_FILL "$(WB_SELECT_FILL)"
 	@printf '  %-16s %s\n' WB_SELECT_RUN_TIMEOUT_SEC "$(WB_SELECT_RUN_TIMEOUT_SEC)"
+	@printf '  %-16s %s\n' HARDEN_TIMEOUT_SEC "$(HARDEN_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' MEMORY_MB "$(MEMORY_MB)"
 	@printf '  %-16s %s\n' SMP "$(SMP)"
 	@printf '  %-16s %s\n' TIMEOUT_SEC "$(TIMEOUT_SEC)"

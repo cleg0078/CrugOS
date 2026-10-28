@@ -1,5 +1,6 @@
 /* NVMe over PCIe: polled admin and I/O queues, one namespace per controller. */
 #include <crug/nvme.h>
+#include <crug/harden.h>
 #include <crug/types.h>
 #include <crug/compiler.h>
 #include <crug/pci.h>
@@ -123,6 +124,10 @@ static void nvme_doorbell(struct nvme_ctrl *c, u16 qid, int cq, u16 value)
 {
     u32 off = NVME_DOORBELL + (2u * qid + (cq ? 1u : 0u)) * c->stride;
 
+    /* Never program a register outside the mapped BAR, whatever the device
+       claims through CAP.DSTRD. */
+    if (!harden_nvme_doorbell_ok(c->bar_size, c->stride, qid, cq))
+        return;
     nvme_write32(c, off, value);
 }
 
@@ -439,6 +444,14 @@ static int nvme_setup(struct nvme_ctrl *c, u8 bus, u8 dev, u8 fn)
         return -1;
     c->qsize = (u16)qsize;
     c->stride = 4u << ((u32)(cap >> 32) & 0xFu);
+    if (c->stride < 4u || (c->stride & (c->stride - 1u)) != 0 ||
+        !harden_nvme_doorbell_ok(c->bar_size, c->stride, 0, 0) ||
+        !harden_nvme_doorbell_ok(c->bar_size, c->stride, 0, 1) ||
+        !harden_nvme_doorbell_ok(c->bar_size, c->stride, 1, 0) ||
+        !harden_nvme_doorbell_ok(c->bar_size, c->stride, 1, 1)) {
+        kprintf("nvme   : doorbell stride outside BAR0\n");
+        return -1;
+    }
 
     nvme_write32(c, NVME_INTMS, 0xFFFFFFFFu);
     if (nvme_disable(c) != 0)
