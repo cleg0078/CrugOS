@@ -25,6 +25,7 @@ Run `make preflight` to check all of the above.
 make             # show this target list (same as `make help`)
 make all         # kernel.elf, BOOTX64.EFI and the ESP tree
 make run         # boot the ESP tree under QEMU + OVMF
+make demo        # boot the Workbench desktop in a real QEMU window
 make test        # boot, verify markers/version/AVX2, then e2fsck the disk
 make test-net    # boot with a slirp virtio-net NIC and verify DHCP/ARP/ICMP
 make test-tcp    # TCP client/server and an HTTP exchange, both directions
@@ -128,6 +129,12 @@ options` prints the complete resolved set (including paths derived from
 | `WB_DRAG` | `1` | title-bar drags `make test-workbench` performs and verifies |
 | `WB_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for `make test-workbench` |
 | `WB_QEMU_EXTRA` | `-device qemu-xhci,id=xhci` | QEMU arguments `make test-workbench` boots with (the gate adds its own `-qmp` socket) |
+| `DEMO_DISPLAY` | `gtk` | QEMU display `make demo` opens (any `-display` value, for example `sdl` or `none`) |
+| `DEMO_HOLD_SEC` | `600` | seconds `make demo` keeps the desktop on screen before the guest exits by itself |
+| `DEMO_TIMEOUT_SEC` | `900` | wall-clock budget for the whole `make demo` boot |
+| `DEMO_CMDLINE` | `wb.enable=1 wb.wait=0 wb.hold=$(DEMO_HOLD_SEC)` | `CMDLINE_EXTRA` the demo boot passes to the kernel |
+| `DEMO_MACHINE_EXTRA` | `usb=off,i8042=off` | machine properties, so the demo keyboard and mouse are the only ones |
+| `DEMO_QEMU_EXTRA` | `-device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-mouse,bus=xhci.0` | QEMU arguments that attach an xHCI with a keyboard and a mouse |
 | `CRASH_IMG` | `$(BUILD)/crash.img` | crash-gate image (journal commit, no checkpoint) |
 | `CRASH_REPLAY_IMG` | `$(BUILD)/crash-replay.img` | copy the kernel replays on the second crash-gate boot |
 | `CC` | `crugc` | compiler for kernel and loader objects |
@@ -434,6 +441,31 @@ primitives. It requires exit status 33, `CRUGOS: wb selftest ok`, the `wb`
 markers (`EXPECT_WB=yes`) and a clean `e2fsck`; it prints
 `ok: workbench title-bar drag (1 drag(s), window 2 at (570, 350), exit 33)`.
 See [workbench.md](workbench.md).
+
+## Interactive demo
+
+`make demo` is not a gate but a way to watch the system: it boots
+`DEMO_QEMU_EXTRA` (an xHCI controller with a `usb-kbd` and a `usb-mouse`
+already plugged in) into a real `DEMO_DISPLAY` window (GTK by default) instead
+of the headless gates. The command line carries
+`wb.enable=1 wb.wait=0 wb.hold=$(DEMO_HOLD_SEC)`:
+
+- `wb.enable=1` hands the framebuffer to the phase 6A desktop and opens the two
+  demo windows.
+- `wb.wait=0` turns the desktop self-test into a no-op, so the demo does not
+  require a title-bar drag before the gate marker; the interactive desktop is
+  the point, not the self-test.
+- `wb.hold=<seconds>` keeps the guest alive after `CRUGOS: phase 6a boot ok`
+  (`wb_hold()`), polling input once per timer tick, so the window stays on
+  screen until the deadline or until you close it.
+
+Inside the window the USB keyboard and the USB mouse are live: pointer motion
+prints `CRUGOS: usb mouse move dx=.. dy=..` on the serial console, a left
+press on a title bar starts a drag, and `Ctrl+Alt+G` releases the pointer grab
+so you can leave the window. The guest then exits through `isa-debug-exit`
+with status 33, exactly like the gates, and `build/x86_64/serial.log` plus
+`build/x86_64/exit-code.txt` keep the record. Passing `DEMO_DISPLAY=none`
+turns the same target into a headless demo.
 
 The supported ext4 subset, write path, checksum layout, journal format and
 failure modes are documented in [storage.md](storage.md) and

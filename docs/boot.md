@@ -43,7 +43,7 @@ read the non-secret `net.tcp=` / `net.serve=` / `net.dns=` /
 `usb.wait=` / `usb.keys=`, phase 5B adds `usb.mouse=` / `usb.moves=`, phase
 5C adds `audio.rate=` / `audio.volume=` / `audio.seconds=`, phase 5D adds
 `gfx.wait=` / `gfx.moves=`, and phase 6A adds `wb.enable=` / `wb.wait=` /
-`wb.drag=`. The
+`wb.drag=` / `wb.hold=`. The
 loader caps
 the command line at 511 bytes and the kernel wipes the page after it copies the
 `crypt.pass=` value.
@@ -121,7 +121,8 @@ post-snapshot allocations cannot push it over capacity.
    `gfx.wait=<seconds>` and `gfx.moves=<n>`: the boot prints
    `CRUGOS: gfx framebuffer absent` or
    `CRUGOS: gfx ready (1024x768, cursor at 512,384)`. `wb_cmdline` then reads
-   `wb.enable=`, `wb.wait=<seconds>` and `wb.drag=<n>`, and `wb_init` builds the
+   `wb.enable=`, `wb.wait=<seconds>`, `wb.drag=<n>` and `wb.hold=<seconds>`, and
+   `wb_init` builds the
    desktop only when the token was supplied: it takes the framebuffer away from
    the text console and prints `CRUGOS: wb desktop ready (1024x768, 2
    window(s))`. Without the token the framebuffer console keeps its text mode
@@ -196,7 +197,9 @@ post-snapshot allocations cannot push it over capacity.
     the desktop and waits for `wb.drag=` title-bar drags within `wb.wait=`
     seconds when `wb.enable=` enabled it, and is silent otherwise.
 14. `report_boot`, `storage_lock` (wipes the passphrase, the volume keys and
-    the bounce buffer), `CRUGOS: phase 6a boot ok`, `arch_exit_qemu(0x10)`.
+    the bounce buffer), `CRUGOS: phase 6a boot ok`, then `wb_hold` (only when
+    `wb.hold=` was given: the guest stays alive with the desktop on screen until
+    the deadline), `arch_exit_qemu(0x10)`.
 
 Storage is still brought up with interrupts disabled: the virtio driver polls
 its used ring, the NVMe driver polls completion queues and the AHCI driver polls
@@ -445,8 +448,12 @@ The `wb` lines appear only with `wb.enable=1`: `make test-workbench` boots that
 way, hotplugs a `usb-mouse` and drags a window by its title bar, so the log
 shows the desktop, the two demo windows, the drag lines and
 `CRUGOS: wb selftest ok`. The gate then checks the active title bar in a
-screendump, so a window that logs a move without repainting fails. See
-[workbench.md](workbench.md).
+screendump, so a window that logs a move without repainting fails. `make demo`
+boots the same desktop interactively instead of headlessly: it passes
+`wb.enable=1 wb.wait=0 wb.hold=<seconds>`, so the log shows the desktop, the two
+windows, `CRUGOS: wb holding desktop for <seconds> s` and
+`CRUGOS: wb hold finished` before the guest exits with status 33. See
+[workbench.md](workbench.md) and [build.md](build.md).
 
 The `audio` lines appear only on machines with a USB audio function: a default
 `q35` boot prints `CRUGOS: audio device absent`, while `make test-audio` adds

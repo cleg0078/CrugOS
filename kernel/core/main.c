@@ -107,6 +107,9 @@ void kernel_main(const boot_info *bi)
 
     storage_lock();
     kprintf("CRUGOS: phase 6a boot ok\n");
+    /* Interactive demo (make demo): keep the desktop on screen while the
+       mouse and keyboard stay live.  Silent unless wb.hold= was supplied. */
+    wb_hold();
     trace("K:exit-ok");
     arch_exit_qemu(0x10);
 }

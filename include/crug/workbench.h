@@ -10,11 +10,13 @@
 
 #define WB_WAIT_MAX 120u
 #define WB_DRAG_MAX 4u
+#define WB_HOLD_MAX 3600u
 
 int wb_init(void);
 void wb_cmdline(const boot_info *bi);
 void wb_poll(void);
 int wb_selftest(void);
 int wb_ready(void);
+void wb_hold(void);
 
 #endif /* CRUG_WORKBENCH_H */

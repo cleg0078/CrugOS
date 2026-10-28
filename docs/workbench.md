@@ -164,8 +164,12 @@ tokens do. Values are decimal, capped, and ignored when malformed:
 | `wb.enable=1` | 0/1 | take the framebuffer away from the text console and open the demo desktop |
 | `wb.wait=S` | 0..120 | seconds the self-test waits for the drags |
 | `wb.drag=N` | 0..4 | drags the self-test requires (also enables the markers) |
+| `wb.hold=S` | 0..3600 | seconds `wb_hold()` keeps the desktop on screen after the boot marker |
 
-The gate boots with `wb.enable=1 wb.wait=30 wb.drag=1`.
+The gate boots with `wb.enable=1 wb.wait=30 wb.drag=1`. `make demo` boots
+`wb.enable=1 wb.wait=0 wb.hold=<seconds>` instead: `wb.wait=0` turns the
+drag self-test into a no-op, so the interactive desktop does not need a drag
+before the boot marker, and `wb.hold=` keeps the guest alive afterwards.
 
 ## Boot integration and markers
 
@@ -201,6 +205,8 @@ CRUGOS: phase 6a boot ok
 | `CRUGOS: wb cursor at (x, y)` | pointer motion with reporting on |
 | `CRUGOS: wb pointer timeout (drag N/M)` | the self-test wait expired |
 | `CRUGOS: wb selftest ok (N drag(s))` | the requested drags happened |
+| `CRUGOS: wb holding desktop for S s` | `wb.hold=` was given and `wb_hold()` started |
+| `CRUGOS: wb hold finished` | the hold deadline expired, so the guest exits |
 
 ## Host tests
 
@@ -261,10 +267,24 @@ anything else. The script then:
 `wb window N opened`, one `wb window N moved to`, and one `wb cursor at` with
 numeric coordinates) and `scripts/check-disk.py` for the ext4 root.
 
+## Interactive demo
+
+`make demo` boots the same desktop in a real QEMU window instead of a headless
+gate: `DEMO_QEMU_EXTRA` plugs a keyboard and a mouse into the xHCI controller
+before boot, `DEMO_DISPLAY` (GTK) opens the window, and the command line carries
+`wb.enable=1 wb.wait=0 wb.hold=$(DEMO_HOLD_SEC)`. The desktop appears once
+`CRUGOS: wb desktop ready` is printed, `wb_hold()` then polls input once per
+timer tick until the deadline, so the two demo windows stay on screen and the
+pointer and the keyboard are live (pointer motion prints
+`CRUGOS: usb mouse move`, a title-bar press starts a drag). After the hold the
+guest prints `CRUGOS: wb hold finished`, exits with status 33 and leaves
+`build/x86_64/serial.log` behind. See [build.md](build.md).
+
 ## Limits
 
-- Gate-only bring-up: the desktop is enabled by `wb.enable=1` and the demo
-  windows are hardcoded. There are no application tasks, no Workbench
+- Disabled by default: the desktop is enabled by `wb.enable=1` (the gates and
+  `make demo` pass it, a normal boot does not) and the demo windows are
+  hardcoded. There are no application tasks, no Workbench
   userspace and no window content owned by another program yet.
 - Four windows, no resize, no gadgets that do anything (the close-ish box is
   decoration), no menus, no icons, no clipboard, no double-click semantics.

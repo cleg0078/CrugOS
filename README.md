@@ -431,6 +431,12 @@ Phase 6A starts the Workbench: a small software window manager in the kernel.
   `screendump`: the active title bar must be at the new origin and the old one
   must be idle, so a window that logs a move without drawing it fails. See
   [workbench.md](docs/workbench.md).
+- `make demo` boots that same desktop in a real QEMU window instead of a
+  headless gate: `DEMO_QEMU_EXTRA` plugs a `usb-kbd` and a `usb-mouse` into the
+  xHCI controller, `DEMO_DISPLAY` (GTK) opens the window, and the command line
+  carries `wb.enable=1 wb.wait=0 wb.hold=<seconds>`, so the desktop stays on
+  screen and both input devices are live until the hold expires (Ctrl+Alt+G
+  releases the pointer). See [build.md](docs/build.md).
 
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
@@ -632,6 +638,16 @@ bar of window 2 sits at `(570, 350)`, the old bar position is idle grey, and the
 white frame of window 1 is unchanged. The drag offset is `(32, 12)` (the grab
 point inside the title bar), so the window moves less than the pointer.
 
+`make demo` shows the same desktop interactively: it boots with a pre-attached
+USB keyboard and mouse into a GTK window and holds the framebuffer with
+`wb.hold=`, so the two windows, their title bars and the amber pointer are on
+screen instead of being verified by a gate. The keyboard types on the serial
+console and the mouse drives the pointer, so a title bar can be dragged by hand;
+`build/x86_64/serial.log` records the `CRUGOS: usb mouse move` lines and the
+`CRUGOS: wb holding desktop for <seconds> s` line, and the guest still exits
+with status 33 when the hold ends. `DEMO_HOLD_SEC=0` plus
+`DEMO_DISPLAY=none` turns it back into a fast headless boot.
+
 With no xHCI function in the default machine the driver prints
 `CRUGOS: usb controller absent` (as in the excerpt above) and the PS/2 keyboard
 stays in charge; the USB gates are the only ones that install the controller and
@@ -666,6 +682,7 @@ make test-crypt-keyboard  # type the passphrase on the PS/2 keyboard
 make test-crypt-keyboard-wrong  # three wrong keyboard lines must lock
 make crypt-run   # boot the encrypted disk in a QEMU window and type it
 make run         # boot and keep the serial log for inspection
+make demo        # boot the Workbench desktop in a real QEMU window
 make test-net    # boot with a virtio-net NIC and verify DHCP/ARP/ICMP
 make test-tcp    # TCP client/server plus an HTTP exchange against a host peer
 make test-net-dns  # resolve a name against a host DNS server over TCP
@@ -701,7 +718,9 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `EXPECT_USB`, `EXPECT_MOUSE`, `EXPECT_AUDIO`, `EXPECT_GFX`, `EXPECT_WB`,
 `AUDIO_RUN_TIMEOUT_SEC`, `AUDIO_QEMU_EXTRA`, `GFX_WAIT`, `GFX_MOVES`,
 `GFX_RUN_TIMEOUT_SEC`, `GFX_QEMU_EXTRA`, `WB_WAIT`, `WB_DRAG`,
-`WB_RUN_TIMEOUT_SEC`, `WB_QEMU_EXTRA`, `NET_MODE`, `NET_HOSTFWD`, `TCP_SERVE_SEC`,
+`WB_RUN_TIMEOUT_SEC`, `WB_QEMU_EXTRA`, `DEMO_DISPLAY`, `DEMO_HOLD_SEC`,
+`DEMO_TIMEOUT_SEC`, `DEMO_CMDLINE`, `DEMO_MACHINE_EXTRA`, `DEMO_QEMU_EXTRA`,
+`NET_MODE`, `NET_HOSTFWD`, `TCP_SERVE_SEC`,
 `TCP_RUN_TIMEOUT_SEC`, `DNS_NAME`, `DNS_ADDRESS`, `DNS_TTL`,
 `DNS_RUN_TIMEOUT_SEC`, `USB_WAIT`, `USB_KEYS`, `USB_RUN_TIMEOUT_SEC`,
 `MOUSE_MOVES`, `MOUSE_WAIT`, `MOUSE_RUN_TIMEOUT_SEC`, `MACHINE_EXTRA`,

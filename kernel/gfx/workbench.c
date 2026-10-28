@@ -19,7 +19,9 @@ static int g_enabled;
 static int g_ready;
 static int g_reporting;
 static u32 g_wait_seconds;
+static int g_wait_given;
 static u32 g_want_drags;
+static u32 g_hold_seconds;
 
 static int wb_is_space(char c)
 {
@@ -73,6 +75,7 @@ static void wb_cmdline_token(const char *tok, usize len)
     if (used >= 0) {
         if (wb_parse_u32(tok + used, len - (usize)used, &value) == 0) {
             g_wait_seconds = value > WB_WAIT_MAX ? WB_WAIT_MAX : value;
+            g_wait_given = 1;
         }
         return;
     }
@@ -80,6 +83,13 @@ static void wb_cmdline_token(const char *tok, usize len)
     if (used >= 0) {
         if (wb_parse_u32(tok + used, len - (usize)used, &value) == 0) {
             g_want_drags = value > WB_DRAG_MAX ? WB_DRAG_MAX : value;
+        }
+        return;
+    }
+    used = wb_prefix(tok, len, "wb.hold=");
+    if (used >= 0) {
+        if (wb_parse_u32(tok + used, len - (usize)used, &value) == 0) {
+            g_hold_seconds = value > WB_HOLD_MAX ? WB_HOLD_MAX : value;
         }
     }
 }
@@ -179,8 +189,13 @@ int wb_selftest(void)
     if (!g_ready) {
         return 1;
     }
-    want = g_want_drags ? g_want_drags : 1u;
     gfx_show(1);
+    /* wb.wait=0 turns the drag gate off: the interactive demo boots the
+       desktop and keeps it on screen for wb.hold= seconds instead. */
+    if (g_wait_given && g_wait_seconds == 0u) {
+        return 1;
+    }
+    want = g_want_drags ? g_want_drags : 1u;
     deadline = timer_monotonic_ns() +
                (u64)(g_wait_seconds ? g_wait_seconds : 5u) * 1000000000ull;
     while (intuition_drag_count() < (u64)want) {
@@ -208,4 +223,24 @@ int wb_selftest(void)
 int wb_ready(void)
 {
     return g_ready;
+}
+
+/* Interactive demo: keep the booted desktop on screen for wb.hold= seconds
+   while still pumping input.device, so the mouse and keyboard stay live. */
+void wb_hold(void)
+{
+    u64 deadline;
+
+    if (!g_ready || g_hold_seconds == 0u) {
+        return;
+    }
+    kprintf("CRUGOS: wb holding desktop for %u s\n",
+            (unsigned)g_hold_seconds);
+    deadline = timer_monotonic_ns() +
+               (u64)g_hold_seconds * 1000000000ull;
+    while (timer_monotonic_ns() < deadline) {
+        input_poll();
+        cpu_wait_for_irq();
+    }
+    kprintf("CRUGOS: wb hold finished\n");
 }

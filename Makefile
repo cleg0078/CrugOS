@@ -3,6 +3,7 @@
 #   make            show this help (same as 'make help')
 #   make all        build kernel, UEFI loader and ESP tree
 #   make run        boot the ESP image under QEMU + OVMF
+#   make demo       boot the Workbench desktop in a real QEMU window
 #   make test       boot and verify the serial markers / exit code
 #   make test-host  build and run host unit tests
 #   make test-compat  boot a compatibility build (no AVX2 required)
@@ -116,6 +117,15 @@ WB_WAIT ?= 30
 WB_DRAG ?= 1
 WB_RUN_TIMEOUT_SEC ?= 240
 WB_QEMU_EXTRA ?= -device qemu-xhci,id=xhci
+
+# Interactive demo (make demo): a real QEMU window with a USB keyboard and
+# mouse, the Workbench desktop and a hold so the window stays open.
+DEMO_DISPLAY ?= gtk
+DEMO_HOLD_SEC ?= 600
+DEMO_TIMEOUT_SEC ?= 900
+DEMO_CMDLINE ?= wb.enable=1 wb.wait=0 wb.hold=$(DEMO_HOLD_SEC)
+DEMO_MACHINE_EXTRA ?= usb=off,i8042=off
+DEMO_QEMU_EXTRA ?= -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-mouse,bus=xhci.0
 NET_MODE ?=
 NET_HOSTFWD ?=
 OVMF_CODE ?= /usr/share/OVMF/OVMF_CODE_4M.fd
@@ -215,7 +225,7 @@ HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
                       $(wildcard kernel/crypto/*.c) $(wildcard kernel/crypto/*.S)
 
 .PHONY: all kernel loader esp disk raid-disks raid10-disks nvme-disk ahci-disk \
-        mkcrypt crypt-disk raid-repair-disks raid10-repair-disks run test test-compat \
+        mkcrypt crypt-disk raid-repair-disks raid10-repair-disks run demo test test-compat \
         test-raid test-raid-degraded test-raid10 test-raid10-degraded test-nvme test-ahci \
         test-raid-repair test-raid10-repair test-journal-csum test-journal-replay \
         test-crypt test-crypt-recovery test-crypt-wrongkey test-crypt-tamper test-crypt-ni \
@@ -359,6 +369,19 @@ crypt-run: crypt-disk
 	@echo "  NOTE  type the passphrase in the QEMU window (Ctrl+Alt+G releases input)"
 	@echo "  NOTE  serial log $(SERIAL_LOG), exit status $(QEMU_EXIT)"
 
+# Interactive demo: boot the Workbench desktop in a real QEMU window.  The
+# kernel keeps the desktop on screen for DEMO_HOLD_SEC seconds while the USB
+# keyboard and mouse stay live, so windows can actually be dragged.
+demo: esp
+	$(Q)$(MAKE) --no-print-directory run DISK_IMG=$(DISK_IMG) CRYPT_PASS= \
+		NET_MODE=none QEMU_DISPLAY=$(DEMO_DISPLAY) \
+		TIMEOUT_SEC=$(DEMO_TIMEOUT_SEC) \
+		MACHINE_EXTRA="$(DEMO_MACHINE_EXTRA)" \
+		QEMU_EXTRA="$(DEMO_QEMU_EXTRA)" \
+		CMDLINE_EXTRA="$(DEMO_CMDLINE)"
+	@echo "  NOTE  the Workbench desktop is on screen; drag a window title bar to move it"
+	@echo "  NOTE  Ctrl+Alt+G releases the mouse pointer, close the window to stop early"
+	@echo "  NOTE  serial log $(SERIAL_LOG), exit status $(QEMU_EXIT)"
 test-net: esp
 	$(Q)rm -f $(DISK_IMG)
 	$(Q)$(MAKE) --no-print-directory run NET_MODE=user
@@ -672,6 +695,12 @@ options:
 	@printf '  %-16s %s\n' QEMU_DISPLAY "$(QEMU_DISPLAY)"
 	@printf '  %-16s %s\n' QEMU_EXTRA "$(QEMU_EXTRA)"
 	@printf '  %-16s %s\n' MACHINE_EXTRA "$(MACHINE_EXTRA)"
+	@printf '  %-16s %s\n' DEMO_DISPLAY "$(DEMO_DISPLAY)"
+	@printf '  %-16s %s\n' DEMO_HOLD_SEC "$(DEMO_HOLD_SEC) (seconds)"
+	@printf '  %-16s %s\n' DEMO_TIMEOUT_SEC "$(DEMO_TIMEOUT_SEC) (seconds)"
+	@printf '  %-16s %s\n' DEMO_CMDLINE "$(DEMO_CMDLINE)"
+	@printf '  %-16s %s\n' DEMO_MACHINE_EXTRA "$(DEMO_MACHINE_EXTRA)"
+	@printf '  %-16s %s\n' DEMO_QEMU_EXTRA "$(DEMO_QEMU_EXTRA)"
 	@printf '  %-16s %s\n' OVMF_CODE "$(OVMF_CODE)"
 	@printf '  %-16s %s\n' OVMF_VARS "$(OVMF_VARS)"
 	@printf '  %-16s %s\n' DISK_IMG "$(DISK_IMG)"
