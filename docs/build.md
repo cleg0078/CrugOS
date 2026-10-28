@@ -1,6 +1,6 @@
 # Building CrugOS
 
-This document describes the phase 5A build system: how the kernel, the UEFI
+This document describes the phase 5B build system: how the kernel, the UEFI
 loader, the host crypto tool and the test disk images are built, which
 invariants the link must preserve, and how to diagnose the failure modes that
 are specific to this toolchain.
@@ -30,6 +30,7 @@ make test-net    # boot with a slirp virtio-net NIC and verify DHCP/ARP/ICMP
 make test-tcp    # TCP client/server and an HTTP exchange, both directions
 make test-net-dns  # resolve a name against a host DNS server over TCP
 make test-usb-hotplug  # hotplug a USB keyboard into xHCI and type at it
+make test-usb-mouse    # hotplug a USB mouse into xHCI and move the pointer
 make test-raid   # boot a two-member RAID1 root and check both members
 make test-raid10 # boot a four-member RAID10 root and check every member
 make test-nvme   # boot from an NVMe namespace and check the image
@@ -52,7 +53,7 @@ make test-crypt-keyboard  # type the passphrase on the PS/2 keyboard and boot
 make test-crypt-keyboard-wrong  # three wrong keyboard passphrases must lock the volume
 make crypt-run   # boot the encrypted disk in a QEMU window for real typing
 make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
-make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/USB HID descriptors and reports/IPv4/TCP/UDP checksums/DHCP parsing/DNS
+make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/USB HID keyboard and mouse descriptors and reports/pointer state/IPv4/TCP/UDP checksums/DHCP parsing/DNS
 make disk        # build the GPT/ext4 test disk at build/<arch>/disk.img
 make raid-disks  # build the two GPT/ext4 RAID1 member disks
 make raid10-disks  # build the four GPT/ext4 RAID10 member disks
@@ -103,10 +104,14 @@ options` prints the complete resolved set (including paths derived from
 | `DNS_ADDRESS` | `10.0.2.99` | address the gate's DNS server answers with |
 | `DNS_TTL` | `60` | TTL the gate's DNS server puts in its answer |
 | `DNS_RUN_TIMEOUT_SEC` | `180` | wall-clock budget for `make test-net-dns` |
-| `EXPECT_USB` | `no` | `yes` requires the `CRUGOS: usb ...` markers written by `make test-usb-hotplug` |
+| `EXPECT_USB` | `no` | `yes` requires the `CRUGOS: usb ...` keyboard markers written by `make test-usb-hotplug` |
 | `USB_WAIT` | `20` | seconds the USB gate boots with `usb.wait=` so the keyboard can be hotplugged late |
 | `USB_KEYS` | `abc` | characters `make test-usb-hotplug` types and waits to see decoded |
 | `USB_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for `make test-usb-hotplug` |
+| `EXPECT_MOUSE` | `no` | `yes` requires the `CRUGOS: usb mouse ...` markers written by `make test-usb-mouse` |
+| `MOUSE_MOVES` | `2` | pointer reports `make test-usb-mouse` injects (one establishes the button baseline) |
+| `MOUSE_WAIT` | `20` | seconds the mouse gate boots with `usb.mouse=` so the mouse can be hotplugged late |
+| `MOUSE_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for `make test-usb-mouse` |
 | `CRASH_IMG` | `$(BUILD)/crash.img` | crash-gate image (journal commit, no checkpoint) |
 | `CRASH_REPLAY_IMG` | `$(BUILD)/crash-replay.img` | copy the kernel replays on the second crash-gate boot |
 | `CC` | `crugc` | compiler for kernel and loader objects |
@@ -343,7 +348,7 @@ routes TCP there but not UDP), passes
 query arriving at the server and a clean `e2fsck`. The driver prints
 `ok: dns resolve over tcp (N query(s), <host> -> <address>, exit 33)`.
 
-`make test-usb-hotplug` proves the phase 5A hotplug path:
+`make test-usb-hotplug` proves the phase 5A keyboard hotplug path:
 [scripts/run-usb-hotplug.py](../scripts/run-usb-hotplug.py) boots the normal disk
 with `MACHINE_EXTRA=usb=off,i8042=off` (so the machine has no built-in USB
 controller and no PS/2 port), adds `-device qemu-xhci,id=xhci` through
@@ -357,6 +362,18 @@ routes keystrokes elsewhere). The gate requires exit status 33,
 `CRUGOS: usb selftest ok`, the five `usb` markers (`EXPECT_USB=yes`) and a clean
 `e2fsck`; the driver prints
 `ok: usb hotplug keyboard (N key(s) <keys>, port hotplug, exit 33)`.
+`make test-usb-mouse` proves the phase 5B pointer path with the same machine
+setup: [scripts/run-usb-mouse.py](../scripts/run-usb-mouse.py) plugs `usb-mouse`
+into `xhci.0`, passes `usb.mouse=$(MOUSE_WAIT) usb.moves=$(MOUSE_MOVES)` through
+`CMDLINE_EXTRA`, and injects relative motion with QMP `input-send-event`. One
+QMP call produces exactly one HID report and the first report only sets the
+button baseline, so the script moves, waits for `CRUGOS: usb mouse move`, and
+only then presses the left button and waits for `CRUGOS: usb mouse button`. The
+event is broadcast rather than addressed at the device, because QEMU resolves a
+named `device` through its graphics console table and a USB device is not
+found there. The gate requires exit status 33, `CRUGOS: usb selftest ok`, the
+mouse markers (`EXPECT_MOUSE=yes`) and a clean `e2fsck`; the driver prints
+`ok: usb hotplug mouse (N move(s), 1 button(s), port hotplug, exit 33)`.
 See [usb.md](usb.md).
 
 The supported ext4 subset, write path, checksum layout, journal format and

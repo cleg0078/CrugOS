@@ -118,6 +118,51 @@ void test_input_functions(void)
     input_scancode(0x7F);
     expect_empty();
 
+    /* A USB HID device feeds the same character queue through input_char. */
+    input_init();
+    input_char('q');
+    expect_char('q');
+    input_char('\n');
+    expect_char('\n');
+    expect_empty();
+
+    /* Pointer events accumulate until read and then reset. */
+    input_init();
+    CHECK(input_pointer_count() == 0);
+    CHECK(input_pointer_read(NULL) == 0);
+    {
+        struct input_pointer p;
+
+        CHECK(input_pointer_read(&p) == 0);
+        input_pointer_event(0, 3, 4, 0);
+        input_pointer_event(0, -1, 2, -1);
+        CHECK(input_pointer_count() == 2);
+        CHECK(input_pointer_read(&p) == 1);
+        CHECK(p.dx == 2 && p.dy == 6 && p.wheel == -1);
+        CHECK(p.buttons == 0 && p.changes == 0);
+        CHECK(input_pointer_read(&p) == 0);
+
+        /* Button changes are accumulated as a bitmask of every transition. */
+        input_pointer_event(1, 0, 0, 0);
+        input_pointer_event(1, 0, 0, 0);
+        input_pointer_event(3, 0, 0, 0);
+        input_pointer_event(0, 0, 0, 0);
+        CHECK(input_pointer_read(&p) == 1);
+        CHECK(p.buttons == 0);
+        CHECK(p.changes == 0x03);
+        CHECK(p.dx == 0 && p.dy == 0 && p.wheel == 0);
+
+        /* Reset drops the accumulators and the event counter. */
+        input_pointer_event(2, -7, 9, 0);
+        input_pointer_reset();
+        CHECK(input_pointer_count() == 0);
+        CHECK(input_pointer_read(&p) == 0);
+        input_pointer_event(0, 1, 1, 0);
+        CHECK(input_pointer_count() == 1);
+        CHECK(input_pointer_read(&p) == 1);
+        CHECK(p.dx == 1 && p.dy == 1);
+    }
+
     /* The queue drops bytes past its 64-byte capacity. */
     input_init();
     for (i = 0; i < 100; i++)

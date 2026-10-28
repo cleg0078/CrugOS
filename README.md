@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 5A USB keyboard (`v0.19.0`)
+## Status: phase 5B USB mouse (`v0.20.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -17,9 +17,10 @@ encrypted root that can be unlocked with a passphrase typed on the console,
 and three storage transports; phase 4A adds console input from a PS/2 keyboard,
 phase 4B adds a small IPv4 stack over a virtio-net NIC, phase 4C extends it
 with TCP, an HTTP exchange in both directions and six socket syscalls, phase 4D
-adds a caching DNS stub resolver with a TCP fallback and a name syscall, and
-phase 5A adds an xHCI host controller with a USB HID boot keyboard that can be
-plugged into the running guest:
+adds a caching DNS stub resolver with a TCP fallback and a name syscall, phase
+5A adds an xHCI host controller with a USB HID boot keyboard that can be plugged
+into the running guest, and phase 5B adds a USB HID boot mouse whose reports
+become pointer events:
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -334,6 +335,30 @@ Phase 5A adds a third input source, a USB keyboard behind xHCI:
   types `abc` and requires the `usb` markers, a clean `e2fsck` and exit 33. See
   [usb.md](docs/usb.md).
 
+Phase 5B adds a pointer next to that keyboard:
+
+- the driver keeps a table of up to four boot keyboards and mice, so every port
+  that reports a connect is enumerated with its own device context, interrupt
+  ring and report buffer, in either order and at the same time;
+- `usb_hid_parse_config()` accepts protocol 2 (mouse) as well as protocol 1
+  (keyboard) and reports the endpoint's kind; `usb_hid_mouse_decode()` turns the
+  three- or four-byte boot report (button bitmap, signed `dx`, signed `dy`,
+  optional wheel) into motion and button edges, with the first report after a
+  reset acting as the button baseline;
+- `input.device` gains a pointer state beside its byte queue:
+  `input_pointer_event()` accumulates the deltas and button changes,
+  `input_pointer_read()` drains them, and the console path is untouched, so a
+  later graphics or shell consumer can read the pointer without changing the
+  keyboard path;
+- port scans sweep every port instead of stopping at the first device, and a
+  bound device whose port drops is unbound with `CRUGOS: usb keyboard gone` or
+  `CRUGOS: usb mouse gone`;
+- `usb.mouse=<seconds>` and `usb.moves=<n>` bound the mouse boot check;
+  `make test-usb-mouse` boots with `usb=off,i8042=off`, plugs `usb-mouse` into
+  `qemu-xhci` over QMP, injects relative motion and a button press, and requires
+  the `usb mouse` markers, a clean `e2fsck` and exit 33. See
+  [usb.md](docs/usb.md).
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -342,9 +367,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.19.0 (phase 5a) -- Amiga-inspired microkernel bring-up
+CrugOS 0.20.0 (phase 5b) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.19.0
+CRUGOS: version 0.20.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -390,7 +415,7 @@ CRUGOS: tcp socket syscall ok
 CRUGOS: tcp http served (72 bytes)
 CRUGOS: net selftest ok
 CRUGOS: selftest ok
-kernel : 0x0000000000100000 size=632 KiB
+kernel : 0x0000000000100000 size=640 KiB
 boot   : cpu=0 acpi_rsdp=0x1f77e000 fdt=0x0 initrd=0x0
 memory : 36 regions, usable 474080 KiB (462 MiB)
 pmm    : total=118520 free=118462 bitmap=131072 B
@@ -402,7 +427,7 @@ heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
 boot   : pmm=28552 us cpu=438 us vm=626 us traps=360 us timer=65357 us heap=60 us storage=94487 us sched=354 us syscall=122 us total=190359 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase 5a boot ok
+CRUGOS: phase 5b boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -444,10 +469,23 @@ CRUGOS: usb key 'c'
 CRUGOS: usb selftest ok (3 key(s))
 ```
 
+The mouse gate (`make test-usb-mouse`) is the same machine and QMP setup with a
+pointer instead of a keyboard, so the guest decodes motion and a button edge:
+
+```
+CRUGOS: input ready (serial only)
+CRUGOS: usb controller ready (xhci, 8 port(s))
+CRUGOS: usb device 0627:0001 on port 5 (speed 3)
+CRUGOS: usb mouse ready (endpoint 0x81, 4 byte reports)
+CRUGOS: usb mouse move dx=3 dy=0
+CRUGOS: usb mouse button 0x01
+CRUGOS: usb selftest ok (0 key(s), 2 pointer event(s))
+```
+
 With no xHCI function in the default machine the driver prints
 `CRUGOS: usb controller absent` (as in the excerpt above) and the PS/2 keyboard
-stays in charge; the USB gate is the only one that installs the controller and
-removes the PS/2 one, so the characters can only arrive over USB.
+stays in charge; the USB gates are the only ones that install the controller and
+remove the PS/2 one, so the input can only arrive over USB.
 
 ## Quick start
 
@@ -482,8 +520,9 @@ make test-net    # boot with a virtio-net NIC and verify DHCP/ARP/ICMP
 make test-tcp    # TCP client/server plus an HTTP exchange against a host peer
 make test-net-dns  # resolve a name against a host DNS server over TCP
 make test-usb-hotplug  # hotplug a USB keyboard into xHCI and type at it
+make test-usb-mouse    # hotplug a USB mouse into xHCI and move the pointer
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
-make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID, IPv4 checksums, DHCP parsing, DNS)
+make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS)
 make check-disk  # e2fsck + persisted-file checks on the latest test disk
 make disk        # generate the GPT/ext4 test disk
 make raid-disks  # generate the two RAID1 member disks
@@ -506,9 +545,11 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `QEMU_DISPLAY`, `QEMU_EXTRA`, `OVMF_CODE`, `OVMF_VARS`, `REQUIRE_AVX2`,
 `EXPECT_AVX2`, `EXPECT_RAID`, `EXPECT_NVME`, `EXPECT_REBUILD`, `EXPECT_AHCI`,
 `EXPECT_CRYPT`, `EXPECT_AES`, `EXPECT_NET`, `EXPECT_TCP`, `EXPECT_DNS`,
-`EXPECT_USB`, `NET_MODE`, `NET_HOSTFWD`, `TCP_SERVE_SEC`, `TCP_RUN_TIMEOUT_SEC`,
-`DNS_NAME`, `DNS_ADDRESS`, `DNS_TTL`, `DNS_RUN_TIMEOUT_SEC`, `USB_WAIT`,
-`USB_KEYS`, `USB_RUN_TIMEOUT_SEC`, `MACHINE_EXTRA`, `NVME_IMG`, `AHCI_IMG`,
+`EXPECT_USB`, `EXPECT_MOUSE`, `NET_MODE`, `NET_HOSTFWD`, `TCP_SERVE_SEC`,
+`TCP_RUN_TIMEOUT_SEC`, `DNS_NAME`, `DNS_ADDRESS`, `DNS_TTL`,
+`DNS_RUN_TIMEOUT_SEC`, `USB_WAIT`, `USB_KEYS`, `USB_RUN_TIMEOUT_SEC`,
+`MOUSE_MOVES`, `MOUSE_WAIT`, `MOUSE_RUN_TIMEOUT_SEC`, `MACHINE_EXTRA`,
+`NVME_IMG`, `AHCI_IMG`,
 `CRYPT_IMG`,
 `CRYPT_TAMPER_IMG`, `CRYPT_PASS`, `CRYPT_RECOVERY_PASS`, `CRYPT_M`,
 `CRYPT_PROMPT_TIMEOUT_SEC`, `CRYPT_PROMPT_WRONG_PASS`, `CRYPT_RUN_DISPLAY`,
@@ -530,7 +571,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/block/` | block-device registry, partitions, bounds checks, RAID1/RAID10, boot-time rebuild and the AES-256-XTS `crypt.device` |
 | `kernel/fs/` | GPT, writable checksummed ext4, checksummed JBD2 journal and the storage boot policy (including the console passphrase prompt) |
 | `kernel/crypto/` | AES, XTS, AES-NI, BLAKE2b and Argon2id (shared with the host tools) |
-| `drivers/` | PCI, legacy virtio-blk, NVMe and AHCI/SATA block device drivers, legacy virtio-net, and the xHCI controller with its USB HID keyboard decoder |
+| `drivers/` | PCI, legacy virtio-blk, NVMe and AHCI/SATA block device drivers, legacy virtio-net, and the xHCI controller with its USB HID keyboard and mouse decoders |
 | `scripts/` | QEMU runner, disk/RAID1/RAID10/crypt image builders, boot/PE/disk/RAID/journal/crypt checks, the serial and keyboard prompt drivers, tamper helper, size and reproducibility gates |
 | `tests/host/` | host unit tests for freestanding code |
 | `tools/` | host-side development tools (`gen-font.py`, `mkcrypt.c`, `gen-crc32c.py`) |
@@ -594,12 +635,15 @@ peer over slirp and a QEMU host forward; phase 4D added a caching DNS stub
 resolver with a UDP query, a TCP fallback, CNAME chains, a TTL cache and the
 `SYS_RESOLVE` syscall, gated against a hermetic host DNS server; phase 5A added
 a polled xHCI host controller and a USB boot keyboard that feeds the same input
-queue and can be hotplugged into the running guest. Remaining phase 3B work is
+queue and can be hotplugged into the running guest; phase 5B widened that
+driver to a device table of boot keyboards and mice and gave `input.device` a
+pointer state driven by a boot-mouse decoder. Remaining phase 3B work is
 online RAID rebuild, hot spare, scrub and a write-intent bitmap, RAID below
 encryption, a redundant ESP, TPM/keyfile keyslots and USB storage; phase 4
 continues with framebuffer (GOP) console input and virtual terminals, plus a
 routing table and richer resolver features on top of the phase 4B-4D stack;
-phase 5B adds HID mice and phase 5C UAC2 audio with a mixer. Later phases cover
+phase 5C adds UAC2 audio with a mixer and a pointer-driven graphics consumer.
+Later phases cover
 USB storage/audio/graphics, Workbench userspace, SMP/IOMMU and virtualisation. See
 [docs/roadmap.md](docs/roadmap.md) for the full sequence and the known
 specification gaps (Crug syntax, cross-architecture compilers and the OVMF

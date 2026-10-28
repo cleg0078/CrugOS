@@ -100,14 +100,6 @@ static int decode_report(u8 mods, u8 k0, u8 k1)
     return usb_hid_boot_decode(report);
 }
 
-static int press(u8 mods, u8 usage)
-{
-    int ch = decode_report(mods, usage, 0);
-
-    decode_report(mods, 0, 0);  /* release */
-    return ch;
-}
-
 void test_usb_functions(void)
 {
     struct usb_hid_endpoint ep;
@@ -121,6 +113,17 @@ void test_usb_functions(void)
     CHECK(ep.in == 1);
     CHECK(ep.max_packet == 8);
     CHECK(ep.interval == 10);
+
+    /* A boot mouse: same interface class, protocol 2, 4 byte reports. */
+    cfg_begin();
+    cfg_interface(0, 3, 1, 2);
+    cfg_hid();
+    cfg_endpoint(0x81, 0x03, 4, 10);
+    cfg_finish();
+    CHECK(parse(&ep) == 0);
+    CHECK(ep.kind == USB_HID_KIND_MOUSE);
+    CHECK(ep.ep_addr == 0x81);
+    CHECK(ep.max_packet == 4);
 
     /* A full speed endpoint with a 64 byte packet still reports it. */
     cfg_begin();
@@ -269,4 +272,74 @@ void test_usb_functions(void)
     usb_hid_reset();
     CHECK(decode_report(0, 0x04, 0) == 'a');
     CHECK(decode_report(0, 0x04, 0) == 0);
+
+    /* ---- boot mouse decoding ---- */
+    {
+        struct usb_hid_pointer p;
+        u8 m[USB_HID_MOUSE_REPORT_BYTES];
+
+        usb_hid_reset();
+        memset(m, 0, sizeof(m));
+
+        /* Idle report: no motion, no buttons, no event. */
+        CHECK(usb_hid_mouse_decode(m, 4, &p) == 0);
+        CHECK(p.dx == 0 && p.dy == 0 && p.buttons == 0 && p.changes == 0);
+
+        /* Positive and negative motion are sign extended from one byte. */
+        m[1] = 5;
+        m[2] = 0x03;
+        CHECK(usb_hid_mouse_decode(m, 4, &p) == 1);
+        CHECK(p.dx == 5 && p.dy == 3);
+        CHECK(p.buttons == 0 && p.changes == 0);
+
+        m[1] = 0xfb;   /* -5 */
+        m[2] = 0xf0;   /* -16 */
+        CHECK(usb_hid_mouse_decode(m, 4, &p) == 1);
+        CHECK(p.dx == -5 && p.dy == -16);
+
+        /* Buttons report changes only when the state actually changes. */
+        memset(m, 0, sizeof(m));
+        m[0] = 0x01;
+        CHECK(usb_hid_mouse_decode(m, 4, &p) == 1);
+        CHECK(p.buttons == 1 && p.changes == 1);
+        CHECK(usb_hid_mouse_decode(m, 4, &p) == 0);
+        m[0] = 0x03;
+        CHECK(usb_hid_mouse_decode(m, 4, &p) == 1);
+        CHECK(p.changes == 0x02);
+        m[0] = 0;
+        CHECK(usb_hid_mouse_decode(m, 4, &p) == 1);
+        CHECK(p.changes == 0x03);
+
+        /* The wheel byte is signed and counts as an event on its own. */
+        m[3] = 0xff;
+        CHECK(usb_hid_mouse_decode(m, 4, &p) == 1);
+        CHECK(p.wheel == -1);
+        m[3] = 0;
+
+        /* A 3 byte report has no wheel byte. */
+        m[1] = 1;
+        CHECK(usb_hid_mouse_decode(m, 3, &p) == 1);
+        CHECK(p.dx == 1 && p.wheel == 0);
+        m[1] = 0;
+
+        /* Reserved button bits are masked off. */
+        m[0] = 0xf8;
+        CHECK(usb_hid_mouse_decode(m, 4, &p) == 0);
+        CHECK(p.buttons == 0);
+
+        /* Degenerate arguments. */
+        CHECK(usb_hid_mouse_decode(NULL, 4, &p) == -1);
+        CHECK(usb_hid_mouse_decode(m, 2, &p) == -1);
+        CHECK(usb_hid_mouse_decode(m, 4, NULL) == -1);
+
+        /* Reset forgets the button state: the next report is a fresh baseline
+           and the one after that reports the change. */
+        usb_hid_reset();
+        m[0] = 0x02;
+        CHECK(usb_hid_mouse_decode(m, 4, &p) == 0);
+        CHECK(p.buttons == 0x02 && p.changes == 0);
+        m[0] = 0x03;
+        CHECK(usb_hid_mouse_decode(m, 4, &p) == 1);
+        CHECK(p.changes == 0x01);
+    }
 }

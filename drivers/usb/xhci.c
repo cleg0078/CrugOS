@@ -1,9 +1,10 @@
-/* xHCI host controller: command/event rings, port resets and HID boot keyboard.
+/* xHCI host controller: command/event rings, port resets and HID boot devices.
 
    Everything is polled: no interrupts are enabled and no MSI vectors are
-   allocated. The controller is reset on attach, then the first boot-protocol
-   keyboard found on any port is enumerated and its interrupt IN endpoint is
-   armed with a chain of NORMAL transfer requests. */
+   allocated. The controller is reset on attach, then every boot-protocol
+   keyboard or mouse found on a root port is enumerated into a small device
+   table and each interrupt IN endpoint is armed with NORMAL transfer
+   requests. Hotplug is detected through the PORTSC change bits. */
 #include <crug/types.h>
 #include <crug/usb.h>
 #include <crug/pci.h>
@@ -120,6 +121,25 @@ struct xhci_ring {
     u32 cycle;
 };
 
+#define XHCI_MAX_DEVICES 4u
+#define XHCI_REPORT_BYTES 64u
+
+/* One enumerated boot device: its slot, endpoint and interrupt ring. */
+struct xhci_dev {
+    int used;
+    u32 index;
+    u32 slot;
+    u32 port;
+    u32 speed;
+    u32 kind;        /* USB_HID_KIND_KEYBOARD or USB_HID_KIND_MOUSE */
+    u32 dci;
+    u32 ep_addr;
+    u32 report_len;  /* bytes armed for each interrupt transfer */
+    u64 reports;     /* completed interrupt transfers */
+    u64 ctx_pa;      /* device context (the dcbaa entry) */
+    struct xhci_ring ring;
+};
+
 struct xhci_hc {
     volatile u8 *cap;
     volatile u8 *op;
@@ -131,7 +151,6 @@ struct xhci_hc {
     int present;
     struct xhci_ring cmd;
     struct xhci_ring ep0;
-    struct xhci_ring hid;
     xhci_trb *ev;
     u64 ev_pa;
     u32 ev_dequeue;
@@ -143,15 +162,13 @@ struct xhci_hc {
     u64 dev_ctx_pa;
     u8 *in_ctx;
     u64 in_ctx_pa;
-    u32 slot;
-    u32 speed;
-    u32 port;
-    u32 hid_dci;
-    u32 kbd_port;
-    int keyboard_ready;
-    u32 keys;
-    u32 wait_seconds;
-    u32 want_keys;
+    struct xhci_dev dev[XHCI_MAX_DEVICES];
+    u32 keys;                 /* decoded keyboard characters */
+    u32 moves;                /* boot-mouse reports with motion or buttons */
+    u32 wait_seconds;         /* usb.wait=: keyboard wait window */
+    u32 want_keys;            /* usb.keys=: required key count */
+    u32 mouse_wait_seconds;   /* usb.mouse=: mouse wait window */
+    u32 want_moves;           /* usb.moves=: required pointer report count */
 };
 
 static struct xhci_hc g_hc;
@@ -165,7 +182,66 @@ static u64 setup_param(const u8 *setup)
     return v;
 }
 static u8 g_ctl[XHCI_CTL_BYTES] __attribute__((aligned(64)));
-static u8 g_report[USB_HID_REPORT_BYTES] __attribute__((aligned(64)));
+/* One 64-byte report buffer per device, 64-byte aligned for the transfer. */
+static u8 g_reports[XHCI_MAX_DEVICES][XHCI_REPORT_BYTES] __attribute__((aligned(64)));
+
+static u8 *xhci_report_buf(u32 index)
+{
+    if (index >= XHCI_MAX_DEVICES)
+        index = 0;
+    return g_reports[index];
+}
+
+static struct xhci_dev *xhci_dev_find(u32 slot, u32 dci)
+{
+    u32 i;
+
+    for (i = 0; i < XHCI_MAX_DEVICES; i++) {
+        struct xhci_dev *d = &g_hc.dev[i];
+
+        if (d->used && d->slot == slot && d->dci == dci)
+            return d;
+    }
+    return 0;
+}
+
+static struct xhci_dev *xhci_dev_on_port(u32 port)
+{
+    u32 i;
+
+    for (i = 0; i < XHCI_MAX_DEVICES; i++) {
+        struct xhci_dev *d = &g_hc.dev[i];
+
+        if (d->used && d->port == port)
+            return d;
+    }
+    return 0;
+}
+
+static struct xhci_dev *xhci_dev_of_kind(u32 kind)
+{
+    u32 i;
+
+    for (i = 0; i < XHCI_MAX_DEVICES; i++) {
+        struct xhci_dev *d = &g_hc.dev[i];
+
+        if (d->used && d->kind == kind)
+            return d;
+    }
+    return 0;
+}
+
+static u32 xhci_dev_count(void)
+{
+    u32 i;
+    u32 n = 0;
+
+    for (i = 0; i < XHCI_MAX_DEVICES; i++) {
+        if (g_hc.dev[i].used)
+            n++;
+    }
+    return n;
+}
 
 static u32 rd32(volatile u8 *base, u32 off)
 {
@@ -524,61 +600,82 @@ static int xhci_evaluate_context(u32 slot, u32 speed, u32 port, u32 max_packet)
     return 0;
 }
 
-static int xhci_configure_keyboard(u32 slot, const struct usb_hid_endpoint *ep)
+static int xhci_configure_endpoint(struct xhci_dev *d, const struct usb_hid_endpoint *ep)
 {
     u32 dci = (u32)ep->ep_num * 2u + (ep->in ? 1u : 0u);
     u32 comp = 0;
 
     input_ctx_reset();
     ctx_w32(g_hc.in_ctx, 0x04, 0x1u | (1u << dci));
-    slot_ctx_fill(in_slot_ctx(), g_hc.speed, g_hc.port, dci);
+    slot_ctx_fill(in_slot_ctx(), d->speed, d->port, dci);
     ep_ctx_fill(in_ep_ctx(dci), CTX_EP_INTERRUPT, ep->max_packet, ep->interval,
-                g_hc.hid.pa, ep->max_packet);
+                d->ring.pa, ep->max_packet);
 
-    if (xhci_command(g_hc.in_ctx_pa, TRB_CONFIGURE_ENDPOINT, slot, &comp, 0) != 0)
+    if (xhci_command(g_hc.in_ctx_pa, TRB_CONFIGURE_ENDPOINT, d->slot, &comp, 0) != 0)
         return -1;
     if (comp != COMP_SUCCESS) {
         kprintf("CRUGOS: usb configure endpoint failed (%u)\n", (unsigned)comp);
         return -1;
     }
-    g_hc.hid_dci = dci;
+    d->dci = dci;
     return 0;
 }
 
-static int xhci_arm_keyboard(u32 slot, u32 dci)
+/* Re-arm one interrupt IN transfer for a device. The report buffer is cleared
+   so a short transfer cannot leave stale bytes behind. */
+static int xhci_arm_device(struct xhci_dev *d)
 {
-    struct xhci_ring *r = &g_hc.hid;
+    struct xhci_ring *r = &d->ring;
+    u8 *buf;
     u32 index = 0;
     xhci_trb *t;
 
+    if (!d->used || d->report_len == 0)
+        return -1;
     if (ring_reserve(r, 1) != 0)
         return -1;
+    buf = xhci_report_buf(d->index);
+    memset(buf, 0, XHCI_REPORT_BYTES);
     t = ring_next(r, &index);
-    trb_set(t, (u64)(uintptr)g_report, USB_HID_REPORT_BYTES,
+    trb_set(t, (u64)(uintptr)buf, d->report_len,
             TRB_TYPE(TRB_NORMAL) | TRB_IOC | r->cycle);
-    xhci_doorbell(slot, dci);
+    xhci_doorbell(d->slot, d->dci);
     return 0;
 }
 
 static int xhci_enumerate(u32 port, u32 speed)
 {
     struct usb_hid_endpoint ep;
+    struct xhci_dev *d = 0;
+    u8 *ctx;
+    u64 ctx_pa;
     u32 slot = 0;
     u32 comp = 0;
     u32 max_packet;
     u32 total;
     u32 read_len;
+    u32 i;
 
-    if (!g_hc.dev_ctx) {
-        u64 pa = pmm_alloc_pages_aligned(1, 1);
-
-        if (!pa)
-            return -1;
-        g_hc.dev_ctx = (u8 *)(uintptr)pa;
-        g_hc.dev_ctx_pa = pa;
+    /* Take the first free device entry and give it a private context page. */
+    for (i = 0; i < XHCI_MAX_DEVICES; i++) {
+        if (!g_hc.dev[i].used) {
+            d = &g_hc.dev[i];
+            d->index = i;
+            break;
+        }
     }
-    memset(g_hc.dev_ctx, 0, CRUG_PAGE_SIZE);
-    memset(g_hc.dcbaa, 0, CRUG_PAGE_SIZE);
+    if (!d) {
+        kprintf("CRUGOS: usb device table is full\n");
+        return -1;
+    }
+    ctx_pa = pmm_alloc_pages_aligned(1, 1);
+    if (!ctx_pa)
+        return -1;
+    ctx = (u8 *)(uintptr)ctx_pa;
+    memset(ctx, 0, CRUG_PAGE_SIZE);
+    d->ctx_pa = ctx_pa;
+    if (ring_init(&d->ring) != 0)
+        return -1;
 
     if (xhci_command(0, TRB_ENABLE_SLOT, 0, &comp, &slot) != 0) {
         kprintf("CRUGOS: usb enable slot timed out\n");
@@ -588,7 +685,7 @@ static int xhci_enumerate(u32 port, u32 speed)
         kprintf("CRUGOS: usb enable slot failed (%u)\n", (unsigned)comp);
         return -1;
     }
-    g_hc.dcbaa[slot] = g_hc.dev_ctx_pa;
+    g_hc.dcbaa[slot] = ctx_pa;
 
     if (xhci_address_device(slot, speed, port, 8) != 0)
         return -1;
@@ -626,31 +723,46 @@ static int xhci_enumerate(u32 port, u32 speed)
         return -1;
 
     if (usb_hid_parse_config(g_ctl, read_len, &ep) != 0) {
-        kprintf("CRUGOS: usb device is not a boot keyboard\n");
+        kprintf("CRUGOS: usb device is not a boot keyboard or mouse\n");
         return -1;
     }
     if (ep.in == 0 || ep.ep_num == 0 || ep.max_packet == 0) {
-        kprintf("CRUGOS: usb keyboard endpoint is invalid\n");
+        kprintf("CRUGOS: usb hid endpoint is invalid\n");
+        return -1;
+    }
+    if (ep.kind == USB_HID_KIND_MOUSE && ep.max_packet < USB_HID_MOUSE_REPORT_BYTES) {
+        kprintf("CRUGOS: usb mouse reports are too small\n");
         return -1;
     }
 
     if (xhci_set_configuration(slot) != 0)
         return -1;
 
-    g_hc.slot = slot;
-    g_hc.speed = speed;
-    g_hc.port = port;
-    if (xhci_configure_keyboard(slot, &ep) != 0)
+    d->slot = slot;
+    d->speed = speed;
+    d->port = port;
+    d->kind = ep.kind;
+    d->ep_addr = ep.ep_addr;
+    d->reports = 0;
+    d->report_len = ep.max_packet > USB_HID_REPORT_BYTES ? USB_HID_REPORT_BYTES : ep.max_packet;
+    if (xhci_configure_endpoint(d, &ep) != 0)
         return -1;
-    if (xhci_arm_keyboard(slot, g_hc.hid_dci) != 0)
+    d->used = 1;
+    if (ep.kind == USB_HID_KIND_KEYBOARD) {
+        g_hc.keys = 0;
+        usb_hid_reset();
+    }
+    if (xhci_arm_device(d) != 0) {
+        d->used = 0;
         return -1;
+    }
 
-    g_hc.keyboard_ready = 1;
-    g_hc.kbd_port = port;
-    g_hc.keys = 0;
-    usb_hid_reset();
-    kprintf("CRUGOS: usb keyboard ready (endpoint 0x%02x, %u byte reports)\n",
-            (unsigned)ep.ep_addr, (unsigned)USB_HID_REPORT_BYTES);
+    if (ep.kind == USB_HID_KIND_KEYBOARD)
+        kprintf("CRUGOS: usb keyboard ready (endpoint 0x%02x, %u byte reports)\n",
+                (unsigned)ep.ep_addr, (unsigned)d->report_len);
+    else
+        kprintf("CRUGOS: usb mouse ready (endpoint 0x%02x, %u byte reports)\n",
+                (unsigned)ep.ep_addr, (unsigned)d->report_len);
     return 0;
 }
 
@@ -661,25 +773,29 @@ static void xhci_scan_ports(void)
     for (port = 1; port <= g_hc.ports && port <= XHCI_MAX_PORTS; port++) {
         u32 v = port_read(port);
         int connected = (v & PORT_CCS) ? 1 : 0;
+        struct xhci_dev *d = xhci_dev_on_port(port);
 
-        if (g_hc.keyboard_ready && port == g_hc.kbd_port && !connected) {
-            g_hc.keyboard_ready = 0;
-            g_hc.slot = 0;
-            g_hc.hid_dci = 0;
+        if (d && !connected) {
+            int was_keyboard = d->kind == USB_HID_KIND_KEYBOARD;
+
+            d->used = 0;
+            d->report_len = 0;
+            d->reports = 0;
             usb_hid_reset();
-            kprintf("CRUGOS: usb keyboard gone\n");
+            kprintf("CRUGOS: usb %s gone\n", was_keyboard ? "keyboard" : "mouse");
         }
         if (v & PORT_RW1C)
             port_clear_changes(port);
-        if (!connected || g_hc.keyboard_ready)
+        if (!connected || xhci_dev_on_port(port))
+            continue;
+        if (xhci_dev_count() >= XHCI_MAX_DEVICES)
             continue;
         {
             u32 speed = 0;
 
             if (xhci_port_reset(port, &speed) != 0)
                 continue;
-            if (xhci_enumerate(port, speed) == 0)
-                break;
+            (void)xhci_enumerate(port, speed);
         }
     }
 }
@@ -720,21 +836,38 @@ void usb_poll(void)
             u32 slot = TRB_GET_SLOT(ev.control);
             u32 dci = TRB_GET_EP(ev.control);
             u32 comp = TRB_GET_COMP(ev.status);
+            struct xhci_dev *d = xhci_dev_find(slot, dci);
 
-            if (!g_hc.keyboard_ready || slot != g_hc.slot || dci != g_hc.hid_dci)
+            if (!d)
                 continue;
+            d->reports++;
             if (comp == COMP_SUCCESS || comp == COMP_SHORT) {
-                int ch = usb_hid_boot_decode(g_report);
+                if (d->kind == USB_HID_KIND_KEYBOARD) {
+                    int ch = usb_hid_boot_decode(xhci_report_buf(d->index));
 
-                if (ch > 0) {
-                    g_hc.keys++;
-                    report_marker(ch);
-                    input_char((u8)ch);
+                    if (ch > 0) {
+                        g_hc.keys++;
+                        report_marker(ch);
+                        input_char((u8)ch);
+                    }
+                } else if (d->kind == USB_HID_KIND_MOUSE) {
+                    struct usb_hid_pointer p;
+
+                    if (usb_hid_mouse_decode(xhci_report_buf(d->index), d->report_len, &p) > 0) {
+                        if (p.dx || p.dy)
+                            kprintf("CRUGOS: usb mouse move dx=%d dy=%d\n",
+                                    (int)p.dx, (int)p.dy);
+                        if (p.changes)
+                            kprintf("CRUGOS: usb mouse button 0x%02x\n",
+                                    (unsigned)p.buttons);
+                        g_hc.moves++;
+                        input_pointer_event(p.buttons, p.dx, p.dy, p.wheel);
+                    }
                 }
             } else {
                 kprintf("CRUGOS: usb transfer failed (%u)\n", (unsigned)comp);
             }
-            (void)xhci_arm_keyboard(g_hc.slot, g_hc.hid_dci);
+            (void)xhci_arm_device(d);
         }
     }
 }
@@ -746,7 +879,12 @@ int usb_present(void)
 
 int usb_keyboard_ready(void)
 {
-    return g_hc.keyboard_ready;
+    return xhci_dev_of_kind(USB_HID_KIND_KEYBOARD) != 0;
+}
+
+int usb_mouse_ready(void)
+{
+    return xhci_dev_of_kind(USB_HID_KIND_MOUSE) != 0;
 }
 
 static int usb_prefix(const char *tok, usize len, const char *prefix)
@@ -786,6 +924,12 @@ static void usb_cmdline_token(const char *tok, usize len)
     } else if (usb_prefix(tok, len, "usb.keys=")) {
         if (usb_parse_u32(tok + 9, len - 9, &value) == 0)
             g_hc.want_keys = value > 16u ? 16u : value;
+    } else if (usb_prefix(tok, len, "usb.mouse=")) {
+        if (usb_parse_u32(tok + 10, len - 10, &value) == 0)
+            g_hc.mouse_wait_seconds = value > 120u ? 120u : value;
+    } else if (usb_prefix(tok, len, "usb.moves=")) {
+        if (usb_parse_u32(tok + 10, len - 10, &value) == 0)
+            g_hc.want_moves = value > 16u ? 16u : value;
     }
 }
 
@@ -1036,8 +1180,7 @@ int usb_init(void)
     if (g_hc.ports > XHCI_MAX_PORTS)
         g_hc.ports = XHCI_MAX_PORTS;
 
-    if (ring_init(&g_hc.cmd) != 0 || ring_init(&g_hc.ep0) != 0 ||
-        ring_init(&g_hc.hid) != 0) {
+    if (ring_init(&g_hc.cmd) != 0 || ring_init(&g_hc.ep0) != 0) {
         kprintf("CRUGOS: usb controller absent (rings)\n");
         return -1;
     }
@@ -1105,42 +1248,79 @@ int usb_init(void)
 int usb_selftest(void)
 {
     u64 deadline;
-    u32 keys;
 
     if (!g_hc.present)
         return 1;
-    if (g_hc.wait_seconds == 0)
+    if (g_hc.wait_seconds == 0 && g_hc.mouse_wait_seconds == 0)
         return 1;
 
-    deadline = timer_monotonic_ns() + (u64)g_hc.wait_seconds * 1000000000ull;
-    while (!g_hc.keyboard_ready) {
-        usb_poll();
-        if (g_hc.keyboard_ready)
-            break;
-        if (timer_monotonic_ns() >= deadline) {
-            kprintf("CRUGOS: usb keyboard timeout\n");
-            return 0;
-        }
-        cpu_wait_for_irq();
-    }
-
-    keys = g_hc.keys;
-    if (g_hc.want_keys) {
+    if (g_hc.wait_seconds) {
         deadline = timer_monotonic_ns() + (u64)g_hc.wait_seconds * 1000000000ull;
-        for (;;) {
+        while (!usb_keyboard_ready()) {
             usb_poll();
-            keys = g_hc.keys;
-            if (keys >= g_hc.want_keys)
+            if (usb_keyboard_ready())
                 break;
             if (timer_monotonic_ns() >= deadline) {
-                kprintf("CRUGOS: usb keyboard timeout (keys %u/%u)\n",
-                        (unsigned)keys, (unsigned)g_hc.want_keys);
+                kprintf("CRUGOS: usb keyboard timeout\n");
                 return 0;
             }
             cpu_wait_for_irq();
         }
+
+        if (g_hc.want_keys) {
+            u32 keys;
+
+            deadline = timer_monotonic_ns() + (u64)g_hc.wait_seconds * 1000000000ull;
+            for (;;) {
+                usb_poll();
+                keys = g_hc.keys;
+                if (keys >= g_hc.want_keys)
+                    break;
+                if (timer_monotonic_ns() >= deadline) {
+                    kprintf("CRUGOS: usb keyboard timeout (keys %u/%u)\n",
+                            (unsigned)keys, (unsigned)g_hc.want_keys);
+                    return 0;
+                }
+                cpu_wait_for_irq();
+            }
+        }
     }
 
-    kprintf("CRUGOS: usb selftest ok (%u key(s))\n", (unsigned)keys);
+    /* A hotplugged mouse: wait for the device, then for enough reports with
+       motion or buttons so the gate knows the pointer path works. */
+    if (g_hc.mouse_wait_seconds) {
+        deadline = timer_monotonic_ns() + (u64)g_hc.mouse_wait_seconds * 1000000000ull;
+        while (!usb_mouse_ready()) {
+            usb_poll();
+            if (usb_mouse_ready())
+                break;
+            if (timer_monotonic_ns() >= deadline) {
+                kprintf("CRUGOS: usb mouse timeout\n");
+                return 0;
+            }
+            cpu_wait_for_irq();
+        }
+
+        if (g_hc.want_moves) {
+            u32 moves;
+
+            deadline = timer_monotonic_ns() + (u64)g_hc.mouse_wait_seconds * 1000000000ull;
+            for (;;) {
+                usb_poll();
+                moves = g_hc.moves;
+                if (moves >= g_hc.want_moves)
+                    break;
+                if (timer_monotonic_ns() >= deadline) {
+                    kprintf("CRUGOS: usb mouse timeout (moves %u/%u)\n",
+                            (unsigned)moves, (unsigned)g_hc.want_moves);
+                    return 0;
+                }
+                cpu_wait_for_irq();
+            }
+        }
+    }
+
+    kprintf("CRUGOS: usb selftest ok (%u key(s), %u pointer event(s))\n",
+            (unsigned)g_hc.keys, (unsigned)g_hc.moves);
     return 1;
 }

@@ -1,4 +1,5 @@
-/* input.device: PS/2 set-1 scancode decoder feeding a byte queue. */
+/* input.device: PS/2 set-1 scancode decoder feeding a byte queue, plus the
+   pointer device fed by the USB HID boot mouse. */
 #include <crug/types.h>
 #include <crug/input.h>
 
@@ -17,6 +18,13 @@ static u8 g_ctrl;
 static u8 g_alt;
 static u8 g_caps;
 
+static i32 g_ptr_dx;
+static i32 g_ptr_dy;
+static i32 g_ptr_wheel;
+static u32 g_ptr_buttons;
+static u32 g_ptr_changes;
+static u64 g_ptr_events;
+
 static void input_push(u8 c)
 {
     if (g_count >= INPUT_QUEUE_BYTES)
@@ -29,6 +37,49 @@ static void input_push(u8 c)
 void input_char(u8 c)
 {
     input_push(c);
+}
+
+void input_pointer_event(u32 buttons, i32 dx, i32 dy, i32 wheel)
+{
+    g_ptr_dx += dx;
+    g_ptr_dy += dy;
+    g_ptr_wheel += wheel;
+    g_ptr_changes |= buttons ^ g_ptr_buttons;
+    g_ptr_buttons = buttons;
+    g_ptr_events++;
+}
+
+int input_pointer_read(struct input_pointer *out)
+{
+    if (!out)
+        return 0;
+    if (!g_ptr_dx && !g_ptr_dy && !g_ptr_wheel && !g_ptr_changes)
+        return 0;
+    out->dx = g_ptr_dx;
+    out->dy = g_ptr_dy;
+    out->wheel = g_ptr_wheel;
+    out->buttons = g_ptr_buttons;
+    out->changes = g_ptr_changes;
+    g_ptr_dx = 0;
+    g_ptr_dy = 0;
+    g_ptr_wheel = 0;
+    g_ptr_changes = 0;
+    return 1;
+}
+
+void input_pointer_reset(void)
+{
+    g_ptr_dx = 0;
+    g_ptr_dy = 0;
+    g_ptr_wheel = 0;
+    g_ptr_buttons = 0;
+    g_ptr_changes = 0;
+    g_ptr_events = 0;
+}
+
+u64 input_pointer_count(void)
+{
+    return g_ptr_events;
 }
 
 void input_set_poll(void (*fn)(void))
@@ -46,6 +97,7 @@ void input_init(void)
     g_ctrl = 0;
     g_alt = 0;
     g_caps = 0;
+    input_pointer_reset();
 }
 
 int input_try_getc(void)

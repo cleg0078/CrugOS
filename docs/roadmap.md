@@ -21,7 +21,8 @@ self-test; phase 4C adds a minimal TCP transport with a client, a listener, an
 HTTP exchange in both directions and six socket syscalls; phase 4D adds a
 caching DNS stub resolver with a UDP query, a TCP fallback and a name syscall;
 phase 5A adds a polled xHCI host controller, a USB HID boot keyboard and a
-hotplug gate.
+hotplug gate; phase 5B adds a USB HID boot mouse, a four-device table on that
+controller and a pointer device.
 Every later phase keeps the same BootInfo contract, so the loader does not
 change for memory management, storage, SMP or drivers.
 
@@ -392,6 +393,34 @@ change for memory management, storage, SMP or drivers.
   33. `make test-host` covers descriptors and the decode matrix (1117 checks).
 - All 31 gates pass at `v0.19.0`.
 
+## Phase 5B - USB mouse (done)
+
+- The xHCI driver keeps a table of up to four devices (`struct xhci_dev`): each
+  enumerated boot keyboard or mouse gets its own device context page, interrupt
+  ring, report buffer and DCI, so a keyboard and a mouse coexist in either order.
+  A fifth device prints `CRUGOS: usb device table is full`.
+- `usb_hid_parse_config()` accepts protocol 2 (mouse) as well as protocol 1
+  (keyboard), records the endpoint's kind, and rejects a mouse endpoint that
+  cannot carry three report bytes. `usb_hid_mouse_decode()` turns the button
+  bitmap, signed `dx`, signed `dy` and optional wheel into a
+  `struct usb_hid_pointer`, with the first report after a reset acting as the
+  button baseline.
+- `input.device` gains a pointer state beside its byte queue:
+  `input_pointer_event()` accumulates the deltas and button edges,
+  `input_pointer_read()` drains them, and `input_pointer_count()` /
+  `input_pointer_reset()` support tests and future consumers.
+- Port scans sweep every port, enumerate while table space remains, and unbind a
+  device whose port loses `CCS` (`CRUGOS: usb keyboard gone` / `usb mouse gone`).
+- `usb.mouse=<seconds>` and `usb.moves=<n>` bound the optional self-test wait;
+  `usb_selftest()` now reports `CRUGOS: usb selftest ok (N key(s), M pointer
+  event(s))`.
+- `make test-usb-mouse` boots with `usb=off,i8042=off` and a QMP socket, plugs
+  `usb-mouse` into the running controller, injects relative motion and a
+  left-button press, and requires the `usb mouse` markers, a clean `e2fsck` and
+  exit 33; `make test-usb-hotplug` still passes unchanged and `make test-host`
+  covers the mouse decode matrix and the pointer state (1168 checks).
+- All 32 gates pass at `v0.20.0`.
+
 ## Phase 3B - remaining storage work
 
 - Journal wrapping, revoke records and orphan-file recovery.
@@ -408,10 +437,10 @@ change for memory management, storage, SMP or drivers.
 
 ## Phase 4 - devices and userspace
 
-- USB HID devices beyond the boot keyboard (phase 5A delivered the xHCI
-  controller and the keyboard: phase 5B adds HID mice, phase 5C UAC2 audio and
-  an audio mixer; phase 4A delivered the PS/2 console input step, phase 4B the
-  virtio-net/IPv4 slice, phase 4C the TCP/socket slice and phase 4D the DNS
+- USB HID devices beyond the boot keyboard and mouse (phase 5A delivered the
+  xHCI controller and the keyboard, phase 5B the mouse: phase 5C adds UAC2 audio
+  and an audio mixer; phase 4A delivered the PS/2 console input step, phase 4B
+  the virtio-net/IPv4 slice, phase 4C the TCP/socket slice and phase 4D the DNS
   resolver).
 - A routing table and richer resolver features (multiple servers, DNSSEC
   validation, AAAA/PTR/SRV, search domains, negative caching) on top of the

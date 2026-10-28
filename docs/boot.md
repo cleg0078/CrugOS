@@ -35,12 +35,13 @@ OVMF (UEFI firmware)
 `include/crug/bootinfo.h` is the single contract between loader and kernel.
 The structure is versioned (`magic = 0x43524731`, `version = 1`) and the kernel
 refuses to boot if either does not match or if required fields are invalid.
-Phases 1 through 5A did not change the layout; phase 3B-9 is the first
+Phases 1 through 5B did not change the layout; phase 3B-9 is the first
 kernel to consume the `command_line` field, phase 3B-10 falls back to an
 interactive serial passphrase prompt when no token is present, phases 4C and 4D
 read the non-secret `net.tcp=` / `net.serve=` / `net.dns=` /
-`net.dns-tcp=` / `net.name=` tokens from the same field, and phase 5A adds
-`usb.wait=` / `usb.keys=`. The loader caps
+`net.dns-tcp=` / `net.name=` tokens from the same field, phase 5A adds
+`usb.wait=` / `usb.keys=` and phase 5B adds `usb.mouse=` / `usb.moves=`. The
+loader caps
 the command line at 511 bytes and the kernel wipes the page after it copies the
 `crypt.pass=` value.
 
@@ -102,11 +103,12 @@ post-snapshot allocations cannot push it over capacity.
    The boot prints `CRUGOS: input ready (serial + keyboard)`, or
    `(serial only)` when no i8042 keyboard answered. `usb_init` then brings up the
    first xHCI controller (PCI class 0C/03/30) and `usb_cmdline` reads
-   `usb.wait=<seconds>` and `usb.keys=<n>`: the boot prints
-   `CRUGOS: usb controller absent` when the machine has no xHCI function,
-   otherwise `CRUGOS: usb controller ready (xhci, <n> port(s))` and, once a boot
-   keyboard is enumerated, `CRUGOS: usb keyboard ready (endpoint 0x81, 8 byte
-   reports)`.
+   `usb.wait=<seconds>`, `usb.keys=<n>`, `usb.mouse=<seconds>` and
+   `usb.moves=<n>`: the boot prints `CRUGOS: usb controller absent` when the
+   machine has no xHCI function, otherwise `CRUGOS: usb controller ready (xhci,
+   <n> port(s))` and, once devices are enumerated, `CRUGOS: usb keyboard ready
+   (endpoint 0x81, 8 byte reports)` and/or `CRUGOS: usb mouse ready (endpoint
+   0x81, 4 byte reports)`. Up to four boot keyboards and mice are tracked.
 9. `net_init`: reset `net.device` and `tcp_init`, then probe legacy virtio-net
    PCI functions (up to four `eth0`..`eth3`) and register them, bind the DHCP
    client to UDP port 68 and read the `net.tcp=<port>` / `net.serve=<seconds>`
@@ -167,9 +169,10 @@ post-snapshot allocations cannot push it over capacity.
     served request bounded by `net.serve=`) when that token was supplied, then
     the DNS checks (resolve `net.name=`, a cached second lookup and the
     `SYS_RESOLVE` path) when a name was supplied; then the USB check, which
-    waits for key reports only when `usb.wait=` or `usb.keys=` asked for it.
+    waits for a keyboard only when `usb.wait=` or `usb.keys=` asked for it and
+    for a mouse only when `usb.mouse=` or `usb.moves=` did.
 14. `report_boot`, `storage_lock` (wipes the passphrase, the volume keys and
-    the bounce buffer), `CRUGOS: phase 5a boot ok`, `arch_exit_qemu(0x10)`.
+    the bounce buffer), `CRUGOS: phase 5b boot ok`, `arch_exit_qemu(0x10)`.
 
 Storage is still brought up with interrupts disabled: the virtio driver polls
 its used ring, the NVMe driver polls completion queues and the AHCI driver polls
@@ -325,6 +328,9 @@ CRUGOS: input ready (serial + keyboard)   # or: (serial only)
 CRUGOS: usb controller absent             # or: usb controller ready (xhci, 8 port(s))
 CRUGOS: usb keyboard ready (endpoint 0x81, 8 byte reports)  # USB keyboard attached
 CRUGOS: usb key 'a'                       # one per decoded key while usb.wait= is set
+CRUGOS: usb mouse ready (endpoint 0x81, 4 byte reports)     # USB mouse attached
+CRUGOS: usb mouse move dx=3 dy=0          # one per report while usb.mouse= is set
+CRUGOS: usb mouse button 0x01
 CRUGOS: net ready (1 device(s))           # 0 when no NIC is present
 CRUGOS: virtio ready
 CRUGOS: nvme ready
@@ -368,7 +374,7 @@ CRUGOS: dns socket syscall ok
 CRUGOS: dns selftest ok
 CRUGOS: net selftest ok
 CRUGOS: selftest ok
-CRUGOS: phase 5a boot ok
+CRUGOS: phase 5b boot ok
 ```
 
 The `virtio : net eth0 mac ...` line, the lease, the ARP resolution, the echo
@@ -388,7 +394,9 @@ The `usb` lines appear only on machines with an xHCI function: a default `q35`
 boot prints `CRUGOS: usb controller absent`, while `make test-usb-hotplug` adds
 `-device qemu-xhci` and hotplugs a keyboard over QMP, so the log shows the
 controller, the enumerated device and one `usb key` line per typed character.
-See [usb.md](usb.md).
+`make test-usb-mouse` does the same with `usb-mouse` and prints `usb mouse
+ready`, one `usb mouse move` line per report and a `usb mouse button` line for
+the button edge. See [usb.md](usb.md).
 
 `raid ready` and `raid healthy`/`raid degraded` appear only on the RAID
 root path, and the `crypt` lines only on the encrypted path; the single-disk

@@ -79,5 +79,5 @@ void selftest_run(void)
     if (!net_selftest())
         panic("selftest: network");
     if (!usb_selftest())
-        panic("selftest: usb keyboard");
+        panic("selftest: usb input");
 }

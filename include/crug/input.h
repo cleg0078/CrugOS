@@ -14,6 +14,21 @@ void input_init(void);
 void input_scancode(u8 scan);
 /* Queue a character decoded elsewhere, e.g. by the USB HID keyboard. */
 void input_char(u8 c);
+
+/* Pointer device: relative motion and buttons from a HID mouse. Motion is
+   accumulated between reads; a read consumes the accumulated deltas and the
+   pending button-change mask. */
+struct input_pointer {
+    i32 dx;
+    i32 dy;
+    i32 wheel;
+    u32 buttons;  /* bit 0 left, bit 1 right, bit 2 middle */
+    u32 changes;  /* button bits that changed since the last read */
+};
+void input_pointer_event(u32 buttons, i32 dx, i32 dy, i32 wheel);
+int input_pointer_read(struct input_pointer *out);
+void input_pointer_reset(void);
+u64 input_pointer_count(void);
 /* Optional poll hook run before the queue is read (the USB keyboard uses it). */
 void input_set_poll(void (*fn)(void));
 int input_try_getc(void);

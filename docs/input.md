@@ -1,4 +1,4 @@
-# Console input: PS/2 keyboard, USB HID keyboard and input.device
+# Console input: PS/2 keyboard, USB HID keyboard, USB mouse and input.device
 
 CrugOS can now take keyboard input while it boots. Phase 4A adds a polled
 i8042/PS-2 keyboard driver, a scancode decoder that feeds a small byte queue
@@ -8,17 +8,21 @@ keyboard. The first consumer is the encrypted-root passphrase prompt from phase
 
 Phase 5A adds a second source: a polled xHCI host controller driver and a USB
 HID boot keyboard, decoded into the same queue and drained from the same console
-read path.
+read path. Phase 5B adds a third: a USB HID boot mouse, decoded into pointer
+events (relative motion, wheel and button edges) that live next to the byte
+queue in `input.device`.
 
 ```
 i8042 controller (0x60 data, 0x64 status)   xHCI MMIO (HID reports)   COM1 (0x3F8)
         |                                          |                      |
         v                                          v                      v
-keyboard_poll() -> input_scancode()      usb_poll() -> usb_hid_decode()  serial_try_getc()
-        |                                          |                      |
-        +------------> byte queue (64 B) <----------+                      |
-                        input_try_getc() <--------------------------------+
-                              |
+keyboard_poll() -> input_scancode()      usb_poll()                     serial_try_getc()
+        |                                  |        |                     |
+        |                    usb_hid_boot_decode() usb_hid_mouse_decode() |
+        |                                  |        |                     |
+        +------------> byte queue (64 B) <--+    pointer state            |
+                        input_try_getc() <------------------------------+
+                              |                  input_pointer_read()
                      storage_prompt_line() -> lineedit -> crypt_unlock()
 ```
 
@@ -77,11 +81,11 @@ host test binary links it directly.
 `input_try_getc()` returns the next byte or `-1` when the queue is empty. The
 queue holds 64 bytes; further keys are dropped until the consumer drains it.
 
-## USB HID keyboard (`drivers/usb/`)
+## USB HID input (`drivers/usb/`)
 
 Phase 5A routes a second keyboard into the same queue. `drivers/usb/xhci.c`
 brings up the first xHCI controller, addresses the device, configures its
-interrupt IN endpoint and arms one 8-byte Normal TRB at a time;
+interrupt IN endpoint and arms one Normal TRB at a time;
 `drivers/usb/usb_hid.c` parses the configuration descriptor and turns a boot
 report into the bytes the PS/2 decoder would have produced (letters, digits,
 punctuation, Enter, Backspace, Tab, Escape, Space, Caps Lock and the same Ctrl
@@ -95,12 +99,37 @@ void input_char(u8 c)
 }
 ```
 
+Phase 5B generalises the driver from one keyboard to a table of four boot
+keyboards and mice: every port that reports a connect is enumerated and given its
+own device context, interrupt ring and report buffer, so a keyboard and a mouse
+can be plugged in together, in either order. `usb_hid_parse_config()` now also
+accepts protocol 2 (mouse) and reports the endpoint's kind, and
+`usb_hid_mouse_decode()` turns a boot-mouse report (buttons, signed `dx`, signed
+`dy`, optional wheel) into a `struct usb_hid_pointer`:
+
+```c
+struct input_pointer {
+    i32 dx;         /* accumulated relative motion since the last read */
+    i32 dy;
+    i32 wheel;
+    u32 buttons;    /* current bitmap: left 1, right 2, middle 4 */
+    u32 changes;    /* button bits that changed since the last read */
+};
+```
+
+`usb_poll()` calls `input_pointer_event(buttons, dx, dy, wheel)` for every report
+that carried motion or a button edge; the console read path never consumes it, so
+a graphics or shell consumer drains it with `input_pointer_read()` (and
+`input_pointer_count()` reports how many events were seen). The very first report
+after `usb_hid_reset()` only establishes the button baseline, so a button that is
+already held at enumeration does not look like a fresh press.
+
 `usb_init()` registers `usb_poll()` with `input_set_poll()`, and
 `input_try_getc()` runs that hook before it looks at the queue, so every console
-read drains the xHCI event ring first. A hotplugged keyboard therefore types
-into the passphrase prompt, the shell or any later consumer without changing
-the consumer at all. See [usb.md](usb.md) for the controller, enumeration and
-gate details.
+read drains the xHCI event ring first (and therefore also updates pointer state).
+A hotplugged keyboard therefore types into the passphrase prompt, the shell or
+any later consumer without changing the consumer at all. See [usb.md](usb.md) for
+the controller, enumeration, report layouts and gate details.
 
 ## Console merge (`kernel/core/console.c`)
 
@@ -165,10 +194,13 @@ binary and covers the decode matrix: letters and Shift, Caps XOR Shift,
 digits and shifted symbols, punctuation, Enter/Tab/Backspace/Escape/Space,
 `Ctrl+C` and its release, `Ctrl+[`, ignored `E0` arrows, right Ctrl, ACK/echo,
 release-only and unmapped codes, and queue overflow (100 keys yield exactly 64
-bytes). `tests/host/test_usb.c` covers the USB side: descriptor walking and the
-boot-report decode matrix (letters, Shift, Caps, Ctrl chords, digits,
-punctuation, named keys, held-key suppression). `make test-host` reports 1117
-checks including these.
+bytes), plus `input_char()` and the pointer state (accumulating deltas, wheel,
+button transitions and `input_pointer_reset()`). `tests/host/test_usb.c` covers
+the USB side: descriptor walking (keyboard and mouse), the keyboard boot-report
+decode matrix (letters, Shift, Caps, Ctrl chords, digits, punctuation, named
+keys, held-key suppression) and the mouse decode matrix (idle report, positive
+and negative deltas, button baseline versus edge, wheel, reserved bits).
+`make test-host` reports 1168 checks including these.
 
 ## Gates
 
@@ -178,6 +210,7 @@ checks including these.
 | `make test-crypt-keyboard` | a headless QMP `send-key` stream types the passphrase into the emulated i8042 and the encrypted root mounts |
 | `make test-crypt-keyboard-wrong` | three wrong keyboard passphrases are rejected, the volume stays locked, and boot fails closed |
 | `make test-usb-hotplug` | a USB keyboard hotplugged over QMP while the guest runs is enumerated, decodes the typed keys and delivers them through `input.device` |
+| `make test-usb-mouse` | a USB mouse hotplugged over QMP reports relative motion and a left-button edge into the pointer state |
 
 `scripts/run-crypt-keyboard.py` drives the keyboard gates. It boots QEMU with
 `CRYPT_PASS=` (so no `crypt.pass=` token is written), adds
@@ -225,11 +258,12 @@ console for the prompt.
 - US layout only, one keyboard, no remapping.
 - Extended keys are decoded as modifiers only; arrow keys and editing keys are
   not delivered yet.
-- No framebuffer/GOP input and no VT switching; a USB mouse and USB audio are
-  phases 5B/5C.
-- USB keyboards are polled from the console read path only: no interrupt
-  handler, no key repeat, boot-protocol keyboards on the first xHCI controller
-  only, and no hubs or media keys.
+- No framebuffer/GOP input and no VT switching; USB audio is phase 5C, and the
+  phase 5B mouse has no cursor or acceleration until a graphics stack consumes
+  its pointer events.
+- USB input is polled from the console read path only: no interrupt handler, no
+  key repeat, boot-protocol devices on the first xHCI controller only, at most
+  four of them, and no hubs, media keys or extra mouse buttons.
 - The keyboard gate types at 40 ms per key, so its encrypted boot takes about a
   second longer than the serial prompt gate; Argon2id still dominates the
   non-typing cost.

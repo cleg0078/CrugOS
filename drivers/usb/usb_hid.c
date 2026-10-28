@@ -1,4 +1,5 @@
-/* USB HID boot keyboard: configuration parsing and report decoding. */
+/* USB HID boot keyboard and boot mouse: configuration parsing and report
+   decoding. */
 #include <crug/types.h>
 #include <crug/usb.h>
 #include <crug/string.h>
@@ -35,11 +36,16 @@
 #define HID_CLASS 0x03u
 #define HID_SUBCLASS_BOOT 0x01u
 #define HID_PROTOCOL_KEYBOARD 0x01u
+#define HID_PROTOCOL_MOUSE    0x02u
+
+#define HID_MOUSE_BUTTON_MASK 0x07u
 
 static u8 g_prev[HID_USAGE_SLOTS];
 static u8 g_caps;
 static u8 g_shift;
 static u8 g_ctrl;
+static u32 g_mouse_buttons;
+static u8 g_mouse_seen;
 
 static const u8 g_digit_plain[10] = {
     '1', '2', '3', '4', '5', '6', '7', '8', '9', '0'
@@ -63,12 +69,14 @@ void usb_hid_reset(void)
     g_caps = 0;
     g_shift = 0;
     g_ctrl = 0;
+    g_mouse_buttons = 0;
+    g_mouse_seen = 0;
 }
 
 int usb_hid_parse_config(const u8 *buf, u32 len, struct usb_hid_endpoint *out)
 {
     u32 off = 0;
-    int in_boot_keyboard = 0;
+    u8 kind = USB_HID_KIND_NONE;
 
     if (!buf || !out || len < 9)
         return -1;
@@ -80,12 +88,15 @@ int usb_hid_parse_config(const u8 *buf, u32 len, struct usb_hid_endpoint *out)
         if (blen < 2 || off + blen > len)
             return -1;
         if (type == HID_DESCRIPTOR_INTERFACE) {
-            in_boot_keyboard = 0;
+            kind = USB_HID_KIND_NONE;
             if (blen >= 9 && buf[off + 5] == HID_CLASS &&
-                buf[off + 6] == HID_SUBCLASS_BOOT &&
-                buf[off + 7] == HID_PROTOCOL_KEYBOARD)
-                in_boot_keyboard = 1;
-        } else if (type == HID_DESCRIPTOR_ENDPOINT && in_boot_keyboard) {
+                buf[off + 6] == HID_SUBCLASS_BOOT) {
+                if (buf[off + 7] == HID_PROTOCOL_KEYBOARD)
+                    kind = USB_HID_KIND_KEYBOARD;
+                else if (buf[off + 7] == HID_PROTOCOL_MOUSE)
+                    kind = USB_HID_KIND_MOUSE;
+            }
+        } else if (type == HID_DESCRIPTOR_ENDPOINT && kind != USB_HID_KIND_NONE) {
             u8 attr = buf[off + 3];
             u8 addr = buf[off + 2];
 
@@ -93,6 +104,7 @@ int usb_hid_parse_config(const u8 *buf, u32 len, struct usb_hid_endpoint *out)
                 out->ep_addr = addr;
                 out->ep_num = (u8)(addr & 0x0fu);
                 out->in = 1;
+                out->kind = kind;
                 out->max_packet = (u16)((buf[off + 4] | ((u16)buf[off + 5] << 8)) & 0x07ffu);
                 out->interval = buf[off + 6];
                 return 0;
@@ -213,4 +225,42 @@ int usb_hid_boot_decode(const u8 report[USB_HID_REPORT_BYTES])
         g_prev[i] = pressed[i];
 
     return ch;
+}
+
+static i32 hid_sign8(u8 v)
+{
+    return (i32)((i8)v);
+}
+
+int usb_hid_mouse_decode(const u8 *report, u32 len, struct usb_hid_pointer *out)
+{
+    u32 buttons;
+    i32 dx;
+    i32 dy;
+    i32 wheel = 0;
+
+    if (!report || !out || len < 3u)
+        return -1;
+    if (len > USB_HID_MOUSE_REPORT_BYTES)
+        len = USB_HID_MOUSE_REPORT_BYTES;
+
+    buttons = (u32)(report[0] & HID_MOUSE_BUTTON_MASK);
+    dx = hid_sign8(report[1]);
+    dy = hid_sign8(report[2]);
+    if (len >= 4u)
+        wheel = hid_sign8(report[3]);
+
+    out->dx = dx;
+    out->dy = dy;
+    out->wheel = wheel;
+    out->buttons = buttons;
+    /* The first report only establishes the button baseline, just like the
+       keyboard ignores its initial all-zero report. */
+    out->changes = g_mouse_seen ? (buttons ^ g_mouse_buttons) : 0u;
+    g_mouse_buttons = buttons;
+    g_mouse_seen = 1;
+
+    if (dx || dy || wheel || out->changes)
+        return 1;
+    return 0;
 }
