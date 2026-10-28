@@ -1,9 +1,9 @@
 # Building CrugOS
 
 This document describes the phase 6A build system: how the kernel, the UEFI
-loader, the host crypto tool and the test disk images are built, which
-invariants the link must preserve, and how to diagnose the failure modes that
-are specific to this toolchain.
+loader, the host crypto tool, the test disk images and the bootable hybrid ISO
+are built, which invariants the link must preserve, and how to diagnose the
+failure modes that are specific to this toolchain.
 
 ## Requirements
 
@@ -16,6 +16,7 @@ are specific to this toolchain.
 | `python3` | boot/PE checks | standard library only |
 | `cc` (`HOST_CC`) | `tools/mkcrypt` and the host unit tests | any host C11 compiler; the crypt tool reuses `kernel/crypto/*` |
 | `sgdisk`, `mke2fs`, `debugfs`, `e2fsck`, `dd`, `truncate` | test disks | only for `make disk`, `make raid-disks`, `make raid10-disks` and their checks; `dd` also blanks repair spares; e2fsprogs |
+| `xorriso`, `fsck.vfat` | bootable ISO | only for `make iso`/`check-iso`/`test-iso`/`usb`; the FAT image itself is written by `scripts/mkfat.py`, so mtools is not needed |
 
 Run `make preflight` to check all of the above.
 
@@ -35,6 +36,10 @@ make test-usb-mouse    # hotplug a USB mouse into xHCI and move the pointer
 make test-audio        # stream PCM to a USB Audio Class device through the mixer
 make test-gfx          # move a hotplugged USB mouse and verify the framebuffer cursor
 make test-workbench    # drag a window on the software-rendered desktop
+make iso         # build a bootable hybrid UEFI ISO (build/<arch>/crugos.iso)
+make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
+make test-iso    # boot that ISO from a USB stick and from a CD-ROM
+make usb         # write the ISO to a USB block device (USB_DEV=/dev/sdX)
 make test-raid   # boot a two-member RAID1 root and check both members
 make test-raid10 # boot a four-member RAID10 root and check every member
 make test-nvme   # boot from an NVMe namespace and check the image
@@ -135,6 +140,20 @@ options` prints the complete resolved set (including paths derived from
 | `DEMO_CMDLINE` | `wb.enable=1 wb.wait=0 wb.hold=$(DEMO_HOLD_SEC)` | `CMDLINE_EXTRA` the demo boot passes to the kernel |
 | `DEMO_MACHINE_EXTRA` | `usb=off,i8042=off` | machine properties, so the demo keyboard and mouse are the only ones |
 | `DEMO_QEMU_EXTRA` | `-device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-mouse,bus=xhci.0` | QEMU arguments that attach an xHCI with a keyboard and a mouse |
+| `ISO_IMAGE` | `build/<arch>/crugos.iso` | hybrid UEFI ISO written by `make iso` |
+| `ISO_STAGE` | `build/<arch>/iso` | scratch tree for the ISO build (wiped on every run) |
+| `ISO_FAT_IMG` | `$(ISO_STAGE)/tree/boot/efi.img` | FAT16 ESP image used as the El Torito boot image |
+| `ISO_SIZE_MB` | `24` | size of that FAT image; `mkfat.py` rejects anything outside the FAT16 range |
+| `ISO_VOLID` | `CRUGOS` | ISO 9660 volume identifier and FAT label |
+| `ISO_CMDLINE` | `storage=none` | guest command line baked into the image (never inherited from the ESP) |
+| `ISO_DATE` | `2026010100000000` | fixed timestamp passed to `xorriso --set_all_file_dates` for a reproducible image |
+| `ISO_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for each of the two `make test-iso` boots |
+| `EXPECT_ISO` | `no` | reserved for gates that check the ISO markers explicitly |
+| `ISO_IMG` | empty | when set, `make run` boots this ISO as a CD-ROM instead of the ESP |
+| `USB_IMG` | `build/<arch>/usb-stick.img` | the ISO `dd`'ed onto a file, used by the USB leg of `make test-iso` |
+| `USB_STICK` | empty | when set, `make run` attaches this image as USB mass storage on an xHCI controller |
+| `USB_DEV` | empty | absolute block device `make usb` writes to; must not be mounted |
+| `USB_CONFIRM` | `no` | must be `yes` or `make usb` refuses to write |
 | `CRASH_IMG` | `$(BUILD)/crash.img` | crash-gate image (journal commit, no checkpoint) |
 | `CRASH_REPLAY_IMG` | `$(BUILD)/crash-replay.img` | copy the kernel replays on the second crash-gate boot |
 | `CC` | `crugc` | compiler for kernel and loader objects |
@@ -466,6 +485,38 @@ so you can leave the window. The guest then exits through `isa-debug-exit`
 with status 33, exactly like the gates, and `build/x86_64/serial.log` plus
 `build/x86_64/exit-code.txt` keep the record. Passing `DEMO_DISPLAY=none`
 turns the same target into a headless demo.
+
+## Bootable ISO
+
+`make iso` assembles `build/<arch>/crugos.iso`, a hybrid image that boots as
+a CD-ROM (El Torito, no emulation) and after a plain `dd` onto a USB stick (an
+MBR with one type-`0xEF` ESP partition covering the same FAT image). The ESP
+travels as a FAT16 image built by `scripts/mkfat.py` -- this host has no
+mtools, so the file system is written directly and deterministically -- and
+`scripts/mkiso.sh` drives `xorriso -as mkisofs` with the El Torito entry,
+`-part_like_isohybrid` and `--protective-msdos-label`.
+
+The image ships its own command line: `mkiso.sh` always rewrites
+`crugos/cmdline.txt` from `ISO_CMDLINE` (default `storage=none`), so a stick
+never inherits the QEMU `crypt.pass=` token. `storage=none` is a kernel token
+that lets `storage_init()` probe every transport and then print
+`CRUGOS: storage skipped (storage=none)` instead of demanding a root
+filesystem.
+
+`make check-iso` re-parses the artifact offline: ISO 9660 primary volume
+descriptor, El Torito boot record and catalog checksum, the FAT16 BPB at the
+catalog's load address, the protective MBR's ESP entry, an `xorriso -osirrox`
+extraction of `/boot/efi.img` byte-compared against the catalog range,
+`fsck.vfat -n`, and the four files with their command line. `make test-iso` is
+the gate: it `dd`s the ISO onto `USB_IMG`, boots that file through
+`usb-storage` on `qemu-xhci`, boots the ISO itself as a CD-ROM, and runs
+`scripts/boot-check.py --storage=none` on both serial logs, which swaps the
+storage/GPT/ext4/journal markers for the single skip marker. `make usb` writes
+the image to a real device and needs `USB_DEV=/dev/sdX USB_CONFIRM=yes`; it
+refuses a device that is mounted.
+
+See [iso.md](iso.md) for the on-disk layout, why the image ends up with an MBR
+instead of a GPT, and the reproducibility rules.
 
 The supported ext4 subset, write path, checksum layout, journal format and
 failure modes are documented in [storage.md](storage.md) and

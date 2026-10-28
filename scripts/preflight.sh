@@ -43,6 +43,8 @@ require truncate
 require dd
 optional size
 optional sha256sum
+optional xorriso
+optional fsck.vfat
 
 if command -v "$CC" >/dev/null 2>&1; then
     printf '  crugc: %s\n' "$("$CC" --version 2>/dev/null | head -n 1)"

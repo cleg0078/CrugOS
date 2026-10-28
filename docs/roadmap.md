@@ -26,7 +26,11 @@ controller and a pointer device; phase 5C adds `audio.device`, a per-channel
 mixer and a USB Audio Class driver with an isochronous xHCI path; phase 5D adds
 `gfx.device`, a pointer-driven sprite composited onto the GOP framebuffer
 console; phase 6A adds `intuition.device`, a software window manager of four
-stacked, draggable windows, and the two-window Workbench desktop.
+stacked, draggable windows, and the two-window Workbench desktop. Release
+`v0.23.1` adds packaging rather than a spec phase: `make iso` produces a hybrid
+UEFI ISO that boots from a USB stick or a CD-ROM, with the kernel's
+`storage=none` token so an image with no root filesystem still passes the boot
+contract.
 Every later phase keeps the same BootInfo contract, so the loader does not
 change for memory management, storage, SMP or drivers.
 
@@ -530,6 +534,35 @@ change for memory management, storage, SMP or drivers.
   hit test, drag, clamp, close, repaint counts) over a fake framebuffer.
   `make test-host` reports 2487 checks.
 - All 35 gates pass at `v0.23.0`.
+
+## Bootable media - hybrid UEFI ISO (done, `v0.23.1`)
+
+- `kernel/fs/storage.c` gained the `storage=none` command-line token: every
+  block transport is still probed and prints its `ready` line, then
+  `CRUGOS: storage skipped (storage=none)` replaces the GPT/root/ext4/journal
+  block and `storage_selftest()` becomes a soft skip. Without the token a boot
+  with no disk still fails closed with `CRUGOS: no root filesystem`.
+- `scripts/mkfat.py` writes the FAT16 ESP image directly (no mtools on this
+  host): deterministic timestamps and ordering, 8.3 names only, FAT16 cluster
+  bounds enforced, plus `--list` and `--read` for inspection.
+- `scripts/mkiso.sh` copies the ESP, rewrites `crugos/cmdline.txt` from
+  `ISO_CMDLINE` (default `storage=none`), builds and `fsck.vfat`-checks the FAT
+  image, grafts the same files at the ISO root and runs `xorriso -as mkisofs`
+  with the El Torito entry, `-part_like_isohybrid` and
+  `--protective-msdos-label`.
+- `scripts/check-iso.py` re-parses the artifact: ISO 9660 PVD, El Torito boot
+  record and catalog checksum, the FAT16 BPB at the catalog's load address, the
+  protective MBR's type-`0xEF` entry, an `xorriso -osirrox` extraction compared
+  against the catalog range, `fsck.vfat -n`, and the four files.
+- `make test-iso` boots the image twice headless -- `dd`'ed onto a file and
+  attached through `usb-storage` on `qemu-xhci`, then as a CD-ROM -- and runs
+  `boot-check.py --storage=none` on both logs. `make usb USB_DEV=...
+  USB_CONFIRM=yes` writes real media and refuses a mounted device.
+- The image has a protective MBR, not a GPT: `xorriso` cannot synthesize a GPT
+  without the Syslinux `isohybrid` MBR, and a hand-written GPT would collide
+  with the ISO 9660 volume descriptors in the first 32 KiB. See
+  [iso.md](iso.md).
+- All 36 gates pass at `v0.23.1`.
 
 ## Phase 3B - remaining storage work
 

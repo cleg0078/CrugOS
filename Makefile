@@ -4,6 +4,10 @@
 #   make all        build kernel, UEFI loader and ESP tree
 #   make run        boot the ESP image under QEMU + OVMF
 #   make demo       boot the Workbench desktop in a real QEMU window
+#   make iso        build a bootable hybrid UEFI ISO image
+#   make check-iso  validate the ISO image without booting it
+#   make test-iso   boot the ISO from a USB stick and from a CD-ROM
+#   make usb        write the ISO to a USB block device (USB_DEV=/dev/sdX)
 #   make test       boot and verify the serial markers / exit code
 #   make test-host  build and run host unit tests
 #   make test-compat  boot a compatibility build (no AVX2 required)
@@ -126,6 +130,25 @@ DEMO_TIMEOUT_SEC ?= 900
 DEMO_CMDLINE ?= wb.enable=1 wb.wait=0 wb.hold=$(DEMO_HOLD_SEC)
 DEMO_MACHINE_EXTRA ?= usb=off,i8042=off
 DEMO_QEMU_EXTRA ?= -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-mouse,bus=xhci.0
+
+# Bootable hybrid UEFI ISO (make iso). The ESP travels as a FAT16 image behind
+# an El Torito boot entry, the tree also carries the plain ESP files, and
+# ISO_CMDLINE defaults to storage=none so the image boots with no block device.
+ISO_IMAGE ?= $(BUILD)/crugos.iso
+ISO_STAGE ?= $(BUILD)/iso
+ISO_FAT_IMG ?= $(ISO_STAGE)/tree/boot/efi.img
+ISO_SIZE_MB ?= 24
+ISO_VOLID ?= CRUGOS
+ISO_CMDLINE ?= storage=none
+ISO_DATE ?= 2026010100000000
+ISO_RUN_TIMEOUT_SEC ?= 240
+EXPECT_ISO ?= no
+# Boot media forwarded to scripts/run-qemu.sh by 'make run' when set.
+ISO_IMG ?=
+USB_IMG ?= $(BUILD)/usb-stick.img
+USB_STICK ?=
+USB_DEV ?=
+USB_CONFIRM ?= no
 NET_MODE ?=
 NET_HOSTFWD ?=
 OVMF_CODE ?= /usr/share/OVMF/OVMF_CODE_4M.fd
@@ -232,7 +255,7 @@ HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
         test-crypt-prompt test-crypt-prompt-wrong test-crypt-prompt-timeout \
         test-crypt-keyboard test-crypt-keyboard-wrong crypt-run test-net test-tcp \
         test-net-dns test-usb-hotplug test-usb-mouse test-audio test-gfx \
-        test-workbench \
+        test-workbench iso check-iso test-iso usb \
         crash-disk \
         check-disk size check-efi repro test-host preflight version options clean distclean help
 
@@ -344,7 +367,7 @@ run: esp
 		$(MAKE) --no-print-directory disk; \
 	fi
 	@mkdir -p $(BUILD)/tmp
-	$(Q)TMPDIR=$(abspath $(BUILD)/tmp) ESP_DIR=$(abspath $(ESP)) \
+	$(Q)TMPDIR=$(abspath $(BUILD)/tmp) \
 		SERIAL_LOG=$(abspath $(SERIAL_LOG)) DEBUG_LOG=$(abspath $(DEBUG_LOG)) \
 		EXIT_CODE_FILE=$(abspath $(QEMU_EXIT)) \
 		QEMU="$(QEMU)" OVMF_CODE="$(OVMF_CODE)" OVMF_VARS="$(OVMF_VARS)" \
@@ -354,6 +377,9 @@ run: esp
 		SERIAL_TCP="$(SERIAL_TCP)" NET_MODE="$(NET_MODE)" \
 		MACHINE_EXTRA="$(MACHINE_EXTRA)" \
 		NET_HOSTFWD="$(NET_HOSTFWD)" \
+		ESP_DIR=$(if $(or $(ISO_IMG),$(USB_STICK)),,$(abspath $(ESP))) \
+		ISO_IMG=$(if $(ISO_IMG),$(abspath $(ISO_IMG)),) \
+		USB_STICK=$(if $(USB_STICK),$(abspath $(USB_STICK)),) \
 		DISK_IMG=$(if $(DISK_IMG),$(abspath $(DISK_IMG)),) \
 		NVME_DISK=$(if $(NVME_DISK),$(abspath $(NVME_DISK)),) \
 		NVME_SERIAL="$(NVME_SERIAL)" EXTRA_DISKS="$(EXTRA_DISKS)" \
@@ -368,6 +394,62 @@ crypt-run: crypt-disk
 		QEMU_DISPLAY=$(CRYPT_RUN_DISPLAY) TIMEOUT_SEC=$(CRYPT_RUN_TIMEOUT_SEC)
 	@echo "  NOTE  type the passphrase in the QEMU window (Ctrl+Alt+G releases input)"
 	@echo "  NOTE  serial log $(SERIAL_LOG), exit status $(QEMU_EXIT)"
+
+# Bootable hybrid UEFI ISO: the ESP becomes a FAT16 image behind El Torito and
+# the ISO tree also ships the plain ESP files.  The image is bootable both from
+# a CD-ROM and from a raw USB stick, so 'make usb' can dd it to real hardware.
+iso: esp
+	$(Q)mkdir -p $(ISO_STAGE)
+	$(Q)ESP_DIR=$(abspath $(ESP)) ISO_IMG=$(abspath $(ISO_IMAGE)) \
+		ISO_STAGE=$(abspath $(ISO_STAGE)) ISO_SIZE_MB=$(ISO_SIZE_MB) \
+		ISO_CMDLINE="$(ISO_CMDLINE)" ISO_VOLID="$(ISO_VOLID)" \
+		ISO_DATE=$(ISO_DATE) PYTHON="$(PYTHON)" scripts/mkiso.sh
+
+check-iso: iso
+	$(Q)$(PYTHON) scripts/check-iso.py --iso $(abspath $(ISO_IMAGE)) \
+		--mkfat $(abspath scripts/mkfat.py)
+
+# ISO gate: dd the image onto a stick and boot it twice, once through
+# usb-storage on an xHCI controller and once as a plain CD-ROM.  Both boots run
+# with no block device, so the guest cmdline must say storage=none.
+test-iso: iso check-iso
+	$(Q)rm -f $(USB_IMG)
+	$(Q)dd if=$(ISO_IMAGE) of=$(USB_IMG) bs=1M status=none
+	$(Q)$(MAKE) --no-print-directory run DISK_IMG= NET_MODE=none SERIAL_TCP= \
+		MACHINE_EXTRA="usb=off,i8042=off" TIMEOUT_SEC=$(ISO_RUN_TIMEOUT_SEC) \
+		USB_STICK=$(abspath $(USB_IMG)) \
+		SERIAL_LOG=$(abspath $(BUILD)/iso-usb-serial.log) \
+		QEMU_EXIT=$(abspath $(BUILD)/iso-usb-exit.txt)
+	$(Q)$(PYTHON) scripts/boot-check.py $(BUILD)/iso-usb-serial.log \
+		$(BUILD)/iso-usb-exit.txt VERSION "$(EXPECT_AVX2)" no no no no no any \
+		no no no no no no no no --storage=none
+	@echo "  OK    iso boots from a USB stick (exit 33)"
+	$(Q)$(MAKE) --no-print-directory run DISK_IMG= NET_MODE=none SERIAL_TCP= \
+		MACHINE_EXTRA="usb=off,i8042=off" TIMEOUT_SEC=$(ISO_RUN_TIMEOUT_SEC) \
+		ISO_IMG=$(abspath $(ISO_IMAGE)) \
+		SERIAL_LOG=$(abspath $(BUILD)/iso-cd-serial.log) \
+		QEMU_EXIT=$(abspath $(BUILD)/iso-cd-exit.txt)
+	$(Q)$(PYTHON) scripts/boot-check.py $(BUILD)/iso-cd-serial.log \
+		$(BUILD)/iso-cd-exit.txt VERSION "$(EXPECT_AVX2)" no no no no no any \
+		no no no no no no no no --storage=none
+	@echo "  OK    iso boots from a CD-ROM (exit 33)"
+
+# Write the ISO to a real USB stick.  This is the only target that touches a
+# device outside build/, so it needs an absolute block device and an explicit
+# USB_CONFIRM=yes, and it refuses a device that is currently mounted.
+usb: iso
+	$(Q)if [ "$(USB_CONFIRM)" != "yes" ]; then \
+		echo "  usb: refusing to write $(ISO_IMAGE): set USB_CONFIRM=yes"; exit 2; \
+	fi
+	$(Q)if [ -z "$(USB_DEV)" ] || [ ! -b "$(USB_DEV)" ]; then \
+		echo "  usb: USB_DEV=$(USB_DEV) is not a block device"; exit 2; \
+	fi
+	$(Q)case "$(USB_DEV)" in /*) ;; *) echo "  usb: USB_DEV must be absolute"; exit 2;; esac
+	$(Q)if grep -q "^$(USB_DEV)" /proc/mounts; then \
+		echo "  usb: $(USB_DEV) is mounted, unmount it first"; exit 2; \
+	fi
+	$(Q)dd if=$(ISO_IMAGE) of=$(USB_DEV) bs=4M conv=fsync status=progress
+	@echo "  OK    wrote $(ISO_IMAGE) to $(USB_DEV)"
 
 # Interactive demo: boot the Workbench desktop in a real QEMU window.  The
 # kernel keeps the desktop on screen for DEMO_HOLD_SEC seconds while the USB
@@ -701,6 +783,20 @@ options:
 	@printf '  %-16s %s\n' DEMO_CMDLINE "$(DEMO_CMDLINE)"
 	@printf '  %-16s %s\n' DEMO_MACHINE_EXTRA "$(DEMO_MACHINE_EXTRA)"
 	@printf '  %-16s %s\n' DEMO_QEMU_EXTRA "$(DEMO_QEMU_EXTRA)"
+	@printf '  %-16s %s\n' EXPECT_ISO "$(EXPECT_ISO)"
+	@printf '  %-16s %s\n' ISO_IMAGE "$(ISO_IMAGE)"
+	@printf '  %-16s %s\n' ISO_STAGE "$(ISO_STAGE)"
+	@printf '  %-16s %s\n' ISO_FAT_IMG "$(ISO_FAT_IMG)"
+	@printf '  %-16s %s\n' ISO_SIZE_MB "$(ISO_SIZE_MB)"
+	@printf '  %-16s %s\n' ISO_VOLID "$(ISO_VOLID)"
+	@printf '  %-16s %s\n' ISO_CMDLINE "$(ISO_CMDLINE)"
+	@printf '  %-16s %s\n' ISO_DATE "$(ISO_DATE)"
+	@printf '  %-16s %s\n' ISO_RUN_TIMEOUT_SEC "$(ISO_RUN_TIMEOUT_SEC)"
+	@printf '  %-16s %s\n' ISO_IMG "$(ISO_IMG)"
+	@printf '  %-16s %s\n' USB_IMG "$(USB_IMG)"
+	@printf '  %-16s %s\n' USB_STICK "$(USB_STICK)"
+	@printf '  %-16s %s\n' USB_DEV "$(USB_DEV)"
+	@printf '  %-16s %s\n' USB_CONFIRM "$(USB_CONFIRM)"
 	@printf '  %-16s %s\n' OVMF_CODE "$(OVMF_CODE)"
 	@printf '  %-16s %s\n' OVMF_VARS "$(OVMF_VARS)"
 	@printf '  %-16s %s\n' DISK_IMG "$(DISK_IMG)"

@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 6A Workbench desktop (`v0.23.0`)
+## Status: phase 6A Workbench desktop (`v0.23.1`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -23,7 +23,10 @@ into the running guest, phase 5B adds a USB HID boot mouse whose reports become
 pointer events, phase 5C adds a USB Audio Class path with a PCM ring and a
 per-channel mixer, phase 5D adds a pointer-driven cursor composited onto the
 GOP framebuffer console, and phase 6A adds the first Workbench slice -- a
-software desktop of intuition windows on that same framebuffer:
+software desktop of intuition windows on that same framebuffer. Release
+`v0.23.1` makes that tree bootable media: `make iso` writes a hybrid UEFI ISO
+that boots from a USB stick or a CD-ROM, with no disk image and no test
+tokens baked in.
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -653,6 +656,20 @@ With no xHCI function in the default machine the driver prints
 stays in charge; the USB gates are the only ones that install the controller and
 remove the PS/2 one, so the input can only arrive over USB.
 
+`make iso` turns the ESP tree into `build/x86_64/crugos.iso`: an ISO 9660 image
+with an El Torito no-emulation entry, whose FAT16 boot image is also reachable
+through the protective MBR's single type-`0xEF` partition, so the file boots
+both as a CD-ROM and after a plain `dd` onto a USB stick. The image carries its
+own command line (`ISO_CMDLINE`, default `storage=none`), so a stick never
+inherits the QEMU `crypt.pass=` token and the kernel prints
+`CRUGOS: storage skipped (storage=none)` instead of demanding a root filesystem.
+`make check-iso` re-parses the artifact (volume descriptor, El Torito catalog
+checksum, FAT16 BPB, MBR entry, an `xorriso -osirrox` extraction verified with
+`fsck.vfat`), and `make test-iso` boots the ISO through `usb-storage` on
+`qemu-xhci` and again as a CD-ROM, both ending in status 33. `make usb
+USB_DEV=/dev/sdX USB_CONFIRM=yes` writes it to real media. See
+[iso.md](docs/iso.md).
+
 ## Quick start
 
 ```
@@ -691,6 +708,10 @@ make test-usb-mouse    # hotplug a USB mouse into xHCI and move the pointer
 make test-audio        # stream PCM to a USB Audio Class device through the mixer
 make test-gfx          # move a hotplugged USB mouse and verify the framebuffer cursor
 make test-workbench    # drag a window on the software-rendered desktop
+make iso         # build a bootable hybrid UEFI ISO (build/x86_64/crugos.iso)
+make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
+make test-iso    # boot that ISO from a USB stick and from a CD-ROM
+make usb         # write the ISO to a USB block device (USB_DEV=/dev/sdX)
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
 make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows)
 make check-disk  # e2fsck + persisted-file checks on the latest test disk
@@ -720,6 +741,9 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `GFX_RUN_TIMEOUT_SEC`, `GFX_QEMU_EXTRA`, `WB_WAIT`, `WB_DRAG`,
 `WB_RUN_TIMEOUT_SEC`, `WB_QEMU_EXTRA`, `DEMO_DISPLAY`, `DEMO_HOLD_SEC`,
 `DEMO_TIMEOUT_SEC`, `DEMO_CMDLINE`, `DEMO_MACHINE_EXTRA`, `DEMO_QEMU_EXTRA`,
+`ISO_IMAGE`, `ISO_STAGE`, `ISO_FAT_IMG`, `ISO_SIZE_MB`, `ISO_VOLID`,
+`ISO_CMDLINE`, `ISO_DATE`, `ISO_RUN_TIMEOUT_SEC`, `EXPECT_ISO`, `ISO_IMG`,
+`USB_IMG`, `USB_STICK`, `USB_DEV`, `USB_CONFIRM`,
 `NET_MODE`, `NET_HOSTFWD`, `TCP_SERVE_SEC`,
 `TCP_RUN_TIMEOUT_SEC`, `DNS_NAME`, `DNS_ADDRESS`, `DNS_TTL`,
 `DNS_RUN_TIMEOUT_SEC`, `USB_WAIT`, `USB_KEYS`, `USB_RUN_TIMEOUT_SEC`,
@@ -749,11 +773,11 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/fs/` | GPT, writable checksummed ext4, checksummed JBD2 journal and the storage boot policy (including the console passphrase prompt) |
 | `kernel/crypto/` | AES, XTS, AES-NI, BLAKE2b and Argon2id (shared with the host tools) |
 | `drivers/` | PCI, legacy virtio-blk, NVMe and AHCI/SATA block device drivers, legacy virtio-net, and the xHCI controller with its USB HID keyboard, mouse and Audio Class decoders (audio frames flow into `kernel/audio/`) |
-| `scripts/` | QEMU runner, disk/RAID1/RAID10/crypt image builders, boot/PE/disk/RAID/journal/crypt checks, the serial and keyboard prompt drivers, tamper helper, size and reproducibility gates |
+| `scripts/` | QEMU runner, disk/RAID1/RAID10/crypt image builders, the hybrid ISO builder (`mkiso.sh`, `mkfat.py`), boot/PE/disk/RAID/journal/crypt/ISO checks, the serial and keyboard prompt drivers, tamper helper, size and reproducibility gates |
 | `tests/host/` | host unit tests for freestanding code |
 | `tools/` | host-side development tools (`gen-font.py`, `mkcrypt.c`, `gen-crc32c.py`) |
 | `docs/` | [build](docs/build.md), [boot](docs/boot.md), [storage](docs/storage.md), [checksums](docs/checksums.md), [crypto](docs/crypto.md), [input](docs/input.md), [network](docs/network.md),
-[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [USB/xHCI](docs/usb.md), [audio](docs/audio.md), [graphics](docs/gfx.md), [Workbench](docs/workbench.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
+[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [USB/xHCI](docs/usb.md), [audio](docs/audio.md), [graphics](docs/gfx.md), [Workbench](docs/workbench.md), [bootable ISO](docs/iso.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
 
 ## Versioning
 

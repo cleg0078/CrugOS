@@ -3,7 +3,9 @@
 # the QEMU exit status. Never fails the caller: verdicts live in the log files.
 set -euo pipefail
 
-: "${ESP_DIR:?ESP_DIR is required}"
+ESP_DIR=${ESP_DIR:-}
+ISO_IMG=${ISO_IMG:-}
+USB_STICK=${USB_STICK:-}
 : "${SERIAL_LOG:?SERIAL_LOG is required}"
 : "${DEBUG_LOG:?DEBUG_LOG is required}"
 : "${EXIT_CODE_FILE:?EXIT_CODE_FILE is required}"
@@ -39,7 +41,11 @@ for firmware in "$OVMF_CODE" "$OVMF_VARS"; do
         exit 1
     fi
 done
-if [[ ! -d "$ESP_DIR/EFI/BOOT" ]]; then
+if [[ -z "$ESP_DIR" && -z "$ISO_IMG" && -z "$USB_STICK" ]]; then
+    echo "run-qemu: ESP_DIR, ISO_IMG or USB_STICK is required" >&2
+    exit 1
+fi
+if [[ -n "$ESP_DIR" && ! -d "$ESP_DIR/EFI/BOOT" ]]; then
     echo "run-qemu: no ESP at $ESP_DIR" >&2
     exit 1
 fi
@@ -129,6 +135,30 @@ elif [[ -n "$NET_MODE" && "$NET_MODE" != "none" ]]; then
     exit 1
 fi
 
+MEDIA_ARGS=()
+if [[ -n "$ESP_DIR" ]]; then
+    MEDIA_ARGS+=(-drive "file=fat:rw:$ESP_DIR,format=raw,media=disk")
+fi
+if [[ -n "$USB_STICK" ]]; then
+    if [[ ! -r "$USB_STICK" ]]; then
+        echo "run-qemu: missing USB stick image $USB_STICK" >&2
+        exit 1
+    fi
+    # A raw block device on a USB-attached xHCI controller: this is the path
+    # a real machine takes for a dd-ed USB stick, so the ISO gate proves it.
+    MEDIA_ARGS+=(-drive "file=$USB_STICK,if=none,id=stick,format=raw,readonly=on" \
+                 -device "qemu-xhci,id=xhci" \
+                 -device "usb-storage,drive=stick,bus=xhci.0")
+fi
+if [[ -n "$ISO_IMG" ]]; then
+    if [[ ! -r "$ISO_IMG" ]]; then
+        echo "run-qemu: missing ISO image $ISO_IMG" >&2
+        exit 1
+    fi
+    MEDIA_ARGS+=(-drive "file=$ISO_IMG,if=none,id=cd0,format=raw,media=cdrom,readonly=on" \
+                 -device "ide-cd,drive=cd0,bus=ide.1")
+fi
+
 SERIAL_ARGS=(-serial "file:$SERIAL_LOG")
 if [[ -n "$SERIAL_TCP" ]]; then
     # Interactive serial: the gate driver connects to this socket, tees the
@@ -136,7 +166,7 @@ if [[ -n "$SERIAL_TCP" ]]; then
     SERIAL_ARGS=(-serial "tcp:$SERIAL_TCP,server=on,wait=on")
 fi
 
-echo "run-qemu: booting $ESP_DIR (${MEMORY_MB} MiB, ${SMP} vCPU, cpu ${QEMU_CPU:-default}, accel ${QEMU_ACCEL:-default}, display ${QEMU_DISPLAY}, disk ${DISK_IMG:-none}, extra ${EXTRA_DISKS:-none}, nvme ${NVME_DISK:-none}, ahci ${AHCI_DISK:-none}, net ${NET_MODE:-none}, serial ${SERIAL_TCP:-file}, machine ${MACHINE_ARGS[1]}, timeout ${TIMEOUT_SEC}s)"
+echo "run-qemu: booting ${ESP_DIR:-${USB_STICK:-$ISO_IMG}} (${MEMORY_MB} MiB, ${SMP} vCPU, cpu ${QEMU_CPU:-default}, accel ${QEMU_ACCEL:-default}, display ${QEMU_DISPLAY}, disk ${DISK_IMG:-none}, extra ${EXTRA_DISKS:-none}, nvme ${NVME_DISK:-none}, ahci ${AHCI_DISK:-none}, iso ${ISO_IMG:-none}, usb ${USB_STICK:-none}, net ${NET_MODE:-none}, serial ${SERIAL_TCP:-file}, machine ${MACHINE_ARGS[1]}, timeout ${TIMEOUT_SEC}s)"
 set +e
 TMPDIR="$TMPDIR" timeout --foreground "$TIMEOUT_SEC" "$QEMU" \
     "${MACHINE_ARGS[@]}" \
@@ -146,7 +176,7 @@ TMPDIR="$TMPDIR" timeout --foreground "$TIMEOUT_SEC" "$QEMU" \
     "${CPU_ARGS[@]}" \
     -drive if=pflash,format=raw,unit=0,readonly=on,file="$OVMF_CODE" \
     -drive if=pflash,format=raw,unit=1,file="$VARS_COPY" \
-    -drive file=fat:rw:"$ESP_DIR",format=raw,media=disk \
+    "${MEDIA_ARGS[@]}" \
     "${DISK_ARGS[@]}" \
     "${NVME_ARGS[@]}" \
     "${AHCI_ARGS[@]}" \

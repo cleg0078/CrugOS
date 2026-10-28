@@ -78,11 +78,30 @@ an empty answer, Ctrl-C, overflow or timeout prints `CRUGOS: crypt locked (no
 passphrase)`. Both lock paths end in `CRUGOS: no root filesystem`. The secret
 is never echoed and every line buffer is zeroed afterwards.
 
+### Boot media without a block device
+
+A boot medium can declare that it ships no disk at all with the
+`storage=none` token, which is what the hybrid image built by `make iso`
+passes. The transports are still probed and print their `ready` lines, and then
+
+```
+CRUGOS: storage skipped (storage=none)
+```
+
+replaces the GPT/root/ext4/journal block: `storage_init()` returns success with
+`g_present` and `g_root_part` cleared, `storage_selftest()` returns a soft
+success (`if (!g_present || !g_root_part) return g_bootstrap ? 1 : 0;`), and
+the writable, journal and crash self-tests are skipped because there is no
+mount to write to. The token only relaxes the storage contract; it never
+fabricates a device. A machine with no block device and no token still prints
+`CRUGOS: no root filesystem` and exits 35. See [iso.md](iso.md).
+
 A missing virtio/NVMe/AHCI device, an unusable GPT, a bad RAID metadata record
-or an ext4 mount failure panics (`storage: ...`) because the phase 3 boot gate expects a
-root filesystem. The read/write self-test also panics if any write-path
-operation fails, so a broken write path cannot silently boot. The init step time
-is reported as `storage=` in the `boot   :` timing line.
+or an ext4 mount failure panics (`storage: ...`) because the phase 3 boot gate
+expects a root filesystem, unless `storage=none` declared there is none. The
+read/write self-test also panics if any write-path operation fails, so a broken
+write path cannot silently boot. The init step time is reported as `storage=`
+in the `boot   :` timing line.
 
 ## Block layer
 

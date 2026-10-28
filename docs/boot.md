@@ -43,7 +43,9 @@ read the non-secret `net.tcp=` / `net.serve=` / `net.dns=` /
 `usb.wait=` / `usb.keys=`, phase 5B adds `usb.mouse=` / `usb.moves=`, phase
 5C adds `audio.rate=` / `audio.volume=` / `audio.seconds=`, phase 5D adds
 `gfx.wait=` / `gfx.moves=`, and phase 6A adds `wb.enable=` / `wb.wait=` /
-`wb.drag=` / `wb.hold=`. The
+`wb.drag=` / `wb.hold=`. A boot medium that ships no block device (the hybrid
+ISO) passes `storage=none`, which is the one token that changes the storage
+contract instead of adding work to it. The
 loader caps
 the command line at 511 bytes and the kernel wipes the page after it copies the
 `crypt.pass=` value.
@@ -139,8 +141,14 @@ post-snapshot allocations cannot push it over capacity.
    NVMe driver (PCI class 01/08/02, admin/I/O queues, namespace 1) and the AHCI
    driver (PCI class 01/06/01, port bring-up, IDENTIFY, `sd` names), and the GPT
    of every block device. `storage_parse_cmdline` first extracts `crypt.pass=`
-   from the loader command line and wipes that page. A partition named
-   `crugroot` is mounted directly; otherwise a partition named `crugcrypt` (or
+   from the loader command line and wipes that page, and recognises
+   `storage=none`, which marks a boot medium without a block device: every
+   transport is still probed and prints its `ready` line, then `storage_init`
+   prints `CRUGOS: storage skipped (storage=none)` and succeeds without a root,
+   and `storage_selftest` becomes a soft skip. A machine with no block device
+   and no such token still fails closed with `CRUGOS: no root filesystem`.
+   Without the token, a partition named `crugroot` is mounted directly;
+   otherwise a partition named `crugcrypt` (or
    carrying the CrugOS encrypted-root type GUID) is unlocked: the kernel reads
    the 16 KiB header and keyslots, derives 96 bytes with Argon2id, verifies the
    slot MAC, unwraps the 64-byte master key and registers `crypt0`. When the
@@ -308,6 +316,12 @@ of the RAID lines. The root mount then reads
 directory listing and the file contents. See [raid.md](raid.md) and
 [nvme.md](nvme.md).
 
+The one exception is the `storage=none` token: it declares that the boot medium
+carries no root at all, which is the case for the hybrid image built by
+`make iso`. Probes run as usual, `CRUGOS: storage skipped (storage=none)` is
+printed instead of a root selection, and the writable, journal and crash
+self-tests are skipped rather than failed. See [iso.md](iso.md).
+
 The same self-test then remounts the root device read-write and exercises the
 write path: it removes stale `/selftest` entries, creates `/selftest` and
 `a.txt`, writes and `fsync`s a 5000-byte pattern, renames the file to `b.txt`,
@@ -472,6 +486,20 @@ the mask and the markers, never the passphrase. A failed
 unlock prints `CRUGOS: crypt unlock failed` (or a `crypt locked` variant) and
 then `CRUGOS: no root filesystem`, and the kernel exits with status 35 (a
 deterministic boot failure, not a panic).
+
+A stick booted from the hybrid ISO is the same boot with the storage block
+replaced by the skip marker, and the USB device the firmware booted from shows
+up in the USB lines as an unsupported mass-storage function:
+
+```
+CRUGOS: version 0.23.1
+CRUGOS: usb controller ready (xhci, 8 port(s))
+CRUGOS: usb device 46f4:0001 on port 1 (speed 4)
+CRUGOS: usb device class 8 on port 1 (unsupported)
+CRUGOS: storage skipped (storage=none)
+CRUGOS: selftest ok
+CRUGOS: phase 6a boot ok
+```
 
 `kernel/core/report.c` prints the machine description between them: kernel
 extent, firmware pointers, memory totals, allocator totals, framebuffer mode,

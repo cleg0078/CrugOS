@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Verify a CrugOS boot: serial markers, guest version, CPU policy, storage mode, encryption, networking, TCP, DNS, USB, HID mice, audio, the framebuffer cursor and the Workbench desktop, then the exit code.
 
+Pass --storage=none anywhere on the command line when the boot medium ships no
+block device (the hybrid ISO does): the storage, journal, GPT and ext4 markers
+are then replaced by the single 'CRUGOS: storage skipped' marker.
+
 usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE \
     [VERSION_FILE [EXPECT_AVX2 [EXPECT_RAID [EXPECT_NVME [EXPECT_REBUILD \
     [EXPECT_AHCI [EXPECT_CRYPT [EXPECT_AES [EXPECT_NET [EXPECT_TCP \
     [EXPECT_DNS [EXPECT_USB [EXPECT_MOUSE [EXPECT_AUDIO \
-    [EXPECT_GFX [EXPECT_WB]]]]]]]]]]]]]]]]
+    [EXPECT_GFX [EXPECT_WB]]]]]]]]]]]]]]]] [--storage=none]
 """
 
 import re
@@ -65,6 +69,17 @@ LOCKED_CRYPT_MARKERS = (
     "CRUGOS: crypt locked (no passphrase)",
     "CRUGOS: no root filesystem",
 )
+# A boot medium without a block device (the hybrid ISO) skips the storage stack.
+STORAGE_MARKERS = (
+    "CRUGOS: block ready",
+    "CRUGOS: gpt ready",
+    "CRUGOS: ext4 ready",
+    "CRUGOS: storage ready",
+    "CRUGOS: journal ready",
+    "CRUGOS: writable storage ok",
+    "CRUGOS: journal selftest ok",
+)
+STORAGE_SKIPPED_MARKER = "CRUGOS: storage skipped (storage=none)"
 VERSION_PATTERN = re.compile(r"CRUGOS: version (\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?)")
 SUCCESS_EXIT = 33  # isa-debug-exit: port 0xf4 value 0x10 -> (0x10 << 1) | 1
 ENCRYPT_FAIL_EXIT = 35  # arch_exit_qemu(0x11): no root filesystem
@@ -80,12 +95,27 @@ def fail(message: str, log: str) -> int:
 
 
 def main() -> int:
+    # The storage flag is a switch, not a positional argument, so strip it first
+    # and keep every existing positional call site unchanged.
+    storage_mode = "disk"
+    argv = []
+    for arg in sys.argv[1:]:
+        if arg == "--storage=none":
+            storage_mode = "none"
+        elif arg.startswith("--storage="):
+            print(f"FAIL: invalid storage mode {arg!r}", file=sys.stderr)
+            return 2
+        else:
+            argv.append(arg)
+    sys.argv = [sys.argv[0]] + argv
+
     if len(sys.argv) not in tuple(range(3, 20)):
         print("usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE "
               "[VERSION_FILE [EXPECT_AVX2 [EXPECT_RAID [EXPECT_NVME "
               "[EXPECT_REBUILD [EXPECT_AHCI [EXPECT_CRYPT [EXPECT_AES "
               "[EXPECT_NET [EXPECT_TCP [EXPECT_DNS [EXPECT_USB "
-              "[EXPECT_MOUSE [EXPECT_AUDIO [EXPECT_GFX [EXPECT_WB]]]]]]]]]]]]]]]]",
+              "[EXPECT_MOUSE [EXPECT_AUDIO [EXPECT_GFX [EXPECT_WB]]]]]]]]]]]]]]]] "
+              "[--storage=none]",
               file=sys.stderr)
         return 2
 
@@ -141,6 +171,10 @@ def main() -> int:
         return fail(f"invalid EXPECT_WB {expect_wb!r}", text)
 
     required = list(REQUIRED_MARKERS)
+    if storage_mode == "none":
+        # No block device: the storage stack reports the skip instead.
+        required = [marker for marker in required if marker not in STORAGE_MARKERS]
+        required.append(STORAGE_SKIPPED_MARKER)
     if expect_crypt == "wrong":
         # The boot is expected to stop before a root filesystem exists.
         required = list(WRONG_CRYPT_MARKERS)
@@ -348,7 +382,8 @@ def main() -> int:
           "ahci", expect_ahci, "crypt", expect_crypt, "aes", expect_aes,
           "net", expect_net, "tcp", expect_tcp, "dns", expect_dns,
           "usb", expect_usb, "mouse", expect_mouse, "audio", expect_audio,
-          "gfx", expect_gfx, "wb", expect_wb, "QEMU exit status", status)
+          "gfx", expect_gfx, "wb", expect_wb, "storage", storage_mode,
+          "QEMU exit status", status)
     for line in boot_report:
         print("  " + line)
     return 0

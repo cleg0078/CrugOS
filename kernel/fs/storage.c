@@ -63,6 +63,9 @@ static struct block_device *g_root_part;
 static u8 g_crash_buf[CRASH_FILE_SIZE];
 static u32 g_journal_replayed;
 static int g_present;
+/* storage=none: the boot medium (a hybrid ISO) ships no block device, so the
+   storage stack is a deliberate skip rather than a boot failure. */
+static int g_bootstrap;
 static char g_hello[256];
 static u64 g_hello_size;
 
@@ -238,6 +241,20 @@ static int token_prefix(const char *tok, u64 len, const char *key, u64 key_len)
     return 1;
 }
 
+/* A flag token carries no value, so it matches the whole word. */
+static int token_equals(const char *tok, u64 len, const char *key, u64 key_len)
+{
+    u64 i;
+
+    if (len != key_len)
+        return 0;
+    for (i = 0; i < key_len; i++) {
+        if (tok[i] != key[i])
+            return 0;
+    }
+    return 1;
+}
+
 /* Small decimal parser; rejects empty/overflowing values. */
 static u32 cmdline_u32(const char *s, u64 len)
 {
@@ -263,8 +280,10 @@ static void storage_parse_cmdline(const boot_info *bi)
 {
     static const char pass_key[] = "crypt.pass=";
     static const char timeout_key[] = "crypt.prompt_timeout=";
+    static const char none_key[] = "storage=none";
     const usize pass_len = sizeof(pass_key) - 1;
     const usize timeout_len = sizeof(timeout_key) - 1;
+    const usize none_len = sizeof(none_key) - 1;
     const char *cmd;
     u64 limit;
     u64 i = 0;
@@ -272,6 +291,7 @@ static void storage_parse_cmdline(const boot_info *bi)
     g_crypt_pass_len = 0;
     g_crypt_pass[0] = 0;
     g_crypt_prompt_timeout_ms = CRYPT_PROMPT_TIMEOUT_MS;
+    g_bootstrap = 0;
     if (bi == 0 || bi->magic != BOOTINFO_MAGIC || bi->command_line == 0)
         return;
     cmd = bi->command_line;
@@ -305,6 +325,8 @@ static void storage_parse_cmdline(const boot_info *bi)
             if (sec > CRYPT_PROMPT_TIMEOUT_MAX_SEC)
                 sec = CRYPT_PROMPT_TIMEOUT_MAX_SEC;
             g_crypt_prompt_timeout_ms = sec * 1000u;
+        } else if (token_equals(cmd + start, len, none_key, none_len)) {
+            g_bootstrap = 1;
         }
     }
     /* The loader page is still mapped: drop the plaintext token right away. */
@@ -451,6 +473,14 @@ int storage_init(const boot_info *bi)
     kprintf("CRUGOS: nvme ready (%d device(s))\n", nvme_devices);
     ahci_devices = ahci_init();
     kprintf("CRUGOS: ahci ready (%d device(s))\n", ahci_devices);
+    if (g_bootstrap) {
+        /* storage=none: no block device is expected, so stop before the GPT
+           scan instead of reporting a missing root filesystem. */
+        kprintf("CRUGOS: storage skipped (storage=none)\n");
+        g_present = 0;
+        g_root_part = 0;
+        return 0;
+    }
     if (virtio_devices + nvme_devices + ahci_devices <= 0) {
         kprintf("storage: no block device driver\n");
         return -1;
@@ -706,7 +736,7 @@ int storage_selftest(void)
     u32 ino;
 
     if (!g_present || !g_root_part)
-        return 0;
+        return g_bootstrap ? 1 : 0;
     if (!ext4_selftest())
         return 0;
     if (g_hello_size != strlen("hello from ext4\n"))
