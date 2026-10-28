@@ -308,7 +308,9 @@ CRUGOS: net selftest ok
 The TCP lines appear only in a gate that passes `net.tcp=` and the DNS lines
 only in one that passes `net.name=`; an ordinary `make test` or
 `make test-net` boot has neither and stays green.
-The boot ends with `CRUGOS: phase 4d boot ok`.
+The phase 4D gates ended their boot with `CRUGOS: phase 4d boot ok`; later
+phases such as 5A move the marker on (`phase 5a boot ok`), while these
+networking markers stay unchanged.
 
 ## QEMU wiring
 

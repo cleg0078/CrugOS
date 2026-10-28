@@ -1,4 +1,4 @@
-# Console input: PS/2 keyboard and input.device
+# Console input: PS/2 keyboard, USB HID keyboard and input.device
 
 CrugOS can now take keyboard input while it boots. Phase 4A adds a polled
 i8042/PS-2 keyboard driver, a scancode decoder that feeds a small byte queue
@@ -6,15 +6,18 @@ i8042/PS-2 keyboard driver, a scancode decoder that feeds a small byte queue
 keyboard. The first consumer is the encrypted-root passphrase prompt from phase
 3B-10: until now it could only be answered over the serial line.
 
+Phase 5A adds a second source: a polled xHCI host controller driver and a USB
+HID boot keyboard, decoded into the same queue and drained from the same console
+read path.
+
 ```
-i8042 controller (0x60 data, 0x64 status)   COM1 (0x3F8)
-        |                                        |
-        v                                        v
-keyboard_poll() -> input_scancode()          serial_try_getc()
-        |                                        |
-        v                                        |
-byte queue (64 B) -> input_try_getc()            |
-        +---------------- console_try_getc() ----+
+i8042 controller (0x60 data, 0x64 status)   xHCI MMIO (HID reports)   COM1 (0x3F8)
+        |                                          |                      |
+        v                                          v                      v
+keyboard_poll() -> input_scancode()      usb_poll() -> usb_hid_decode()  serial_try_getc()
+        |                                          |                      |
+        +------------> byte queue (64 B) <----------+                      |
+                        input_try_getc() <--------------------------------+
                               |
                      storage_prompt_line() -> lineedit -> crypt_unlock()
 ```
@@ -23,7 +26,8 @@ byte queue (64 B) -> input_try_getc()            |
 
 The spec's input roadmap is USB HID over xHCI (phase 5). PS/2 is the smaller
 step that still proves the whole path end to end: a real controller, a real
-scancode stream, a device-independent byte queue, and a consumer. It also makes
+scancode stream, a device-independent byte queue, and a consumer. Phase 5A has
+since landed the USB path on top of that same queue. It also makes
 the encrypted boot testable headlessly: QEMU injects keys into the emulated
 i8042 through QMP, so a gate can unlock the root with a keyboard without any
 display or physical hardware.
@@ -73,6 +77,31 @@ host test binary links it directly.
 `input_try_getc()` returns the next byte or `-1` when the queue is empty. The
 queue holds 64 bytes; further keys are dropped until the consumer drains it.
 
+## USB HID keyboard (`drivers/usb/`)
+
+Phase 5A routes a second keyboard into the same queue. `drivers/usb/xhci.c`
+brings up the first xHCI controller, addresses the device, configures its
+interrupt IN endpoint and arms one 8-byte Normal TRB at a time;
+`drivers/usb/usb_hid.c` parses the configuration descriptor and turns a boot
+report into the bytes the PS/2 decoder would have produced (letters, digits,
+punctuation, Enter, Backspace, Tab, Escape, Space, Caps Lock and the same Ctrl
+folding). The character enters this layer through `input_char()`, the only new
+entry point:
+
+```c
+void input_char(u8 c)
+{
+    input_push(c);
+}
+```
+
+`usb_init()` registers `usb_poll()` with `input_set_poll()`, and
+`input_try_getc()` runs that hook before it looks at the queue, so every console
+read drains the xHCI event ring first. A hotplugged keyboard therefore types
+into the passphrase prompt, the shell or any later consumer without changing
+the consumer at all. See [usb.md](usb.md) for the controller, enumeration and
+gate details.
+
 ## Console merge (`kernel/core/console.c`)
 
 `console_try_getc()` is the single read path for console input:
@@ -94,6 +123,10 @@ COM1 keeps working; the keyboard is polled only when the serial line is idle.
 Output is unchanged: every byte still goes to both the serial port and the
 framebuffer.
 
+`input_try_getc()` itself runs the registered poll hook, so the xHCI event ring
+is drained even when no PS/2 port exists (`usb=off i8042=off` boots have a USB
+keyboard only).
+
 ## Boot integration
 
 `input_init()` and `keyboard_init()` run right after the heap is ready, before
@@ -102,6 +135,16 @@ the storage stack, because the storage passphrase prompt needs input:
 ```
 CRUGOS: heap ready
 CRUGOS: input ready (serial + keyboard)
+```
+
+Phase 5A calls `usb_init()` and `usb_cmdline()` immediately after that block. It
+prints `CRUGOS: usb controller ready (xhci, 8 port(s))`, or
+`CRUGOS: usb controller absent` when the machine has no xHCI function, and once
+a boot keyboard is enumerated:
+
+```
+CRUGOS: usb device 0627:0001 on port 5 (speed 3)
+CRUGOS: usb keyboard ready (endpoint 0x81, 8 byte reports)
 ```
 
 `CRUGOS: input ready (serial only)` is printed when no i8042 keyboard was found
@@ -122,7 +165,10 @@ binary and covers the decode matrix: letters and Shift, Caps XOR Shift,
 digits and shifted symbols, punctuation, Enter/Tab/Backspace/Escape/Space,
 `Ctrl+C` and its release, `Ctrl+[`, ignored `E0` arrows, right Ctrl, ACK/echo,
 release-only and unmapped codes, and queue overflow (100 keys yield exactly 64
-bytes). `make test-host` reports 903 checks including these.
+bytes). `tests/host/test_usb.c` covers the USB side: descriptor walking and the
+boot-report decode matrix (letters, Shift, Caps, Ctrl chords, digits,
+punctuation, named keys, held-key suppression). `make test-host` reports 1117
+checks including these.
 
 ## Gates
 
@@ -131,6 +177,7 @@ bytes). `make test-host` reports 903 checks including these.
 | `make test` | the base boot still comes up and prints `CRUGOS: input ready (serial + keyboard)` |
 | `make test-crypt-keyboard` | a headless QMP `send-key` stream types the passphrase into the emulated i8042 and the encrypted root mounts |
 | `make test-crypt-keyboard-wrong` | three wrong keyboard passphrases are rejected, the volume stays locked, and boot fails closed |
+| `make test-usb-hotplug` | a USB keyboard hotplugged over QMP while the guest runs is enumerated, decodes the typed keys and delivers them through `input.device` |
 
 `scripts/run-crypt-keyboard.py` drives the keyboard gates. It boots QEMU with
 `CRYPT_PASS=` (so no `crypt.pass=` token is written), adds
@@ -166,9 +213,11 @@ boots, but then only a harness can answer the prompt.
 On real hardware, copy `build/<arch>/esp` onto a FAT32 EFI system partition and
 the encrypted image onto a spare SATA/NVMe disk (the kernel never touches the ESP
 disk as a root candidate). Boot UEFI-only with Secure Boot off. A PS/2 keyboard
-works directly; a USB keyboard only works through the firmware's legacy USB
-emulation, because there is no xHCI/HID driver yet. Consumer boards rarely
-expose a COM1 header, so watch the framebuffer console for the prompt.
+works directly; a USB boot-protocol keyboard works through the phase 5A xHCI
+driver as long as it is the only keyboard (or the active one) and the firmware
+leaves the controller's BAR assigned or the driver can find a free window for
+it. Consumer boards rarely expose a COM1 header, so watch the framebuffer
+console for the prompt.
 
 ## Limits
 
@@ -176,7 +225,11 @@ expose a COM1 header, so watch the framebuffer console for the prompt.
 - US layout only, one keyboard, no remapping.
 - Extended keys are decoded as modifiers only; arrow keys and editing keys are
   not delivered yet.
-- No USB HID keyboard, no framebuffer/GOP input, no VT switching (phase 5 work).
+- No framebuffer/GOP input and no VT switching; a USB mouse and USB audio are
+  phases 5B/5C.
+- USB keyboards are polled from the console read path only: no interrupt
+  handler, no key repeat, boot-protocol keyboards on the first xHCI controller
+  only, and no hubs or media keys.
 - The keyboard gate types at 40 ms per key, so its encrypted boot takes about a
   second longer than the serial prompt gate; Argon2id still dominates the
   non-typing cost.

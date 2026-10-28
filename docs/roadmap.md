@@ -19,7 +19,9 @@ the serial console; phase 4A adds a polled PS/2 keyboard whose scancodes feed
 polled virtio-net NIC, with a DHCP lease, ARP resolution and an ICMP echo
 self-test; phase 4C adds a minimal TCP transport with a client, a listener, an
 HTTP exchange in both directions and six socket syscalls; phase 4D adds a
-caching DNS stub resolver with a UDP query, a TCP fallback and a name syscall.
+caching DNS stub resolver with a UDP query, a TCP fallback and a name syscall;
+phase 5A adds a polled xHCI host controller, a USB HID boot keyboard and a
+hotplug gate.
 Every later phase keeps the same BootInfo contract, so the loader does not
 change for memory management, storage, SMP or drivers.
 
@@ -362,12 +364,40 @@ change for memory management, storage, SMP or drivers.
   parsing and the cache (1042 checks).
 - All 30 gates pass at `v0.18.0`.
 
+## Phase 5A - USB keyboard (done)
+
+- Polled xHCI host controller (`drivers/usb/xhci.c`): PCI class `0C/03/30`, a
+  64-bit BAR sized and, when firmware left it at zero, assigned from a free
+  window below `0xffc00000`; HCRST, 4 KiB command/event/EP0/HID rings with
+  Link TRB wrap, the event ring segment table, the device context array and an
+  input context, then `RUN` with a `CRCR` readback.
+- Enumeration: `ENABLE_SLOT`, `ADDRESS_DEVICE` at the default packet size,
+  `GET_DESCRIPTOR` (8, 18, 9 and the full configuration), `EVALUATE_CONTEXT`
+  for the real `bMaxPacketSize0`, `SET_CONFIGURATION(1)` and
+  `CONFIGURE_ENDPOINT` for the interrupt IN endpoint, then one armed Normal TRB
+  per report.
+- HID boot decoding (`drivers/usb/usb_hid.c`): the descriptor walk accepts only
+  a boot keyboard (class 3, subclass 1, protocol 1); the eight-byte report maps
+  modifiers, letters with Shift XOR Caps, digits, punctuation, Enter,
+  Backspace, Tab, Escape, Space and the same Ctrl folding as the PS/2 decoder,
+  with held-key suppression; characters enter `input.device` through
+  `input_char()`, and `usb_poll()` runs as the queue's poll hook.
+- Ports and hotplug: `PORTSC` change bits are acknowledged, a connect is
+  reset and enumerated, and losing the port unbinds the keyboard. Normal boots
+  print `CRUGOS: usb controller absent` unless the machine has xHCI.
+- `usb.wait=<seconds>` and `usb.keys=<n>` bound the optional self-test wait;
+  `make test-usb-hotplug` boots with `usb=off,i8042=off` and a QMP socket,
+  plugs a keyboard into `xHCI` while the guest runs, types `abc`, and requires
+  the five `usb` markers, `CRUGOS: usb selftest ok`, a clean `e2fsck` and exit
+  33. `make test-host` covers descriptors and the decode matrix (1117 checks).
+- All 31 gates pass at `v0.19.0`.
+
 ## Phase 3B - remaining storage work
 
 - Journal wrapping, revoke records and orphan-file recovery.
-- Framebuffer/GOP console input (the serial line or the PS/2 keyboard can type
-  the passphrase today) and a USB HID keyboard through xHCI, plus virtual
-  terminals with Ctrl+Alt+Fn switching.
+- Framebuffer/GOP console input (the serial line, the PS/2 keyboard or a USB
+  HID keyboard can type the passphrase today) plus virtual terminals with
+  Ctrl+Alt+Fn switching.
 - USB storage drivers, hotplug and more than four NVMe/AHCI controllers.
 - RAID online rebuild, hot spare, scrub, a write-intent bitmap and persisted
   failure tracking (rebuild is boot-time and synchronous today).
@@ -378,8 +408,11 @@ change for memory management, storage, SMP or drivers.
 
 ## Phase 4 - devices and userspace
 
-- xHCI USB, HID, UAC2 audio (phase 4A delivered the PS/2 console input step,
-  phase 4B the virtio-net/IPv4 slice and phase 4C the TCP/socket slice).
+- USB HID devices beyond the boot keyboard (phase 5A delivered the xHCI
+  controller and the keyboard: phase 5B adds HID mice, phase 5C UAC2 audio and
+  an audio mixer; phase 4A delivered the PS/2 console input step, phase 4B the
+  virtio-net/IPv4 slice, phase 4C the TCP/socket slice and phase 4D the DNS
+  resolver).
 - A routing table and richer resolver features (multiple servers, DNSSEC
   validation, AAAA/PTR/SRV, search domains, negative caching) on top of the
   phase 4B-4D stack, richer socket semantics (bind, options, non-blocking, more

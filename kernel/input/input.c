@@ -9,6 +9,8 @@ static u32 g_head;
 static u32 g_tail;
 static u32 g_count;
 
+static void (*g_poll)(void);
+
 static u8 g_extended;
 static u8 g_shift;
 static u8 g_ctrl;
@@ -22,6 +24,16 @@ static void input_push(u8 c)
     g_queue[g_tail] = c;
     g_tail = (g_tail + 1u) % INPUT_QUEUE_BYTES;
     g_count++;
+}
+
+void input_char(u8 c)
+{
+    input_push(c);
+}
+
+void input_set_poll(void (*fn)(void))
+{
+    g_poll = fn;
 }
 
 void input_init(void)
@@ -40,6 +52,8 @@ int input_try_getc(void)
 {
     u8 c;
 
+    if (g_poll)
+        g_poll();
     if (g_count == 0)
         return -1;
     c = g_queue[g_head];

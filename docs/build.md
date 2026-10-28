@@ -1,6 +1,6 @@
 # Building CrugOS
 
-This document describes the phase 4D build system: how the kernel, the UEFI
+This document describes the phase 5A build system: how the kernel, the UEFI
 loader, the host crypto tool and the test disk images are built, which
 invariants the link must preserve, and how to diagnose the failure modes that
 are specific to this toolchain.
@@ -29,6 +29,7 @@ make test        # boot, verify markers/version/AVX2, then e2fsck the disk
 make test-net    # boot with a slirp virtio-net NIC and verify DHCP/ARP/ICMP
 make test-tcp    # TCP client/server and an HTTP exchange, both directions
 make test-net-dns  # resolve a name against a host DNS server over TCP
+make test-usb-hotplug  # hotplug a USB keyboard into xHCI and type at it
 make test-raid   # boot a two-member RAID1 root and check both members
 make test-raid10 # boot a four-member RAID10 root and check every member
 make test-nvme   # boot from an NVMe namespace and check the image
@@ -51,7 +52,7 @@ make test-crypt-keyboard  # type the passphrase on the PS/2 keyboard and boot
 make test-crypt-keyboard-wrong  # three wrong keyboard passphrases must lock the volume
 make crypt-run   # boot the encrypted disk in a QEMU window for real typing
 make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
-make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/IPv4/TCP/UDP checksums/DHCP parsing/DNS
+make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/USB HID descriptors and reports/IPv4/TCP/UDP checksums/DHCP parsing/DNS
 make disk        # build the GPT/ext4 test disk at build/<arch>/disk.img
 make raid-disks  # build the two GPT/ext4 RAID1 member disks
 make raid10-disks  # build the four GPT/ext4 RAID10 member disks
@@ -102,6 +103,10 @@ options` prints the complete resolved set (including paths derived from
 | `DNS_ADDRESS` | `10.0.2.99` | address the gate's DNS server answers with |
 | `DNS_TTL` | `60` | TTL the gate's DNS server puts in its answer |
 | `DNS_RUN_TIMEOUT_SEC` | `180` | wall-clock budget for `make test-net-dns` |
+| `EXPECT_USB` | `no` | `yes` requires the `CRUGOS: usb ...` markers written by `make test-usb-hotplug` |
+| `USB_WAIT` | `20` | seconds the USB gate boots with `usb.wait=` so the keyboard can be hotplugged late |
+| `USB_KEYS` | `abc` | characters `make test-usb-hotplug` types and waits to see decoded |
+| `USB_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for `make test-usb-hotplug` |
 | `CRASH_IMG` | `$(BUILD)/crash.img` | crash-gate image (journal commit, no checkpoint) |
 | `CRASH_REPLAY_IMG` | `$(BUILD)/crash-replay.img` | copy the kernel replays on the second crash-gate boot |
 | `CC` | `crugc` | compiler for kernel and loader objects |
@@ -113,6 +118,7 @@ options` prints the complete resolved set (including paths derived from
 | `QEMU_ACCEL` | empty | `-accel` backend, e.g. `tcg` or `kvm`; empty lets QEMU choose |
 | `QEMU_DISPLAY` | `none` | `-display` value; `none` keeps runs headless |
 | `QEMU_EXTRA` | empty | extra whitespace-separated QEMU arguments |
+| `MACHINE_EXTRA` | empty | comma-separated q35 properties appended to `-machine q35` (the USB gate uses `usb=off,i8042=off`) |
 | `BUILD_ROOT` | `build` | output root; `test-compat` uses `build/compat` |
 | `DISK_IMG` | `build/<arch>/disk.img` | raw disk image attached as `vda`; empty boots without virtio |
 | `DISK_SIZE_MB` | `16` | size of the generated test disk |
@@ -336,6 +342,22 @@ routes TCP there but not UDP), passes
 (`EXPECT_DNS=yes`), a `resolved <host> -> <address> via tcp` line, at least one
 query arriving at the server and a clean `e2fsck`. The driver prints
 `ok: dns resolve over tcp (N query(s), <host> -> <address>, exit 33)`.
+
+`make test-usb-hotplug` proves the phase 5A hotplug path:
+[scripts/run-usb-hotplug.py](../scripts/run-usb-hotplug.py) boots the normal disk
+with `MACHINE_EXTRA=usb=off,i8042=off` (so the machine has no built-in USB
+controller and no PS/2 port), adds `-device qemu-xhci,id=xhci` through
+`QEMU_EXTRA` plus a QMP socket, and passes `usb.wait=$(USB_WAIT)
+usb.keys=<len>` through `CMDLINE_EXTRA`. It waits for
+`CRUGOS: usb controller ready`, plugs `usb-kbd` into `xhci.0` with `device_add`,
+waits for `CRUGOS: usb keyboard ready`, then sends one QMP `send-key` per
+character and waits for the matching `CRUGOS: usb key '<c>'` line (falling back
+to `input-send-event` addressed at `/machine/peripheral/kbd0` if the console
+routes keystrokes elsewhere). The gate requires exit status 33,
+`CRUGOS: usb selftest ok`, the five `usb` markers (`EXPECT_USB=yes`) and a clean
+`e2fsck`; the driver prints
+`ok: usb hotplug keyboard (N key(s) <keys>, port hotplug, exit 33)`.
+See [usb.md](usb.md).
 
 The supported ext4 subset, write path, checksum layout, journal format and
 failure modes are documented in [storage.md](storage.md) and

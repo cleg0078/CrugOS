@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 4D DNS resolver (`v0.18.0`)
+## Status: phase 5A USB keyboard (`v0.19.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -16,9 +16,10 @@ striped RAID roots that can rebuild a replacement member, an AES-256-XTS
 encrypted root that can be unlocked with a passphrase typed on the console,
 and three storage transports; phase 4A adds console input from a PS/2 keyboard,
 phase 4B adds a small IPv4 stack over a virtio-net NIC, phase 4C extends it
-with TCP, an HTTP exchange in both directions and six socket syscalls, and
-phase 4D adds a caching DNS stub resolver with a TCP fallback and a name
-syscall:
+with TCP, an HTTP exchange in both directions and six socket syscalls, phase 4D
+adds a caching DNS stub resolver with a TCP fallback and a name syscall, and
+phase 5A adds an xHCI host controller with a USB HID boot keyboard that can be
+plugged into the running guest:
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -312,6 +313,27 @@ Phase 4D adds name resolution on top of that stack:
   responder on the host loopback that slirp reaches as `10.0.2.2`, then checks
   the disk with `e2fsck`. See [network.md](docs/network.md).
 
+Phase 5A adds a third input source, a USB keyboard behind xHCI:
+
+- a polled xHCI host controller (`drivers/usb/xhci.c`): PCI class `0C/03/30`, a
+  mapped register window, `HCRST`, one 4 KiB command, event, EP0 and interrupt
+  ring each with a Link TRB wrap, the device context array and an input context;
+- enumeration of the first boot-protocol keyboard: `ENABLE_SLOT`,
+  `ADDRESS_DEVICE`, `GET_DESCRIPTOR` for the device and the full configuration,
+  `EVALUATE_CONTEXT` for the real packet size, `SET_CONFIGURATION`,
+  `CONFIGURE_ENDPOINT` and one armed Normal TRB per eight-byte report;
+- `drivers/usb/usb_hid.c` decodes the boot report (letters with Shift XOR Caps,
+  digits, punctuation, Enter, Backspace, Tab, Escape, Space, the same Ctrl
+  folding as the PS/2 decoder) and hands characters to `input_char()`, so the
+  USB keyboard shares `input.device` with the serial line and i8042;
+- port hotplug is handled by acknowledging the `PORTSC` change bits, resetting
+  and enumerating a new device, and unbinding the keyboard when its port drops;
+- `usb.wait=<seconds>` and `usb.keys=<n>` bound the optional boot check;
+  `make test-usb-hotplug` boots with `usb=off,i8042=off` so the USB keyboard is
+  the only one, plugs `usb-kbd` into `qemu-xhci` over QMP while the guest runs,
+  types `abc` and requires the `usb` markers, a clean `e2fsck` and exit 33. See
+  [usb.md](docs/usb.md).
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -320,9 +342,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.18.0 (phase 4d) -- Amiga-inspired microkernel bring-up
+CrugOS 0.19.0 (phase 5a) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.18.0
+CRUGOS: version 0.19.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -334,6 +356,7 @@ timer  : 2687896922 Hz (pit), mode=lapic-periodic, 100 Hz tick
 CRUGOS: timer ready
 CRUGOS: heap ready
 CRUGOS: input ready (serial + keyboard)
+CRUGOS: usb controller absent
 virtio : net eth0 mac 52:54:00:12:34:56
 CRUGOS: net ready (1 device(s))
 virtio : blk vda, 32768 sectors, io=0x6000
@@ -367,7 +390,7 @@ CRUGOS: tcp socket syscall ok
 CRUGOS: tcp http served (72 bytes)
 CRUGOS: net selftest ok
 CRUGOS: selftest ok
-kernel : 0x0000000000100000 size=616 KiB
+kernel : 0x0000000000100000 size=632 KiB
 boot   : cpu=0 acpi_rsdp=0x1f77e000 fdt=0x0 initrd=0x0
 memory : 36 regions, usable 474080 KiB (462 MiB)
 pmm    : total=118520 free=118462 bitmap=131072 B
@@ -379,7 +402,7 @@ heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
 boot   : pmm=28552 us cpu=438 us vm=626 us traps=360 us timer=65357 us heap=60 us storage=94487 us sched=354 us syscall=122 us total=190359 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase 4d boot ok
+CRUGOS: phase 5a boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -404,6 +427,27 @@ CRUGOS: dns cache hit crugos.test -> 10.0.2.99
 CRUGOS: dns socket syscall ok
 CRUGOS: dns selftest ok
 ```
+
+The USB gate (`make test-usb-hotplug`) boots with `usb=off,i8042=off` and a
+`qemu-xhci` controller, plugs a keyboard into it over QMP while the guest is
+running, types `abc`, and only then lets the boot finish:
+
+```
+CRUGOS: input ready (serial only)
+CRUGOS: usb controller BAR assigned at 0xffb00000
+CRUGOS: usb controller ready (xhci, 8 port(s))
+CRUGOS: usb device 0627:0001 on port 5 (speed 3)
+CRUGOS: usb keyboard ready (endpoint 0x81, 8 byte reports)
+CRUGOS: usb key 'a'
+CRUGOS: usb key 'b'
+CRUGOS: usb key 'c'
+CRUGOS: usb selftest ok (3 key(s))
+```
+
+With no xHCI function in the default machine the driver prints
+`CRUGOS: usb controller absent` (as in the excerpt above) and the PS/2 keyboard
+stays in charge; the USB gate is the only one that installs the controller and
+removes the PS/2 one, so the characters can only arrive over USB.
 
 ## Quick start
 
@@ -437,8 +481,9 @@ make run         # boot and keep the serial log for inspection
 make test-net    # boot with a virtio-net NIC and verify DHCP/ARP/ICMP
 make test-tcp    # TCP client/server plus an HTTP exchange against a host peer
 make test-net-dns  # resolve a name against a host DNS server over TCP
+make test-usb-hotplug  # hotplug a USB keyboard into xHCI and type at it
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
-make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, IPv4 checksums, DHCP parsing, DNS)
+make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID, IPv4 checksums, DHCP parsing, DNS)
 make check-disk  # e2fsck + persisted-file checks on the latest test disk
 make disk        # generate the GPT/ext4 test disk
 make raid-disks  # generate the two RAID1 member disks
@@ -461,8 +506,9 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `QEMU_DISPLAY`, `QEMU_EXTRA`, `OVMF_CODE`, `OVMF_VARS`, `REQUIRE_AVX2`,
 `EXPECT_AVX2`, `EXPECT_RAID`, `EXPECT_NVME`, `EXPECT_REBUILD`, `EXPECT_AHCI`,
 `EXPECT_CRYPT`, `EXPECT_AES`, `EXPECT_NET`, `EXPECT_TCP`, `EXPECT_DNS`,
-`NET_MODE`, `NET_HOSTFWD`, `TCP_SERVE_SEC`, `TCP_RUN_TIMEOUT_SEC`, `DNS_NAME`,
-`DNS_ADDRESS`, `DNS_TTL`, `DNS_RUN_TIMEOUT_SEC`, `NVME_IMG`, `AHCI_IMG`,
+`EXPECT_USB`, `NET_MODE`, `NET_HOSTFWD`, `TCP_SERVE_SEC`, `TCP_RUN_TIMEOUT_SEC`,
+`DNS_NAME`, `DNS_ADDRESS`, `DNS_TTL`, `DNS_RUN_TIMEOUT_SEC`, `USB_WAIT`,
+`USB_KEYS`, `USB_RUN_TIMEOUT_SEC`, `MACHINE_EXTRA`, `NVME_IMG`, `AHCI_IMG`,
 `CRYPT_IMG`,
 `CRYPT_TAMPER_IMG`, `CRYPT_PASS`, `CRYPT_RECOVERY_PASS`, `CRYPT_M`,
 `CRYPT_PROMPT_TIMEOUT_SEC`, `CRYPT_PROMPT_WRONG_PASS`, `CRYPT_RUN_DISPLAY`,
@@ -484,12 +530,12 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/block/` | block-device registry, partitions, bounds checks, RAID1/RAID10, boot-time rebuild and the AES-256-XTS `crypt.device` |
 | `kernel/fs/` | GPT, writable checksummed ext4, checksummed JBD2 journal and the storage boot policy (including the console passphrase prompt) |
 | `kernel/crypto/` | AES, XTS, AES-NI, BLAKE2b and Argon2id (shared with the host tools) |
-| `drivers/` | PCI, legacy virtio-blk, NVMe and AHCI/SATA block device drivers, plus legacy virtio-net |
+| `drivers/` | PCI, legacy virtio-blk, NVMe and AHCI/SATA block device drivers, legacy virtio-net, and the xHCI controller with its USB HID keyboard decoder |
 | `scripts/` | QEMU runner, disk/RAID1/RAID10/crypt image builders, boot/PE/disk/RAID/journal/crypt checks, the serial and keyboard prompt drivers, tamper helper, size and reproducibility gates |
 | `tests/host/` | host unit tests for freestanding code |
 | `tools/` | host-side development tools (`gen-font.py`, `mkcrypt.c`, `gen-crc32c.py`) |
 | `docs/` | [build](docs/build.md), [boot](docs/boot.md), [storage](docs/storage.md), [checksums](docs/checksums.md), [crypto](docs/crypto.md), [input](docs/input.md), [network](docs/network.md),
-[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
+[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [USB/xHCI](docs/usb.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
 
 ## Versioning
 
@@ -546,13 +592,15 @@ phase 4C added a minimal TCP transport with a client, a listener, an HTTP
 exchange in both directions and six socket syscalls, gated end to end by a host
 peer over slirp and a QEMU host forward; phase 4D added a caching DNS stub
 resolver with a UDP query, a TCP fallback, CNAME chains, a TTL cache and the
-`SYS_RESOLVE` syscall, gated against a hermetic host DNS server. Remaining
-phase 3B work is online RAID rebuild, hot spare, scrub and a
-write-intent bitmap, RAID below encryption, a redundant ESP, TPM/keyfile
-keyslots and USB storage/hotplug; phase 4 continues with framebuffer (GOP)
-console input, a USB HID keyboard and virtual terminals, plus a routing table
-and richer resolver features on top of the phase 4B-4D stack. Later phases
-cover USB/audio/graphics, Workbench userspace, SMP/IOMMU and virtualisation. See
+`SYS_RESOLVE` syscall, gated against a hermetic host DNS server; phase 5A added
+a polled xHCI host controller and a USB boot keyboard that feeds the same input
+queue and can be hotplugged into the running guest. Remaining phase 3B work is
+online RAID rebuild, hot spare, scrub and a write-intent bitmap, RAID below
+encryption, a redundant ESP, TPM/keyfile keyslots and USB storage; phase 4
+continues with framebuffer (GOP) console input and virtual terminals, plus a
+routing table and richer resolver features on top of the phase 4B-4D stack;
+phase 5B adds HID mice and phase 5C UAC2 audio with a mixer. Later phases cover
+USB storage/audio/graphics, Workbench userspace, SMP/IOMMU and virtualisation. See
 [docs/roadmap.md](docs/roadmap.md) for the full sequence and the known
 specification gaps (Crug syntax, cross-architecture compilers and the OVMF
 minimum RAM floor).

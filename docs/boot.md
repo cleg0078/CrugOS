@@ -35,11 +35,12 @@ OVMF (UEFI firmware)
 `include/crug/bootinfo.h` is the single contract between loader and kernel.
 The structure is versioned (`magic = 0x43524731`, `version = 1`) and the kernel
 refuses to boot if either does not match or if required fields are invalid.
-Phases 1 through 4D did not change the layout; phase 3B-9 is the first
+Phases 1 through 5A did not change the layout; phase 3B-9 is the first
 kernel to consume the `command_line` field, phase 3B-10 falls back to an
-interactive serial passphrase prompt when no token is present, and phases 4C and
-4D read the non-secret `net.tcp=` / `net.serve=` / `net.dns=` /
-`net.dns-tcp=` / `net.name=` tokens from the same field. The loader caps
+interactive serial passphrase prompt when no token is present, phases 4C and 4D
+read the non-secret `net.tcp=` / `net.serve=` / `net.dns=` /
+`net.dns-tcp=` / `net.name=` tokens from the same field, and phase 5A adds
+`usb.wait=` / `usb.keys=`. The loader caps
 the command line at 511 bytes and the kernel wipes the page after it copies the
 `crypt.pass=` value.
 
@@ -99,7 +100,13 @@ post-snapshot allocations cannot push it over capacity.
 8. `input_init` and `keyboard_init`: reset `input.device`, then program the
    i8042 controller (translation on, IRQ1/IRQ12 masked) and enable scanning.
    The boot prints `CRUGOS: input ready (serial + keyboard)`, or
-   `(serial only)` when no i8042 keyboard answered.
+   `(serial only)` when no i8042 keyboard answered. `usb_init` then brings up the
+   first xHCI controller (PCI class 0C/03/30) and `usb_cmdline` reads
+   `usb.wait=<seconds>` and `usb.keys=<n>`: the boot prints
+   `CRUGOS: usb controller absent` when the machine has no xHCI function,
+   otherwise `CRUGOS: usb controller ready (xhci, <n> port(s))` and, once a boot
+   keyboard is enumerated, `CRUGOS: usb keyboard ready (endpoint 0x81, 8 byte
+   reports)`.
 9. `net_init`: reset `net.device` and `tcp_init`, then probe legacy virtio-net
    PCI functions (up to four `eth0`..`eth3`) and register them, bind the DHCP
    client to UDP port 68 and read the `net.tcp=<port>` / `net.serve=<seconds>`
@@ -159,9 +166,10 @@ post-snapshot allocations cannot push it over capacity.
     against `net.tcp=`, the same exchange through the socket syscalls, and one
     served request bounded by `net.serve=`) when that token was supplied, then
     the DNS checks (resolve `net.name=`, a cached second lookup and the
-    `SYS_RESOLVE` path) when a name was supplied.
+    `SYS_RESOLVE` path) when a name was supplied; then the USB check, which
+    waits for key reports only when `usb.wait=` or `usb.keys=` asked for it.
 14. `report_boot`, `storage_lock` (wipes the passphrase, the volume keys and
-    the bounce buffer), `CRUGOS: phase 4d boot ok`, `arch_exit_qemu(0x10)`.
+    the bounce buffer), `CRUGOS: phase 5a boot ok`, `arch_exit_qemu(0x10)`.
 
 Storage is still brought up with interrupts disabled: the virtio driver polls
 its used ring, the NVMe driver polls completion queues and the AHCI driver polls
@@ -314,6 +322,9 @@ CRUGOS: cpu ready
 CRUGOS: timer ready
 CRUGOS: heap ready
 CRUGOS: input ready (serial + keyboard)   # or: (serial only)
+CRUGOS: usb controller absent             # or: usb controller ready (xhci, 8 port(s))
+CRUGOS: usb keyboard ready (endpoint 0x81, 8 byte reports)  # USB keyboard attached
+CRUGOS: usb key 'a'                       # one per decoded key while usb.wait= is set
 CRUGOS: net ready (1 device(s))           # 0 when no NIC is present
 CRUGOS: virtio ready
 CRUGOS: nvme ready
@@ -357,7 +368,7 @@ CRUGOS: dns socket syscall ok
 CRUGOS: dns selftest ok
 CRUGOS: net selftest ok
 CRUGOS: selftest ok
-CRUGOS: phase 4d boot ok
+CRUGOS: phase 5a boot ok
 ```
 
 The `virtio : net eth0 mac ...` line, the lease, the ARP resolution, the echo
@@ -372,6 +383,12 @@ fetches the guest listener through a QEMU host forward. The five `dns` lines
 appear only when the loader carried `net.name=<host>`; `make test-net-dns` runs
 `scripts/run-net-dns.py`, which answers DNS over TCP on the host loopback and
 reaches the guest through slirp. See [network.md](network.md).
+
+The `usb` lines appear only on machines with an xHCI function: a default `q35`
+boot prints `CRUGOS: usb controller absent`, while `make test-usb-hotplug` adds
+`-device qemu-xhci` and hotplugs a keyboard over QMP, so the log shows the
+controller, the enumerated device and one `usb key` line per typed character.
+See [usb.md](usb.md).
 
 `raid ready` and `raid healthy`/`raid degraded` appear only on the RAID
 root path, and the `crypt` lines only on the encrypted path; the single-disk
@@ -396,8 +413,10 @@ init, newlines are also mirrored to the GOP text console, which uses an embedded
 8x16 font generated from a host PSF by `tools/gen-font.py`.
 
 Input has one entry point, `console_try_getc()` in `kernel/core/console.c`: it
-drains the serial line first and only then polls the i8042 keyboard and reads
-`input.device`'s byte queue. See [input.md](input.md) for the scancode decoder.
+drains the serial line first and only then polls the i8042 keyboard and runs
+`input.device`'s registered poll hook (which drains the xHCI event ring) before
+reading the byte queue. See [input.md](input.md) for the scancode decoder and
+[usb.md](usb.md) for the USB side.
 
 ## Known limitations
 
@@ -415,7 +434,9 @@ drains the serial line first and only then polls the i8042 keyboard and reads
   writes metadata only for members it rebuilds and never rewrites a valid
   member; a non-zero but invalid record is fatal.
 - Only the boot CPU runs. The LAPIC is enabled and `%gs` per-CPU data exists,
-  but AP startup, IOAPIC and external interrupts are phase 5 work.
+  but AP startup, IOAPIC and external interrupts are still outstanding.
+- USB input is polled from the console read path: no xHCI interrupt handler, one
+  controller, no hubs and boot-protocol HID keyboards only.
 - Empty slab pages are not returned to the PMM, and page-table pages created
   while splitting huge pages are not reclaimed.
 - Storage is writable with JBD2 replay, ordered metadata journaling and

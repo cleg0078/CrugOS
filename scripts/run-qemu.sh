@@ -25,6 +25,7 @@ QEMU_DISPLAY=${QEMU_DISPLAY:-none}
 QEMU_EXTRA=${QEMU_EXTRA:-}
 SERIAL_TCP=${SERIAL_TCP:-}
 NET_MODE=${NET_MODE:-}
+MACHINE_EXTRA=${MACHINE_EXTRA:-}
 
 for tool in "$QEMU"; do
     if ! command -v "$tool" >/dev/null 2>&1; then
@@ -63,6 +64,11 @@ fi
 EXTRA_ARGS=()
 if [[ -n "$QEMU_EXTRA" ]]; then
     read -r -a EXTRA_ARGS <<< "$QEMU_EXTRA"
+fi
+
+MACHINE_ARGS=(-machine q35)
+if [[ -n "$MACHINE_EXTRA" ]]; then
+    MACHINE_ARGS=(-machine "q35,$MACHINE_EXTRA")
 fi
 
 DISK_ARGS=()
@@ -130,10 +136,10 @@ if [[ -n "$SERIAL_TCP" ]]; then
     SERIAL_ARGS=(-serial "tcp:$SERIAL_TCP,server=on,wait=on")
 fi
 
-echo "run-qemu: booting $ESP_DIR (${MEMORY_MB} MiB, ${SMP} vCPU, cpu ${QEMU_CPU:-default}, accel ${QEMU_ACCEL:-default}, display ${QEMU_DISPLAY}, disk ${DISK_IMG:-none}, extra ${EXTRA_DISKS:-none}, nvme ${NVME_DISK:-none}, ahci ${AHCI_DISK:-none}, net ${NET_MODE:-none}, serial ${SERIAL_TCP:-file}, timeout ${TIMEOUT_SEC}s)"
+echo "run-qemu: booting $ESP_DIR (${MEMORY_MB} MiB, ${SMP} vCPU, cpu ${QEMU_CPU:-default}, accel ${QEMU_ACCEL:-default}, display ${QEMU_DISPLAY}, disk ${DISK_IMG:-none}, extra ${EXTRA_DISKS:-none}, nvme ${NVME_DISK:-none}, ahci ${AHCI_DISK:-none}, net ${NET_MODE:-none}, serial ${SERIAL_TCP:-file}, machine ${MACHINE_ARGS[1]}, timeout ${TIMEOUT_SEC}s)"
 set +e
 TMPDIR="$TMPDIR" timeout --foreground "$TIMEOUT_SEC" "$QEMU" \
-    -machine q35 \
+    "${MACHINE_ARGS[@]}" \
     -m "$MEMORY_MB" \
     -smp "$SMP" \
     "${ACCEL_ARGS[@]}" \

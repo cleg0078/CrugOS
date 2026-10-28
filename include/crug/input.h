@@ -12,6 +12,10 @@ void keyboard_poll(void);
    enabled), read one translated byte. */
 void input_init(void);
 void input_scancode(u8 scan);
+/* Queue a character decoded elsewhere, e.g. by the USB HID keyboard. */
+void input_char(u8 c);
+/* Optional poll hook run before the queue is read (the USB keyboard uses it). */
+void input_set_poll(void (*fn)(void));
 int input_try_getc(void);
 
 #endif /* CRUG_INPUT_H */

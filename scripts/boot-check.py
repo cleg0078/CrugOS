@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Verify a CrugOS boot: serial markers, guest version, CPU policy, storage mode, encryption, networking, TCP and DNS, then the exit code.
+"""Verify a CrugOS boot: serial markers, guest version, CPU policy, storage mode, encryption, networking, TCP, DNS and USB, then the exit code.
 
 usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE \
     [VERSION_FILE [EXPECT_AVX2 [EXPECT_RAID [EXPECT_NVME [EXPECT_REBUILD \
     [EXPECT_AHCI [EXPECT_CRYPT [EXPECT_AES [EXPECT_NET [EXPECT_TCP \
-    [EXPECT_DNS]]]]]]]]]]]
+    [EXPECT_DNS [EXPECT_USB]]]]]]]]]]]]
 """
 
 import re
@@ -32,7 +32,7 @@ REQUIRED_MARKERS = (
     "CRUGOS: selftest ok",
     "CRUGOS: nvme ready",
     "CRUGOS: ahci ready",
-    "CRUGOS: phase 4d boot ok",
+    "CRUGOS: phase 5a boot ok",
 )
 # A rejected unlock stops before scheduling, storage mounting and self-tests.
 WRONG_CRYPT_MARKERS = (
@@ -79,11 +79,11 @@ def fail(message: str, log: str) -> int:
 
 
 def main() -> int:
-    if len(sys.argv) not in tuple(range(3, 15)):
+    if len(sys.argv) not in tuple(range(3, 16)):
         print("usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE "
               "[VERSION_FILE [EXPECT_AVX2 [EXPECT_RAID [EXPECT_NVME "
               "[EXPECT_REBUILD [EXPECT_AHCI [EXPECT_CRYPT [EXPECT_AES "
-              "[EXPECT_NET [EXPECT_TCP [EXPECT_DNS]]]]]]]]]]]",
+              "[EXPECT_NET [EXPECT_TCP [EXPECT_DNS [EXPECT_USB]]]]]]]]]]]]",
               file=sys.stderr)
         return 2
 
@@ -100,6 +100,7 @@ def main() -> int:
     expect_net = sys.argv[11] if len(sys.argv) >= 12 else "no"
     expect_tcp = sys.argv[12] if len(sys.argv) >= 13 else "no"
     expect_dns = sys.argv[13] if len(sys.argv) >= 14 else "no"
+    expect_usb = sys.argv[14] if len(sys.argv) >= 15 else "no"
 
     if not serial_path.exists():
         return fail(f"missing serial log {serial_path}", "")
@@ -122,6 +123,8 @@ def main() -> int:
         return fail(f"invalid EXPECT_TCP {expect_tcp!r}", text)
     if expect_dns not in ("no", "yes"):
         return fail(f"invalid EXPECT_DNS {expect_dns!r}", text)
+    if expect_usb not in ("no", "yes"):
+        return fail(f"invalid EXPECT_USB {expect_usb!r}", text)
 
     required = list(REQUIRED_MARKERS)
     if expect_crypt == "wrong":
@@ -226,6 +229,22 @@ def main() -> int:
                          text):
             return fail("expected the resolver to report a resolved name", text)
 
+    if expect_usb == "yes":
+        for marker in (
+            "CRUGOS: input ready (serial only)",
+            "CRUGOS: usb controller ready (xhci",
+            "CRUGOS: usb keyboard ready",
+            "CRUGOS: usb selftest ok",
+        ):
+            if marker not in text:
+                return fail(f"missing serial marker: {marker!r}", text)
+        keys = re.findall(r"CRUGOS: usb key '(.)'", text)
+        if not keys:
+            return fail("expected the USB keyboard to decode at least one key", text)
+        if not re.search(r"CRUGOS: usb keyboard ready \(endpoint 0x[0-9a-f]{2}, "
+                         r"\d+ byte reports\)", text):
+            return fail("expected the boot keyboard endpoint to be reported", text)
+
     if expect_rebuild == "no" and "CRUGOS: raid rebuilt" in text:
         return fail("unexpected RAID member rebuild during boot", text)
     if expect_rebuild != "no":
@@ -257,7 +276,7 @@ def main() -> int:
           "nvme", expect_nvme, "rebuild", expect_rebuild,
           "ahci", expect_ahci, "crypt", expect_crypt, "aes", expect_aes,
           "net", expect_net, "tcp", expect_tcp, "dns", expect_dns,
-          "QEMU exit status", status)
+          "usb", expect_usb, "QEMU exit status", status)
     for line in boot_report:
         print("  " + line)
     return 0
