@@ -42,10 +42,27 @@ SECTIONS
         . += 32768;
         __stack_top = .;
 
+        /* Phase H3 IST stacks: a fault on a broken stack still needs a
+           writable one.  #DF gets 16 KiB, the other three 8 KiB each. */
         . = ALIGN(4096);
         __df_stack_bottom = .;
-        . += 8192;
+        . += 16384;
         __df_stack_top = .;
+
+        . = ALIGN(4096);
+        __nmi_stack_bottom = .;
+        . += 8192;
+        __nmi_stack_top = .;
+
+        . = ALIGN(4096);
+        __mc_stack_bottom = .;
+        . += 8192;
+        __mc_stack_top = .;
+
+        . = ALIGN(4096);
+        __db_stack_bottom = .;
+        . += 8192;
+        __db_stack_top = .;
         __bss_end = .;
     }
 

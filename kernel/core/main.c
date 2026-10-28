@@ -18,6 +18,7 @@
 #include <crug/audio.h>
 #include <crug/gfx.h>
 #include <crug/workbench.h>
+#include <crug/trap.h>
 
 void kernel_main(const boot_info *bi);
 
@@ -62,6 +63,7 @@ void kernel_main(const boot_info *bi)
 
     heap_init();
     heap_cmdline(bi);
+    trap_cmdline(bi);
     t.heap = arch_read_tsc();
     kprintf("CRUGOS: heap ready\n");
 
@@ -113,5 +115,7 @@ void kernel_main(const boot_info *bi)
        mouse and keyboard stay live.  Silent unless wb.hold= was supplied. */
     wb_hold();
     trace("K:exit-ok");
+    /* make test-trap: inject one fault and prove the report + policy. */
+    trap_test_run();
     arch_exit_qemu(0x10);
 }

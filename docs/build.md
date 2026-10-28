@@ -45,6 +45,7 @@ make test-workbench-drawer  # scroll, refresh and resize the System: drawer
 make test-workbench-select  # click drawer rows and drag its scrollbar
 make test-hardening  # boot crafted superblock/inode/crypt images and assert the rejections
 make test-heap   # corrupt the kernel heap and prove the integrity checker catches it
+make test-trap   # inject eight crafted faults and check the report, IST and panic
 make iso         # build a bootable hybrid UEFI ISO (build/<arch>/crugos.iso)
 make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
@@ -71,7 +72,7 @@ make test-crypt-keyboard  # type the passphrase on the PS/2 keyboard and boot
 make test-crypt-keyboard-wrong  # three wrong keyboard passphrases must lock the volume
 make crypt-run   # boot the encrypted disk in a QEMU window for real typing
 make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
-make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/USB HID keyboard and mouse descriptors and reports/pointer state/IPv4/TCP/UDP checksums/DHCP parsing/DNS/audio mixer, tone and PCM ring/framebuffer cursor/intuition windows, menus and gadgets, icon dragging, the send-to-front gadget and keyboard icon focus, the drawer viewport, scrollbar and refresh, the drawer body-input handler, the seven hardening validators, the heap integrity checker, 3235 checks
+make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/USB HID keyboard and mouse descriptors and reports/pointer state/IPv4/TCP/UDP checksums/DHCP parsing/DNS/audio mixer, tone and PCM ring/framebuffer cursor/intuition windows, menus and gadgets, icon dragging, the send-to-front gadget and keyboard icon focus, the drawer viewport, scrollbar and refresh, the drawer body-input handler, the seven hardening validators, the heap integrity checker, the trap report formatter and classification policy, 3400 checks
 make disk        # build the GPT/ext4 test disk at build/<arch>/disk.img
 make raid-disks  # build the two GPT/ext4 RAID1 member disks
 make raid10-disks  # build the four GPT/ext4 RAID10 member disks
@@ -177,6 +178,7 @@ options` prints the complete resolved set (including paths derived from
 | `EXPECT_HEAP` | `no` | `yes` requires the heap stress, guard and check markers written by `make test-heap` |
 | `HEAP_STRESS_OPS` | `4000` | operations the `heap.stress=` pass churns inside `make test-heap` |
 | `HEAP_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for the `make test-heap` boot |
+| `TRAP_TIMEOUT_SEC` | `60` | wall-clock budget in seconds for each boot of `make test-trap` |
 | `DEMO_DISPLAY` | `gtk` | QEMU display `make demo` opens (any `-display` value, for example `sdl` or `none`) |
 | `DEMO_HOLD_SEC` | `600` | seconds `make demo` keeps the desktop on screen before the guest exits by itself |
 | `DEMO_TIMEOUT_SEC` | `900` | wall-clock budget for the whole `make demo` boot |
@@ -312,7 +314,7 @@ OVMF 4M needs a substantial amount of RAM before it will boot from QEMU's
 | 512 | reliable; used by all gates |
 
 This is a firmware limit, not a kernel limit: the kernel load image is about
-764 KiB. The specification's 16 MiB headless target needs a leaner boot path and
+802 KiB. The specification's 16 MiB headless target needs a leaner boot path and
 is tracked in [roadmap.md](roadmap.md).
 
 ## Test disk
@@ -629,7 +631,8 @@ the pristine test disk and encrypted disk per case, patches exactly one field
 35 -- `CRUGOS: ext4 mount rejected (geometry)`, `CRUGOS: ext4 mount rejected
 (root extent)`, `CRUGOS: crypt unlock failed (kdf policy)` or `CRUGOS: crypt
 unlock failed (volume exceeds partition)` -- while the unpatched control must
-still reach `CRUGOS: phase h2 boot ok` and exit 33. Every case forbids
+still reach `CRUGOS: phase h3 boot ok` (the driver accepts any phase id) and
+exit 33. Every case forbids
 `CRUGOS: panic` and `trap   : page fault`, a hostile case must not print
 `CRUGOS: ext4 ready` or `CRUGOS: storage ready`, and a QEMU timeout fails the
 case. `--keep` keeps the patched images in `<serial-log dir>/hardening/`; the
@@ -645,6 +648,25 @@ log carries the stress and guard lines, the three detected corruption codes and
 `CRUGOS: heap stress failed (…)`, `CRUGOS: heap guard missed corrupt … (code
 N)` or `CRUGOS: heap check failed (…, code N)`. `make size` reports a
 244264 B (238 KiB) file and a 783106 B (764 KiB) load image.
+
+`make test-trap` is gate 46 and proves the phase H3 trap policy.
+[scripts/run-trap.py](../scripts/run-trap.py) boots the control plus eight
+recipes (`de`, `ud`, `gp`, `pf`, `df`, `nmi`, `mc`, `db`) from per-case
+disk copies under `build/x86_64/trap/`, each with
+`CMDLINE_EXTRA='trap.test=<recipe>'`, `QEMU_DISPLAY=none`, `NET_MODE=none` and
+a `TRAP_TIMEOUT_SEC` (60 s) budget. Every hostile boot must print
+`CRUGOS: trap test <recipe>`, the report's vector, IST and `from=kernel`
+fragments, `CRUGOS PANIC: <name>` and `CRUGOS: panic`, and exit 35; the control
+must reach `CRUGOS: phase h3 boot ok` and `CRUGOS: selftest ok`, exit 33 and
+never panic. No case may print `trap test unknown` or `trap test survived`, an
+exit 33 from a hostile case means the injection never ran, and a missing exit
+file or a 124 timeout is a hang. The driver prints
+`ok: trap <recipe> -> <name> (ist=N, exit 35)` per case and ends with
+`ok: trap policy reported 8 crafted fault(s) (control boot exit 33)`;
+`run-trap.py` accepts `--keep` to leave those disks in the serial-log
+directory, and `tests/host/test_trap.c` covers the same matrix on the host, so
+`make test-host` reports 3400 checks. `make size` reports a 253144 B (247 KiB)
+file and an 821986 B (802 KiB) load image.
 
 ## Interactive demo
 

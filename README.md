@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase H2 hardened kernel heap (`v0.32.0`)
+## Status: phase H3 trap policy and crash reports (`v0.33.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -45,9 +45,11 @@ body-input hook that hands a window's own presses, motions and releases to a
 handler. Release `v0.23.1`
 made that tree bootable media: `make iso` writes a hybrid UEFI ISO
 that boots from a USB stick or a CD-ROM, with no disk image and no test
-tokens baked in. Phase H1 hardened the boot path against crafted images, and
-phase H2 hardens the kernel heap with address-keyed page cookies, validated
-headers and a read-only integrity checker.
+tokens baked in. Phase H1 hardened the boot path against crafted images, phase
+H2 hardened the kernel heap with address-keyed page cookies, validated headers
+and a read-only integrity checker, and phase H3 gives every fault the same
+bounded report, classifies it for a kernel or a user frame, and delivers the
+four stack-destroying vectors on IST stacks.
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -832,6 +834,45 @@ still consistent.
   is 244264 B (238 KiB) on disk and the load image 783106 B (764 KiB); all 45
   gates pass.
 
+Phase H3 replaces the per-vector panic one-liner with a trap policy: one report
+shape for every fault, an explicit kernel-versus-user classification, and four
+IST stacks so the handler still runs when the fault destroyed the stack.
+
+- `include/crug/trap.h` keeps the `trap_frame` layout and adds
+  `TRAP_IST_DF`/`TRAP_IST_NMI`/`TRAP_IST_MC`/`TRAP_IST_DB` (1 to 4),
+  `enum trap_class { TRAP_HANDLED, TRAP_USER, TRAP_FATAL }`,
+  `trap_classify(vector, cs)` and `trap_ist_for(vector)`;
+- `kernel/lib/trapfmt.c` is the pure formatter (`trap_format()`, no
+  `kprintf`, no serial, no framebuffer): it writes at most 1024 bytes as
+  `CRUGOS: trap report <name> vector=<dec> error=0x<hex> ist=<dec> from=<kernel|user>`,
+  the saved `rip`/`cs`/`rflags`/`rsp`/`ss` line, a `#PF`-only fault line
+  (`present`/`write`/`user`/`reserved`/`instruction`, then `cr2`) and two
+  register lines, all lowercase and unpadded;
+- `kernel/arch/x86_64/idt.c`: `page_fault_panic()` is gone. Every vector
+  except the timer (32), the syscall gate (128) and `#BP` (still handled and
+  counted in `g_int3_seen`) builds a report, prints it and classifies:
+  `#BP` is handled in both rings, `#OF` is handled only for a user frame, the
+  user-killable set {0, 1, 6, 11, 12, 13, 14, 16, 17, 19, 21} is `TRAP_USER`
+  when `cs & 3 == 3` and fatal otherwise, and everything else is fatal; a
+  `TRAP_USER` fault panics as `panic("user-mode <name>")` until ring 3 exists;
+- `kernel/arch/x86_64/linker.ld`/`cpu.c`: `__df_stack` is 16 KiB (was 8 KiB)
+  and `__nmi_stack`/`__mc_stack`/`__db_stack` are 8 KiB each, all in `.bss`
+  after the boot stack (+32 KiB of bss) and loaded into `ist1`..`ist4`;
+  `rsp0` still points at the boot stack because the kernel never returns to
+  CPL3 yet;
+- `kernel/core/trap_test.c`: `trap.test=<recipe>` (de, ud, gp, pf, df, nmi,
+  mc, db) injects exactly one fault as the last action before
+  `arch_exit_qemu(0x10)`, so a control boot exits 33 and a hostile one 35;
+  `trap_cmdline()` runs right after `heap_cmdline()`;
+- `make test-trap` is the 46th gate: `scripts/run-trap.py` boots the control
+  plus eight recipes from per-case disks under `build/x86_64/trap/` and
+  requires the report vector/IST fragments, `CRUGOS PANIC: <name>` and
+  `CRUGOS: panic` with exit 35, while `TRAP_TIMEOUT_SEC` (60) bounds each boot;
+- `tests/host/test_trap.c` asserts every report shape, the classification
+  matrix and the IST routing on the host; `make test-host` reports 3400
+  checks, the kernel is 253144 B (247 KiB) on disk and the load image 821986 B
+  (802 KiB), and all 46 gates pass.
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -840,9 +881,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.32.0 (phase h2) -- Amiga-inspired microkernel bring-up
+CrugOS 0.33.0 (phase h3) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.32.0
+CRUGOS: version 0.33.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -891,7 +932,7 @@ CRUGOS: tcp http served (72 bytes)
 CRUGOS: net selftest ok
 CRUGOS: gfx ready (1024x768, cursor at 512,384)
 CRUGOS: selftest ok
-kernel : 0x0000000000100000 size=238 KiB
+kernel : 0x0000000000100000 size=247 KiB
 boot   : cpu=0 acpi_rsdp=0x1f77e000 fdt=0x0 initrd=0x0
 memory : 36 regions, usable 474080 KiB (462 MiB)
 pmm    : total=118520 free=118462 bitmap=131072 B
@@ -903,7 +944,7 @@ heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
 boot   : pmm=28552 us cpu=438 us vm=626 us traps=360 us timer=65357 us heap=60 us storage=94487 us sched=354 us syscall=122 us total=190359 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase h2 boot ok
+CRUGOS: phase h3 boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -1109,6 +1150,7 @@ make test-workbench-drawer  # scroll, refresh and resize the System: drawer
 make test-workbench-select  # click drawer rows and drag its scrollbar
 make test-hardening  # craft hostile superblock/inode/crypt images and boot them
 make test-heap   # corrupt the kernel heap and prove the integrity checker catches it
+make test-trap   # inject eight crafted faults and check the report, IST and panic
 make iso         # build a bootable hybrid UEFI ISO (build/x86_64/crugos.iso)
 make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
@@ -1150,7 +1192,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `WB_ICONS_RUN_TIMEOUT_SEC`, `WB_DRAWER_WAIT`, `WB_DRAWER_ACTS`, `WB_DRAWER_FILL`,
 `WB_DRAWER_RUN_TIMEOUT_SEC`, `WB_SELECT_WAIT`, `WB_SELECT_ACTS`,
 `WB_SELECT_FILL`, `WB_SELECT_RUN_TIMEOUT_SEC`, `HARDEN_TIMEOUT_SEC`,
-`HEAP_STRESS_OPS`, `HEAP_RUN_TIMEOUT_SEC`, `DEMO_DISPLAY`, `DEMO_HOLD_SEC`,
+`HEAP_STRESS_OPS`, `HEAP_RUN_TIMEOUT_SEC`, `TRAP_TIMEOUT_SEC`, `DEMO_DISPLAY`, `DEMO_HOLD_SEC`,
 `DEMO_TIMEOUT_SEC`, `DEMO_CMDLINE`, `DEMO_MACHINE_EXTRA`, `DEMO_QEMU_EXTRA`,
 `ISO_IMAGE`, `ISO_STAGE`, `ISO_FAT_IMG`, `ISO_SIZE_MB`, `ISO_VOLID`,
 `ISO_CMDLINE`, `ISO_DATE`, `ISO_RUN_TIMEOUT_SEC`, `EXPECT_ISO`, `ISO_IMG`,
@@ -1189,7 +1231,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `tests/host/` | host unit tests for freestanding code |
 | `tools/` | host-side development tools (`gen-font.py`, `mkcrypt.c`, `gen-crc32c.py`) |
 | `docs/` | [build](docs/build.md), [boot](docs/boot.md), [storage](docs/storage.md), [checksums](docs/checksums.md), [crypto](docs/crypto.md), [input](docs/input.md), [network](docs/network.md),
-[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [USB/xHCI](docs/usb.md), [audio](docs/audio.md), [graphics](docs/gfx.md), [Workbench](docs/workbench.md), [bootable ISO](docs/iso.md), [kernel heap](docs/heap.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
+[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [USB/xHCI](docs/usb.md), [audio](docs/audio.md), [graphics](docs/gfx.md), [Workbench](docs/workbench.md), [bootable ISO](docs/iso.md), [kernel heap](docs/heap.md), [trap policy](docs/traps.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
 
 ## Versioning
 

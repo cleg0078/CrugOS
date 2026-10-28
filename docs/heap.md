@@ -235,5 +235,6 @@ non-zero.
 - There is no host fuzzer of the allocation path yet; the host suite covers
   `heap_check()` against mirrored metadata, not random valid allocation
   sequences.
-- The remaining `specs/fix-p1/REPORT.md` items -- the non-`#BP` trap policy and
-  per-CPU `rsp0`, EFI entropy, and AHCI timeout bounce reuse -- are still open.
+- The remaining `specs/fix-p1/REPORT.md` items are still open: per-CPU `rsp0`
+  for ring 3, EFI entropy, and AHCI timeout bounce reuse. The non-`#BP` trap
+  policy itself landed in phase H3 (see [trap policy](traps.md)).

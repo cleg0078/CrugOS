@@ -51,7 +51,9 @@ adds `wb.shell=1` / `wb.sh=` for the shell window, phase 6D adds
 for drawer scrolling and refresh plus `wb.fill=<n>` to fill the root first, and
 phase 6H adds `wb.dsel=1` for click-selected drawer rows and a draggable
 scrollbar, and phase H2 adds `heap.stress=<1..200000>` and `heap.guard=1`,
-parsed by `heap_cmdline()` right after `heap_init()`. A boot
+parsed by `heap_cmdline()` right after `heap_init()`, and phase H3 adds
+`trap.test=<recipe>` (`de`, `ud`, `gp`, `pf`, `df`, `nmi`, `mc`, `db`) for the
+fault injector, parsed by `trap_cmdline()` right after `heap_cmdline()`. A boot
 medium that ships no block device (the hybrid
 ISO) passes `storage=none`, which is the one token that changes the storage
 contract instead of adding work to it. The
@@ -112,7 +114,8 @@ post-snapshot allocations cannot push it over capacity.
 6. `timer_init`: TSC frequency, TSC-deadline or LAPIC periodic. Interrupts
    stay disabled until the execution model exists.
 7. `heap_init`: slab caches and large-allocation headers; `heap_cmdline()`
-   then reads `heap.stress=` and `heap.guard=`. `CRUGOS: heap ready`.
+   then reads `heap.stress=` and `heap.guard=`, and `trap_cmdline()` reads
+   `trap.test=`. `CRUGOS: heap ready`.
 8. `input_init` and `keyboard_init`: reset `input.device`, then program the
    i8042 controller (translation on, IRQ1/IRQ12 masked) and enable scanning.
    The boot prints `CRUGOS: input ready (serial + keyboard)`, or
@@ -243,9 +246,10 @@ post-snapshot allocations cannot push it over capacity.
     `CRUGOS: heap check ok (S slab(s), O object(s), L large block(s))` and,
     when `heap.stress=` or `heap.guard=` was supplied, runs those passes too.
 14. `report_boot`, `storage_lock` (wipes the passphrase, the volume keys and
-    the bounce buffer), `CRUGOS: phase h2 boot ok`, then `wb_hold` (only when
+    the bounce buffer), `CRUGOS: phase h3 boot ok`, then `wb_hold` (only when
     `wb.hold=` was given: the guest stays alive with the desktop on screen until
-    the deadline), `arch_exit_qemu(0x10)`.
+    the deadline), `trap_test_run()` (only when `trap.test=` was given, so the
+    fault lands after the phase marker) and `arch_exit_qemu(0x10)`.
 
 Storage is still brought up with interrupts disabled: the virtio driver polls
 its used ring, the NVMe driver polls completion queues and the AHCI driver polls
@@ -510,15 +514,40 @@ CRUGOS: wb window 1 sent to front
 CRUGOS: wb action 6 front window 1
 CRUGOS: wb icons selftest ok (1 move(s), 1 front(s))
 CRUGOS: sh run 'ver'
-CRUGOS: sh out CrugOS 0.32.0 (phase h2), x86_64
+CRUGOS: sh out CrugOS 0.33.0 (phase h3), x86_64
 CRUGOS: wb selftest ok (1 drag(s), 1 action(s))
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb drawer selftest ok (3 scroll(s), 1 refresh(es))
 CRUGOS: wb select selftest ok (2 select(s), 1 scrollbar drag(s))
 CRUGOS: sh selftest ok (1 command(s))
 CRUGOS: selftest ok
-CRUGOS: phase h2 boot ok
+CRUGOS: phase h3 boot ok
 ```
+
+With `trap.test=<recipe>` the same boot ends differently: the injector runs after
+`CRUGOS: phase h3 boot ok`, injects exactly one fault and the guest exits 35
+instead of 33. A `trap.test=de` boot ends:
+
+```
+CRUGOS: trap test de
+CRUGOS: trap report divide error vector=0 error=0x0 ist=0 from=kernel
+CRUGOS: trap rip=0x10509b cs=0x8 rflags=0x10246 rsp=0x1c0f70 ss=0x10
+CRUGOS: trap regs rax=0x64 rbx=0x1de47000 rcx=0x1 rdx=0x0 rsi=0x12f693 rdi=0x136732 rbp=0x1c0f80
+CRUGOS: trap regs r8=0x0 r9=0x1 r10=0x98 r11=0x1312e0 r12=0x1de47000 r13=0x1cb000 r14=0x1de47000 r15=0x1de49000
+*** CRUGOS PANIC: divide error ***
+CRUGOS: panic
+```
+
+`trap.test=pf` adds a fault line between the saved-frame line and the
+register dump:
+
+```
+CRUGOS: trap fault present=no write=yes user=no reserved=no instruction=no cr2=0xffff800000000000
+```
+
+A `trap.test=df`, `nmi`, `mc` or `db` boot reports `ist=1`, `ist=2`, `ist=3` and
+`ist=4`. The formatter, the classification matrix and the eight recipes are in
+[traps.md](traps.md); `make test-trap` is the gate.
 
 The `virtio : net eth0 mac ...` line, the lease, the ARP resolution, the echo
 reply and `net selftest ok` appear only when a NIC is present and the network
@@ -606,14 +635,14 @@ replaced by the skip marker, and the USB device the firmware booted from shows
 up in the USB lines as an unsupported mass-storage function:
 
 ```
-CRUGOS: version 0.32.0
+CRUGOS: version 0.33.0
 CRUGOS: usb controller ready (xhci, 8 port(s))
 CRUGOS: usb device 46f4:0001 on port 1 (speed 4)
 CRUGOS: usb device class 8 on port 1 (unsupported)
 CRUGOS: storage skipped (storage=none)
 CRUGOS: heap check ok (6 slab(s), 8 object(s), 1 large block(s))
 CRUGOS: selftest ok
-CRUGOS: phase h2 boot ok
+CRUGOS: phase h3 boot ok
 ```
 
 `kernel/core/report.c` prints the machine description between them: kernel

@@ -101,7 +101,7 @@ must print.
 
 | Case | Patch | Required marker | Exit |
 | --- | --- | --- | --- |
-| `control` | none | `CRUGOS: phase h2 boot ok` (any phase id matches), `CRUGOS: ext4 ready`, `CRUGOS: storage ready`, `CRUGOS: writable storage ok`, `CRUGOS: selftest ok` | 33 |
+| `control` | none | `CRUGOS: phase h3 boot ok` (any phase id matches), `CRUGOS: ext4 ready`, `CRUGOS: storage ready`, `CRUGOS: writable storage ok`, `CRUGOS: selftest ok` | 33 |
 | `geometry-bpg` | superblock `+0x20` (`s_blocks_per_group`) = 100000 | `CRUGOS: ext4 mount rejected (geometry)` | 35 |
 | `geometry-ipg` | superblock `+0x28` (`s_inodes_per_group`) = 100000 | `CRUGOS: ext4 mount rejected (geometry)` | 35 |
 | `root-extent` | root inode `eh_max` (`inode + 44`) = 5, inode checksum recomputed | `CRUGOS: ext4 mount rejected (root extent)` | 35 |
@@ -214,11 +214,17 @@ ok: hardening pass 1 rejected 6 crafted image(s) (control boot exit 33)
 
 ## What is not covered
 
-- Report item 3 is still open. Every non-`#BP` exception still panics the
-  kernel, because a real fix needs the ring-3 trap policy: a per-CPU `rsp0`,
-  a user/kernel return path and a decision about what a fault from DPL3 may do.
-  The crafted-image gate avoids the panic by construction, not by policy; a
-  kernel bug that faults on a hostile image still panics.
+- Report item 3 is now phase H3, not this pass: every non-`#BP` exception
+  builds one bounded report and is classified by `trap_classify()` -- the
+  user-killable set is `TRAP_USER` for a CPL3 frame and `TRAP_FATAL` from ring 0,
+  `#BP` stays handled, and everything else is fatal -- and `#DF`, `#NMI`, `#MC`
+  and `#DB` run on their own IST stacks, with `__df_stack` grown to 16 KiB. See
+  [traps.md](traps.md) for the report contract, the classification matrix, the
+  `trap.test=` recipes and the `make test-trap` gate. What stays open is the
+  ring-3 half: there is no DPL3 process yet, so `rsp0` still points at the boot
+  stack, a `TRAP_USER` fault panics as `user-mode <name>` instead of killing a
+  thread, and the crafted-image gate still avoids the panic by construction
+  rather than by policy.
 - Heap hardening is now phase H2, not this pass: page cookies, validated slab
   headers, the doubly linked large-block list and the read-only integrity
   checker are documented in [heap.md](heap.md), which also lists what the

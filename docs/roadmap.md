@@ -1,6 +1,6 @@
 # Roadmap
 
-The specification defines 45 phases/gates. Phase 0 established the smallest
+The specification defines 46 phases/gates. Phase 0 established the smallest
 end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
 phase 1 makes the kernel own physical memory, page tables, exceptions and
 timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
@@ -964,13 +964,14 @@ change for memory management, storage, SMP or drivers.
 
 Phase H2 closed the heap free-list and magic work (report items F7/F8) with
 address-keyed page cookies, validated slab headers and a read-only integrity
-checker. The next hardening steps are the trap policy and a per-CPU `rsp0`
-(report item 3: a non-`#BP` exception still panics), EFI entropy, the AHCI
-timeout bounce reuse, and host-side fuzzers for ext4, GPT and the crypt format.
-Those are prerequisites for ring 3: a DPL3 process would reach the syscall and
-trap paths that the crafted-image gate only exercises from ring 0, and several
-of the remaining Mediums become Critical once a hostile process can call them
-directly.
+checker. Phase H3 then replaced the per-vector panic one-liner with a trap policy
+and put the four stack-destroying vectors on IST stacks. What remains is a
+per-thread `rsp0` and the rest of ring 3, a hook that kills a user thread
+instead of panicking, EFI entropy, the AHCI timeout bounce reuse, and a host-side
+mount-path fuzzer for ext4, GPT and the crypt format. Those are prerequisites for
+a hostile process: a DPL3 frame would reach the syscall and trap paths that the
+crafted-image gate only exercises from ring 0, and several of the remaining
+Mediums become Critical once one can call them directly.
 
 ## Phase H2 - hardened kernel heap (done)
 
@@ -1021,6 +1022,66 @@ directly.
 - docs: `docs/heap.md` plus README, roadmap, versioning, build, boot, hardening,
   workbench and iso.
 - All 45 gates pass at `v0.32.0`.
+
+## Phase H3 - trap policy and crash reports (done)
+
+- Phase H3 replaces the per-vector panic one-liner after the H1 and H2 passes.
+  Before it, every non-`#BP` exception printed one
+  `trap   : vector N (...) error=.. rip=..` line and panicked immediately: no
+  saved-frame contract, no kernel-versus-user decision, and only `#DF` on an
+  IST stack.
+- `include/crug/trap.h` keeps the `trap_frame` layout and adds
+  `TRAP_IST_DF 1u`, `TRAP_IST_NMI 2u`, `TRAP_IST_MC 3u`, `TRAP_IST_DB 4u`,
+  `enum trap_class { TRAP_HANDLED = 0, TRAP_USER = 1, TRAP_FATAL = 2 }`,
+  `struct trap_report_info { u64 vector; u64 error; u32 ist; u64 cr2; int has_cr2; const char *name; }`
+  and the `trap_classify()`, `trap_ist_for()`, `trap_format()`,
+  `trap_cmdline()` and `trap_test_run()` entry points.
+- `kernel/lib/trapfmt.c` is the pure formatter (no `kprintf`, no serial, no
+  framebuffer) and writes at most 1024 bytes: a
+  `CRUGOS: trap report <name> vector=<dec> error=0x<hex> ist=<dec> from=<kernel|user>`
+  head, the saved `rip`/`cs`/`rflags`/`rsp`/`ss` line, a `#PF`-only line
+  with `present`/`write`/`user`/`reserved`/`instruction` and `cr2`, and two
+  register lines. Hex is lowercase and unpadded, so zero prints as `0`.
+- `kernel/arch/x86_64/idt.c` drops `page_fault_panic()`: vectors 32 (timer),
+  128 (syscall) and 3 (`#BP`, still handled and counted in `g_int3_seen`) return
+  early, and every other vector builds a `trap_report_info`, formats the report,
+  `console_write()`s it and classifies it.
+- `trap_classify()` keeps `#BP` `TRAP_HANDLED` in both rings and `#OF`
+  `TRAP_HANDLED` only for a user frame; the user-killable set {0 divide, 1 debug,
+  6 invalid opcode, 11 segment not present, 12 stack-segment, 13 general
+  protection, 14 page fault, 16 x87, 17 alignment, 19 SIMD, 21 control
+  protection} is `TRAP_USER` when `cs & 3 == 3` and `TRAP_FATAL` from ring 0,
+  and everything else (`#NMI`, `#DF`, `#MC`, 5, 7, 9, 10, 15, 20, 22..31 and
+  >= 32) is fatal in both rings. `TRAP_USER` currently prints the report and
+  panics with `panic("user-mode <name>")`, which is where thread killing will
+  go.
+- `kernel/arch/x86_64/linker.ld` and `cpu.c` give the four stack-destroying
+  vectors their own IST stacks in `.bss` after the boot stack: `__df_stack` is
+  16 KiB (was 8 KiB) and `__nmi_stack`/`__mc_stack`/`__db_stack` are 8 KiB each
+  (+32 KiB of bss) and loaded into TSS `ist1`..`ist4`;
+  `trap_ist_for()` routes vector 8 to IST1, 2 to IST2, 18 to IST3 and 1 to
+  IST4, everything else staying on the current stack. `rsp0` still points at
+  the boot stack because the kernel never `iretq`s to CPL3 yet.
+- `kernel/core/trap_test.c` parses `trap.test=<recipe>` (at most 16 chars;
+  de, ud, gp, pf, df, nmi, mc, db) right after `heap_cmdline()` and
+  `trap_test_run()` injects exactly one fault as the last action before
+  `arch_exit_qemu(0x10)`, so it runs after `CRUGOS: phase h3 boot ok`. An
+  unknown value prints `CRUGOS: trap test unknown <value>` and injects
+  nothing.
+- `make test-trap` is the 46th gate: `scripts/run-trap.py` boots the control
+  plus the eight recipes from per-case disk copies under `build/x86_64/trap/`
+  with a `TRAP_TIMEOUT_SEC` (60) budget and requires the recipe marker, the
+  report vector/IST/`from=kernel` fragments, `CRUGOS PANIC: <name>`,
+  `CRUGOS: panic` and exit 35 for each hostile boot, while the control exits 33
+  with the phase marker and no panic.
+- `tests/host/test_trap.c` covers the classification matrix, the IST routing,
+  the page-fault fault line, the no-fault-line path, a user frame and the
+  truncation bound on the host; `make test-host` reports 3400 checks and
+  `make size` reports a 253144 B (247 KiB) file and an 821986 B (802 KiB) load
+  image.
+- docs: `docs/traps.md` plus README, roadmap, versioning, build, boot, hardening,
+  heap, workbench and iso.
+- All 46 gates pass at `v0.33.0`.
 
 ## Bootable media - hybrid UEFI ISO (done, `v0.23.1`)
 

@@ -52,6 +52,9 @@ typedef struct tss64 {
 
 extern char __stack_top[];
 extern char __df_stack_top[];
+extern char __nmi_stack_top[];
+extern char __mc_stack_top[];
+extern char __db_stack_top[];
 
 cpu_features g_cpu_features;
 
@@ -208,6 +211,11 @@ static void gdt_init(void)
     memset(&g_tss, 0, sizeof(g_tss));
     g_tss.rsp0 = (u64)(uintptr)__stack_top;
     g_tss.ist1 = (u64)(uintptr)__df_stack_top;
+    g_tss.ist2 = (u64)(uintptr)__nmi_stack_top;
+    g_tss.ist3 = (u64)(uintptr)__mc_stack_top;
+    g_tss.ist4 = (u64)(uintptr)__db_stack_top;
+    /* rsp0 stays the boot stack: the kernel is ring-0 only and never returns
+       to ring 3 through a trap yet (see docs/traps.md, phase H3 limits). */
     g_tss.iomap_base = sizeof(g_tss);
 
     gdt_set(1, 0, 0xfffff, 0x9a, 0xa0);

@@ -67,7 +67,7 @@ void idt_init(void)
 
     for (i = 0; i <= 32; i++) {
         u8 dpl = (i == 3 || i == 4) ? 3 : 0;
-        u8 ist = (i == 8) ? 1 : 0;
+        u8 ist = (u8)trap_ist_for((u64)i);
 
         idt_set(i, isr_stub_table[i], ist, dpl);
     }
@@ -78,17 +78,33 @@ void idt_init(void)
     __asm__ volatile("lidt %0" : : "m"(g_idtr) : "memory");
 }
 
-static void page_fault_panic(trap_frame *f)
+static const char *trap_vector_name(u64 vector)
 {
-    kprintf("trap   : page fault rip=%p cr2=%p error=%p\n",
-            (void *)(uintptr)f->rip, (void *)(uintptr)read_cr2(),
-            (void *)(uintptr)f->error);
-    panic("page fault");
+    return vector < 32 ? exception_names[vector] : "interrupt";
+}
+
+/* Phase H3: every fault writes the crash report before the policy decides
+   whether the kernel survives it.  Rings 3 faults are only survivable once
+   their ring-3 thread exists; until then both classes panic. */
+static void trap_report(trap_frame *frame)
+{
+    struct trap_report_info info;
+    char buf[1024];
+
+    info.vector = frame->vector;
+    info.error = frame->error;
+    info.ist = trap_ist_for(frame->vector);
+    info.has_cr2 = frame->vector == 14;
+    info.cr2 = info.has_cr2 ? read_cr2() : 0;
+    info.name = trap_vector_name(frame->vector);
+    if (trap_format(frame, &info, buf, sizeof(buf)) > 0)
+        console_write(buf);
 }
 
 void trap_dispatch(trap_frame *frame)
 {
     u64 v = frame->vector;
+    enum trap_class cls;
 
     if (v == 32) {
         timer_on_irq(frame);
@@ -103,16 +119,12 @@ void trap_dispatch(trap_frame *frame)
         kprintf("trap   : breakpoint handled at rip=%p\n", (void *)(uintptr)frame->rip);
         return;
     }
-    if (v == 14)
-        page_fault_panic(frame);
 
-    kprintf("trap   : vector %llu (%s) error=%p rip=%p rsp=%p\n",
-            v, v < 32 ? exception_names[v] : "interrupt",
-            (void *)(uintptr)frame->error, (void *)(uintptr)frame->rip,
-            (void *)(uintptr)frame->rsp);
-    if (v == 8)
-        panic("double fault");
-    panic("unhandled CPU exception");
+    trap_report(frame);
+    cls = trap_classify(v, frame->cs);
+    if (cls == TRAP_USER)
+        panic("user-mode %s", trap_vector_name(v));
+    panic("%s", trap_vector_name(v));
 }
 
 int trap_selftest_int3(void)
