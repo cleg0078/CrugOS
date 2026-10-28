@@ -85,14 +85,15 @@ if [ "$mode" = crash ]; then
     debugfs -w -R "write $tmp/crash.txt /simulate-crash" "$fs_image" >/dev/null
 fi
 
-# Optional ring-3 programs (make test-user / test-user2 / test-user3): the
-# kernel loads /bin/hello, /bin/badptr, /bin/fault, /bin/iso and the shell
-# /bin/sh from the root filesystem, plus the script /etc/sh.rc it runs.
+# Optional ring-3 programs (make test-user through test-user4): the kernel
+# loads /bin/hello, /bin/badptr, /bin/fault, /bin/iso, the shell /bin/sh, the
+# spawn probe /bin/spawn and its child /bin/child from the root filesystem,
+# plus the script /etc/sh.rc the shell runs.
 # USER_DIR comes from the environment so the raid/nvme/ahci/crypt call sites
 # keep their positional arguments unchanged.
 if [ -n "${USER_DIR:-}" ]; then
     debugfs -w -R "mkdir /bin" "$fs_image" >/dev/null 2>&1 || true
-    for prog in hello badptr fault iso sh; do
+    for prog in hello badptr fault iso sh spawn child; do
         if [ ! -f "$USER_DIR/$prog" ]; then
             echo "mkdisk: missing user program $USER_DIR/$prog" >&2
             exit 1

@@ -181,6 +181,12 @@ placeholder, `panic("user-mode <name>")`, is gone. The exception is a user-frame
 `#DF`, `#NMI` or `#MC`: those are `TRAP_FATAL`, there is no healthy thread to
 blame, and they still panic.
 
+Phase U4 does not change this policy. `SYS_EXEC` replaces the calling image in
+place - it rewrites the saved trap frame's `rip` and `rsp` - but the thread and
+its tid stay the same, so a fault taken after an exec is reported against the
+same thread id, and the kill path above ends that thread exactly as it does for
+any other ring-3 program.
+
 ## IST stacks
 
 A fault that arrives while the CPU is on a broken stack cannot be reported on

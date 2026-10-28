@@ -99,4 +99,14 @@ void test_argv_functions(void)
     CHECK(exec_args_build(g_area, sizeof(g_area), ARGV_BASE, 2, argv, 0, 0) == -1);
     CHECK(exec_args_build(g_area, sizeof(g_area), ARGV_BASE, 2, 0, 0, &rsp) == -1);
     CHECK(exec_args_build(g_area, 63u, ARGV_BASE, 2, argv, 0, &rsp) == -1);
+
+    /* Phase U4: exec_args_ok is the predicate the syscall layer applies to
+       argv copied out of user memory before it builds the block. */
+    CHECK(exec_args_ok(0u, 0u) == 1);
+    CHECK(exec_args_ok(2u, 17u) == 1);
+    CHECK(exec_args_ok(EXEC_ARGS_MAX, EXEC_ARGS_STR_MAX) == 1);
+    CHECK(exec_args_ok(EXEC_ARGS_MAX + 1u, 0u) == 0);
+    CHECK(exec_args_ok(0xffffffffu, 0u) == 0);
+    CHECK(exec_args_ok(0u, EXEC_ARGS_STR_MAX + 1ull) == 0);
+    CHECK(exec_args_ok(2u, ~0ull) == 0);
 }

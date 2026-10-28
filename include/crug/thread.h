@@ -61,7 +61,8 @@ typedef struct thread {
     u64 user_rip;
     u64 user_rsp;
     u32 flags;
-    u32 space_zero;
+    /* tid of the thread that spawned this one, 0 for the kernel (phase U4). */
+    u32 parent_id;
     /* Private address space; 0 for every kernel thread. */
     vm_space *space;
     /* Open files: fds 3..10 index this table (phase U3). */
@@ -81,6 +82,10 @@ void thread_kill_current(i64 code) CRUG_NORETURN;
 void sched_yield(void);
 void sched_tick(void);
 thread *sched_current(void);
+
+/* Find a live thread by tid (phase U4: SYS_WAIT reaps a child by id).
+   Returns 0 when no such thread is registered. */
+thread *thread_find(u32 id);
 u64 sched_switches(void);
 u32 thread_id(thread *t);
 const char *thread_name(thread *t);

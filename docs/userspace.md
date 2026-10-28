@@ -8,17 +8,21 @@ U2 then turned the single shared window into one PML4 per ring-3 thread, so two
 programs run at the same time with the same virtual address pointing at
 different frames. Phase U3 puts a real shell in ring 3: new file syscalls reach
 the ext4 root, the kernel passes `argc`/`argv` on the initial stack, and
-`/bin/sh` reads a script from the disk and writes a file back.
+`/bin/sh` reads a script from the disk and writes a file back. Phase U4 adds a
+process model to ring 3: `SYS_SPAWN` starts a program image as a child thread,
+`SYS_WAIT` blocks for its exit code, and `SYS_EXEC` replaces the calling image
+in place while keeping its tid.
 
-The current gate is `make test-user3` (gate 50): it boots with `user.test=3`,
-runs the three U1 programs and the U2 isolation pair, then runs `/bin/sh` on
-`/etc/sh.rc` and checks that the script's `write` created `/shout.txt` on the
-disk. `make test-user2` (gate 49) still covers the isolation pair alone.
+The current gate is `make test-user4` (gate 51): it boots with `user.test=4`,
+runs the U1 trio, the U2 isolation pair, the U3 shell and then `/bin/spawn`,
+which spawns `/bin/child`, waits for exit 5 and execs the child image. The
+earlier gates keep their levels: `make test-user3` (gate 50) stops at the shell,
+`make test-user2` (gate 49) at the isolation pair.
 
 Nothing in these phases changes the boot paths, the disk image format or the
-loaded program ABI the UEFI loader uses. The kernel gains `SYS_WRITE` and the
-file syscalls plus one syscall mode switch; every non-user gate still boots with
-no user program at all.
+loaded program ABI the UEFI loader uses. The kernel gains `SYS_WRITE`, the file
+syscalls and the spawn/wait/exec calls plus one syscall mode switch; every
+non-user gate still boots with no user program at all.
 
 ## Why ring 3 now
 
@@ -274,7 +278,7 @@ scans past `cap`.
 4096 bytes, and the kernel copies in 256-byte chunks into a stack buffer
 (`SYS_BOUNCE_MAX` covers the larger message ports) and `kprintf`s each chunk. In
 U3 the same call also writes to an open file when `fd >= 3`; the console
-behaviour is unchanged. `SYS_MAX` is 21. `SYS_EXIT` (8) from CPL3 records the exit
+behaviour is unchanged. `SYS_MAX` is 24. `SYS_EXIT` (8) from CPL3 records the exit
 code and ends only that thread; the kernel continues. `SYS_EBUSY` (-16) is the
 error a caller gets when a thread cannot be created.
 
@@ -328,7 +332,7 @@ pending write should remount it; the serial log shows
 
 `SYS_LISTDIR` copies newline-separated names into the user buffer and NUL
 terminates the result, so a user program can list `/` without knowing the
-on-disk directory format. `SYS_MAX` is 21, and any number at or above it returns
+on-disk directory format. `SYS_MAX` is 24, and any number at or above it returns
 `SYS_ENOSYS`. `SYS_ENOENT` (-2) is the new error for a path that does not exist.
 
 ## Scheduler and user threads
@@ -385,7 +389,8 @@ exactly which program died.
 `user/` holds the sources and the linker scripts; `make user` builds them and
 `scripts/mkdisk.sh` writes them into `/bin` when `USER_DIR` is set. The U1 three
 run one after another; the U2 isolation pair runs at the same time; the U3 shell
-runs last, on its own, after the pair has been joined.
+runs on its own, after the pair has been joined; and the U4 spawn test runs last,
+after the shell, because it starts and reaps a program of its own.
 
 | Program | What it proves | Expected exit |
 | --- | --- | --- |
@@ -394,6 +399,8 @@ runs last, on its own, after the pair has been joined.
 | `/bin/fault` | a store above the window kills only the program | -14 |
 | `/bin/iso` | two instances at the same VA see different frames | 0 |
 | `/bin/sh` | a user program reads a script from ext4 and writes a file back | 7 |
+| `/bin/spawn` | spawn, wait and in-place exec all work from ring 3 | 5 |
+| `/bin/child` | a spawned image receives its argv and exits for its parent | 5 |
 
 `hello.c` prints `CRUGOS: user hello from ring 3` and returns 0. `badptr.c` calls
 `SYS_WRITE` with `0x00100000` (a kernel address) and checks that the return value
@@ -409,6 +416,13 @@ address** maps to two different physical frames (it prints
 `CRUGOS: user isolation frames 0x28000 vs 0x38000 at 0x8000030000`), then joins
 both and counts mismatches. Two words `0x15500b00` and `0x15500c00` mean tids 11
 and 12 both kept their own value.
+
+`spawn.c` starts `/bin/child` with `("/bin/child", "from-spawn")`, prints the
+returned tid, waits for exit 5 and checks the code, then execs `/bin/child` with
+`from-exec`, so one program proves both the child path and the in-place
+replacement. `child.c` prints its tid, `argc` and `argv[1]`, then returns 5.
+A spawn failure makes spawn return 1, a wrong child code 2 and an exec failure 3,
+so the gate can tell which step broke.
 
 ## The ring-3 shell
 
@@ -426,7 +440,7 @@ path. It executes one command per line:
 
 | Command | Effect |
 | --- | --- |
-| `ver` | print the version line |
+| `ver` | print `CrugOS ring-3 shell (phase u4)` |
 | `echo TEXT` | print `TEXT` |
 | `cat FILE` | read the file and write its bytes to the console |
 | `ls PATH` | list a directory |
@@ -452,6 +466,72 @@ flush; the second `cat` reads back the 22 bytes the shell wrote (21 characters
 plus the newline that `write` appends). `exit 7` is the code `make test-user3`
 expects, and `check-disk --expect-shell-write` checks the bytes on disk after a
 clean umount and `e2fsck`.
+
+## Starting another program: `SYS_SPAWN`
+
+`SYS_SPAWN` (21) takes `(path, argc, argv)` and starts a new program image as
+a new ring-3 thread, returning its tid. It is the first time a user program -
+not the kernel - decides what runs next.
+
+`elf_spawn_user(path, argc, argv, parent_id, out)` in `kernel/exec/elf_exec.c`
+is the old `elf_exec_run` with two additions: it copies an `argv` block onto
+the new stack, and it stores the caller's tid in the new `parent_id` field of
+`struct thread`. `elf_exec_run(path, out)` remains the `argc == 0` wrapper and
+`elf_exec_run_args(path, argc, argv, out)` passes parent id 0, which is how the
+kernel-launched programs (selftest, shell) differ from children.
+
+The child gets a fresh `vm_space`, a four-page stack and its own descriptor
+table; it inherits nothing from the caller. `/bin/spawn` proves the path: it
+prints `CRUGOS: user spawn start`, spawns `/bin/child` with
+`{"/bin/child", "from-spawn"}`, prints its tid and waits for exit 5.
+
+## Waiting: `SYS_WAIT`, `parent_id` and `thread_find`
+
+`SYS_WAIT(tid)` (22) blocks until that child exits and returns its code. The
+new `thread_find(id)` in `kernel/core/thread.c` walks a global all-threads
+list held by the scheduler; the list keeps zombies, so a wait that arrives after
+the child has already exited still finds the record and its stored exit code.
+Ids are monotonic, so a stale tid never matches a recycled thread.
+
+The kernel accepts the wait only when the target's `parent_id` is the caller's
+tid and the target is not the caller; anything else returns the new
+`SYS_ESRCH` (-3). A successful wait reaps the child through the existing
+`thread_join_code()`, and only then is the thread removed.
+
+## exec: replacing the image in place
+
+`SYS_EXEC(path, argc, argv)` (23) does not start a thread: it replaces the
+calling image. `elf_exec_in_place()` loads the ELF into a fresh `vm_space`,
+points the current thread's `space`, `user_rip` and `user_rsp` at it, and
+calls `vm_space_activate()` **before** destroying the old space, because CR3
+still points at the old tables while the loader runs; destroying first would
+free the page tables the CPU is walking.
+
+Back in the syscall layer the saved trap frame is rewritten (`frame->rip`,
+`frame->rsp` and `frame->rax = 0`) before the `iretq`, so the return from the
+syscall lands at the new entry point with the new stack. The thread keeps its
+tid and its kernel stack: `/bin/spawn` execs `/bin/child` with `from-exec`
+and the log prints `CRUGOS: user exec /bin/child (tid 14)` on the same tid that
+spawned the child. A CPL0 caller gets `SYS_EINVAL`, because the kernel has no
+image to replace.
+
+## Passing arguments across the syscall boundary
+
+All three calls take a user `argv` array of pointers plus a count.
+`syscall_argv()` in `kernel/core/syscall.c` turns that into a kernel copy:
+
+- a CPL3 caller is range-checked with `uaccess_check` and copied with
+  `uaccess_user_str`/`uaccess_user_read` into the static
+  `g_argv_buf[EXEC_ARGS_STR_MAX]`, one bounded string at a time;
+- a CPL0 caller keeps the identity-map path, `harden_range_ok` plus `memcpy`;
+- both end with `exec_args_ok(argc, str_bytes)`, a pure predicate in
+  `kernel/exec/argv.c` that rejects more than `EXEC_ARGS_MAX` (16) arguments
+  or more than `EXEC_ARGS_STR_MAX` (2048) bytes of strings.
+
+The arguments are enforced before the ELF is loaded, so an oversized list cannot
+allocate a space. `exec_args_build()` then lays out the strings, `envp[]`,
+`argv[]` and the `argc` word in a 4 KiB block at the top of the new user stack,
+16-byte aligned, and `rsp` points at the `argc` word.
 
 ## Building a user program
 
@@ -479,9 +559,9 @@ The build rule is a single Makefile target:
 make user
 ```
 
-`USER_PROGRAMS` is `hello badptr fault iso sh`. The common rule compiles
-`user/*.c` with `-fcrug-kernel -ffreestanding -mcmodel=large -nostdlib -no-pie
--Wl,-T,user/user.ld` into `build/x86_64/user/<name>`; `iso` and `sh` have
+`USER_PROGRAMS` is `hello badptr fault iso sh spawn child`. The common rule
+compiles `user/*.c` with `-fcrug-kernel -ffreestanding -mcmodel=large -nostdlib
+-no-pie -Wl,-T,user/user.ld` into `build/x86_64/user/<name>`; `iso` and `sh` have
 explicit rules of their own because they link with `user/iso.ld` and
 `user/sh.ld` (`ISO_LDFLAGS := -nostdlib -static -no-pie -Wl,--build-id=none
 -Wl,-T,user/iso.ld`).
@@ -517,70 +597,73 @@ warning at disk-build time and a "did not start" failure at run time.
 | `CRUGOS: user shell finished (exit <n>)` | after join | the shell thread is gone |
 | `CRUGOS: storage remounted read-write` | kernel write flush | the root was remounted for a pending write |
 | `CRUGOS: storage remounted read-only` | kernel write flush | back to the read-only mount |
+| `CRUGOS: user spawn test start` | `user.test=4` | the kernel is about to run `/bin/spawn` |
+| `CRUGOS: user spawn start` | from `/bin/spawn` | before `SYS_SPAWN` |
+| `CRUGOS: user spawn tid <n>` | from `/bin/spawn` | `SYS_SPAWN` returned the child tid |
+| `CRUGOS: user child running (tid <n>)` | from `/bin/child` | a new image reached ring 3 |
+| `CRUGOS: user child argc <n>` | from `/bin/child` | the argv block arrived |
+| `CRUGOS: user child arg <text>` | from `/bin/child` | `argv[1]` is visible |
+| `CRUGOS: user spawn child exit <n>` | from `/bin/spawn` | `SYS_WAIT` returned the code |
+| `CRUGOS: user spawn exec` | from `/bin/spawn` | it is about to replace its own image |
+| `CRUGOS: user exec <path> (tid <n>)` | kernel syscall path | `SYS_EXEC` replaced the image in the same thread |
+| `CRUGOS: user spawn test ok (child exit 5, exec exit 5)` | end of level 4 | both the child and the exec path behaved |
 | `CRUGOS: user selftest ok (3 program(s), 1 fault(s))` | end | the U1 programs behaved |
 
 The counting line is unchanged: it counts the sequential U1 programs, not the
-isolation pair and not the shell. The crash report lines
+isolation pair, the shell or the spawn test. The crash report lines
 (`CRUGOS: trap report ...`) are documented in [traps.md](traps.md) and appear
-between the fault line and the kill line.
+between `user fault writing above the window` and the
+`user fault page fault at rip=...` line.
 
 ## The gate
 
-`make test-user3` is gate 50 and the only gate that sets `EXPECT_USER=yes`,
-`EXPECT_USERS=yes` and `EXPECT_USHELL=yes`:
+`make test-user4` is gate 51 and the only gate that sets
+`EXPECT_SPAWN=yes`; it needs the three earlier user flags as well:
 
 ```sh
-make test-user3
+make test-user4
 ```
 
-It rebuilds the ESP and the disk with all five programs (`disk` depends on
-`user`), boots with `user.test=3` on the kernel command line under a
-`SHELL_RUN_TIMEOUT_SEC` (240) budget, then runs `scripts/boot-check.py` with the
-new final argument `EXPECT_USHELL` (`argv[29]`; `EXPECT_USER` is `argv[27]` and
-`EXPECT_USERS` is `argv[28]`) plus `check-disk --expect-shell-write`. The
-argument-count guard is now `tuple(range(3, 31))`. Every other gate keeps the
-three flags at `no`, so boot-check fails a plain boot that prints any user,
-isolation or shell marker - the feature must be dormant unless the token is
-present.
+It rebuilds the ESP and the disk with all seven programs (`disk` depends on
+`user`), boots with `user.test=4` on the kernel command line under a
+`SPAWN_RUN_TIMEOUT_SEC` (240) budget, then runs `scripts/boot-check.py` with the
+new final argument `EXPECT_SPAWN` (`argv[30]`; `EXPECT_USER` is `argv[27]`,
+`EXPECT_USERS` is `argv[28]` and `EXPECT_USHELL` is `argv[29]`). The
+argument-count guard is now `tuple(range(3, 32))`. The gate then runs the plain
+`check-disk` pass: it does not pass `--expect-shell-write`, so its check-disk
+line has no `/shout.txt` clause, and that write proof stays with gate 50. Every
+other gate keeps all four flags at `no`, so boot-check fails a plain boot that
+prints any user, isolation, shell or spawn marker - the feature must be dormant
+unless the token is present.
 
-`make test-user` (gate 48) and `make test-user2` (gate 49) still run their own
-levels: `user.test=1` is the three U1 programs, `user.test=2` adds the isolation
-pair, and `user.test=3` adds the shell.
+`make test-user` (gate 48), `make test-user2` (gate 49) and `make test-user3`
+(gate 50) still run their own levels: `user.test=1` is the three U1 programs,
+`user.test=2` adds the isolation pair, `user.test=3` adds the shell, and
+`user.test=4` adds `/bin/spawn`.
 
 Captured output from the gate in order (the report's `trap rip=` line and the two
 `trap regs` lines are elided - they carry the same frame the `user fault` line
-repeats):
+repeats; the `...` stands for the U1-U3 markers, which are unchanged from
+gate 50):
 
 ```
 CRUGOS: user selftest start
-CRUGOS: user hello from ring 3
-CRUGOS: user program /bin/hello finished (exit 0)
-CRUGOS: user badptr blocked (EFAULT)
-CRUGOS: user program /bin/badptr finished (exit 0)
-CRUGOS: user fault writing above the window
-CRUGOS: user fault page fault at rip=0x0000008000010064 err=0x0000000000000006 tid 10
-CRUGOS: user fault killed tid 10 code -14
-CRUGOS: user program /bin/fault finished (exit -14)
-CRUGOS: user isolation start
-CRUGOS: user isolation ok (2 program(s), 0 mismatch(es))
-CRUGOS: user shell start
-CRUGOS: sh start (argc 2)
-CRUGOS: sh cmd ver
-CRUGOS: sh cmd echo
-CRUGOS: sh cmd cat
-CRUGOS: sh cat /hello.txt 16 byte(s)
-CRUGOS: sh cmd ls
-CRUGOS: sh cmd write
-CRUGOS: storage remounted read-write
-CRUGOS: storage remounted read-only
-CRUGOS: sh write /shout.txt 22 byte(s)
-CRUGOS: sh cmd cat
-CRUGOS: sh cat /shout.txt 22 byte(s)
-CRUGOS: sh cmd exit
-CRUGOS: sh exit 7
-CRUGOS: user shell finished (exit 7)
+...
+CRUGOS: user spawn test start
+CRUGOS: user spawn start
+CRUGOS: user spawn tid 15
+CRUGOS: user child running (tid 15)
+CRUGOS: user child argc 2
+CRUGOS: user child arg from-spawn
+CRUGOS: user spawn child exit 5
+CRUGOS: user spawn exec
+CRUGOS: user exec /bin/child (tid 14)
+CRUGOS: user child running (tid 14)
+CRUGOS: user child argc 2
+CRUGOS: user child arg from-exec
+CRUGOS: user spawn test ok (child exit 5, exec exit 5)
 CRUGOS: user selftest ok (3 program(s), 1 fault(s))
-CRUGOS: phase u3 boot ok
+CRUGOS: phase u4 boot ok
 ```
 
 Between `user fault writing above the window` and the `user fault page fault`
@@ -591,22 +674,26 @@ bits, same `cr2`).
 The boot check that accepts it:
 
 ```
-ok: boot markers found, version 0.37.0 avx2 yes raid no nvme no rebuild no ahci no crypt no aes any net no tcp no dns no usb no mouse no audio no gfx no wb no menu no shell no keys no desk no icons no drawer no select no heap no user yes isolated yes ushell yes storage disk QEMU exit status 33
+ok: boot markers found, version 0.38.0 avx2 yes raid no nvme no rebuild no ahci no crypt no aes any net no tcp no dns no usb no mouse no audio no gfx no wb no menu no shell no keys no desk no icons no drawer no select no heap no user yes isolated yes ushell yes spawn yes storage disk QEMU exit status 33
 ```
 
-The `user yes`, `isolated yes` and `ushell yes` fields are the user fields; all
-others are the same as the H4 gate. The boot timing line has the same shape
-(values vary by run):
+The `user yes`, `isolated yes`, `ushell yes` and `spawn yes` fields are the
+user fields; all others are the same as the H4 gate. The boot timing line has the
+same shape (values vary by run):
 
 ```
-boot   : pmm=28671 us cpu=418 us vm=708 us traps=346 us timer=65333 us heap=464 us storage=96362 us sched=300 us syscall=102 us total=192709 us
+boot   : pmm=28772 us cpu=395 us vm=638 us traps=340 us timer=65291 us heap=471 us storage=95931 us sched=326 us syscall=96 us total=192263 us
 ```
 
 `check-disk` runs after the boot and reports the root filesystem intact:
 
 ```
-ok: ext4 root is clean, /hello.txt and /selftest/b.txt persisted, /shout.txt written by the ring-3 shell
+ok: ext4 root is clean, /hello.txt and /selftest/b.txt persisted
 ```
+
+That is the plain pass. Gate 51 does not pass `--expect-shell-write`, so it
+never asserts `/shout.txt`; that clause in the check-disk output belongs to
+gate 50 only.
 
 Reading a failure:
 
@@ -624,9 +711,21 @@ Reading a failure:
   before its first syscall;
 - a `user shell finished` exit other than 7 means the script stopped early or a
   file syscall failed - the last `sh cmd` line says where;
-- a `check-disk` complaint about `/shout.txt` means the flush did not reach the
-  image: look for the two `storage remounted` lines and for a write error in the
-  serial log;
+- a missing `user spawn ...` line means `user.test=4` did not reach
+  `user_test.c`, `/bin/spawn` is missing from the disk, or the loader refused
+  the image;
+- a missing `user spawn tid` line means `SYS_SPAWN` returned an error - check
+  the path, the argv block and the new space's page-table setup;
+- a `user spawn child exit` other than 5 means `SYS_WAIT` returned the wrong
+  code, or the child exited through a path other than its normal return;
+- no `user exec /bin/child` line, or a tid on it that differs from the
+  spawner's, means `SYS_EXEC` did not replace the image in place - the tid must
+  survive the exec, and the new `vm_space` must be activated before the old one
+  is destroyed;
+- a `check-disk` complaint about `/shout.txt` belongs to gate 50: gate 51 runs
+  the plain pass and expects only `/hello.txt` and `/selftest/b.txt`.
+  A missing `/hello.txt` or `/selftest/b.txt`, or an unclean ext4, means the
+  disk build or the umount path broke;
 - a panic during the run means a fault was classified `TRAP_FATAL` - the panic
   line names the vector;
 - an unexpected `CRUGOS: user ...`, `iso ...` or `sh ...` line on a non-user gate
@@ -639,16 +738,27 @@ Reading a failure:
 - The user window's intermediate page tables (the PML4 slot 1 PDPT, its PD and
   its PTs) are created once per space and released only at `vm_space_destroy`;
   `vm_space_unmap_user_pages` frees the leaf frame, not the tables.
-- No `fork` or runtime `exec`: `elf_exec_run` and `elf_exec_run_args` are called
-  by the kernel (selftest, shell launch), not by a program, and one program per
-  thread is still the rule.
-- `argv` exists only at exec time: the kernel builds the block and the shell
-  receives one script path. A program cannot start another program with
-  arguments, and nothing sets an environment variable.
+- There is no `fork`: `SYS_SPAWN` starts a new image from a path, so a child
+  inherits neither the caller's memory nor its file descriptors. `SYS_EXEC`
+  replaces only the calling image, so a program cannot duplicate itself.
+- `SYS_WAIT` works only for direct children: `parent_id` must name the caller,
+  there is no wait-any, no notification other than the blocking call, and no
+  signals. A child that exits stays in the all-threads list as a zombie until
+  its parent waits for it; there is no reaper for orphaned children.
+- A tid is the scheduler's thread id, not a process id: ids are monotonic and a
+  stale one never matches a recycled thread, but there is no pid namespace and
+  no `getpid`.
+- `argv` exists only at spawn and exec time: the kernel builds the block, the
+  shell receives one script path, and nothing sets an environment variable.
+- exec does not carry the old image over: the new program gets exactly the
+  `argv` passed to `SYS_EXEC` and still runs in the thread's single address
+  space, because the new `vm_space` replaces the old one and its mappings are
+  gone.
 - No user heap and no `malloc` in ring 3: the shell and the test programs use
   static buffers, so dynamic memory needs a ring-3 allocator first.
 - File descriptors are per thread, not per process: `thread_destroy` calls
-  `ufile_close_all`, and there is no way to share an open file between threads.
+  `ufile_close_all`, a spawned child starts with an empty table, and there is no
+  way to share an open file between threads.
 - No pipes, append or seek: the five calls above are the whole interface. A read
   is a 64 KiB snapshot taken at open time, and a writable open rewrites the file
   from offset 0 on close.

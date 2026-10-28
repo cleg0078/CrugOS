@@ -124,6 +124,18 @@ kernel bounce buffer, while a CPL0 caller keeps the `harden_range_ok()`
 identity path. See [userspace.md](userspace.md) for the window, the page walk
 and the syscall split.
 
+Phase U4 adds the first argument block that starts in user memory: `SYS_SPAWN`
+and `SYS_EXEC` take an `argv` array plus a count from the caller, so
+`syscall_argv()` in `kernel/core/syscall.c` walks the pointer array with
+`uaccess_check`/`uaccess_user_read` and copies each string with
+`uaccess_user_str` into one `g_argv_buf[EXEC_ARGS_STR_MAX]`, ending in
+`exec_args_ok(argc, str_bytes)` -- a pure predicate in `kernel/exec/argv.c`
+that rejects more than `EXEC_ARGS_MAX` 16 arguments or 2048 string bytes before
+any address space is allocated or a single page is mapped. A CPL0 caller keeps
+the `harden_range_ok()` identity path, so the `SYS_EXEC` selftests behave as
+before. The block is then built at the top of the new stack by
+`exec_args_build()`, never by trusting a user pointer directly.
+
 ## Image gate
 
 `make test-hardening` is the 44th gate. It is not a fuzzer: it is a
@@ -141,7 +153,7 @@ must print.
 
 | Case | Patch | Required marker | Exit |
 | --- | --- | --- | --- |
-| `control` | none | `CRUGOS: phase u3 boot ok` (any phase id matches), `CRUGOS: ext4 ready`, `CRUGOS: storage ready`, `CRUGOS: writable storage ok`, `CRUGOS: selftest ok` | 33 |
+| `control` | none | `CRUGOS: phase u4 boot ok` (any phase id matches), `CRUGOS: ext4 ready`, `CRUGOS: storage ready`, `CRUGOS: writable storage ok`, `CRUGOS: selftest ok` | 33 |
 | `geometry-bpg` | superblock `+0x20` (`s_blocks_per_group`) = 100000 | `CRUGOS: ext4 mount rejected (geometry)` | 35 |
 | `geometry-ipg` | superblock `+0x28` (`s_inodes_per_group`) = 100000 | `CRUGOS: ext4 mount rejected (geometry)` | 35 |
 | `root-extent` | root inode `eh_max` (`inode + 44`) = 5, inode checksum recomputed | `CRUGOS: ext4 mount rejected (root extent)` | 35 |
@@ -305,8 +317,10 @@ ok: hardening pass 1 rejected 6 crafted image(s) (control boot exit 33)
   its own PML4, so two programs run at once with private windows and the same
   virtual address resolving to different frames, and phase U3 puts the file
   syscalls on the same copy boundary, so a ring-3 descriptor names a kernel
-  object the caller cannot corrupt (the table is per thread). What remains is
-  that slot 0
+  object the caller cannot corrupt (the table is per thread). Phase U4 lets a
+  program start another image and wait for its exit code, but the child still
+  starts from an empty address space and inherits no memory, so nothing crosses
+  via spawn that the copy boundary has not checked. What remains is that slot 0
   of every space is still the shared kernel identity map: this is isolation
   between user programs, not kernel-address isolation, and there is no
   per-process resource accounting.

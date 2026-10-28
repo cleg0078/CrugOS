@@ -23,6 +23,7 @@ struct scheduler {
     thread *idle;
     run_queue rq[SCHED_CLASSES];
     thread *sleep_list;
+    thread *all;
     u32 next_id;
     u64 switches;
     int started;
@@ -300,6 +301,15 @@ static void thread_destroy(thread *t)
         panic("sched: cannot destroy current thread");
     /* A program that exits without closing its files still flushes them. */
     ufile_close_all(&t->files);
+    {
+        thread **pp = &g_sched.all;
+
+        while (*pp && *pp != t)
+            pp = &(*pp)->all_next;
+        if (*pp)
+            *pp = t->all_next;
+        t->all_next = 0;
+    }
     if (t->space) {
         /* The thread is already off the CPU, so its root is not the active one
            and its tables can be walked and released page by page. */
@@ -361,6 +371,11 @@ thread *thread_create(const char *name, void (*entry)(void *), void *arg,
     t->stack_base = base;
     t->stack_size = (u64)pages * CRUG_PAGE_SIZE;
     wait_queue_init(&t->joiners);
+    t->parent_id = 0;
+
+    /* Every live thread hangs off g_sched.all so SYS_WAIT can resolve a tid. */
+    t->all_next = g_sched.all;
+    g_sched.all = t;
 
     top = base + (u64)pages * CRUG_PAGE_SIZE;
     sp = (u64 *)(uintptr)(top - 72ull);
@@ -484,6 +499,22 @@ i64 thread_join_code(thread *t)
 thread *sched_current(void)
 {
     return g_sched.current;
+}
+
+/* Phase U4: a ring-3 program starts a child by path and later waits on its
+   tid. Zombies stay in the list so a wait that arrives after the exit still
+   finds the exit code; ids are monotonic, so no stale tid ever matches. */
+thread *thread_find(u32 id)
+{
+    thread *t;
+
+    if (id == 0)
+        return 0;
+    for (t = g_sched.all; t; t = t->all_next) {
+        if (t->id == id)
+            return t;
+    }
+    return 0;
 }
 
 u64 sched_switches(void)

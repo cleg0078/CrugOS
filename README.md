@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase U3 ring-3 shell with file syscalls (`v0.37.0`)
+## Status: phase U4 spawn, exec and wait in ring 3 (`v0.38.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -61,7 +61,10 @@ at different frames, and `make test-user2` is the 49th gate. Phase U3 gives ring
 3 the filesystem: `SYS_OPEN`, `SYS_READ`, `SYS_WRITE`, `SYS_CLOSE` and
 `SYS_LISTDIR`, a per-thread descriptor table, an `argc`/`argv` block on the
 initial stack, and `/bin/sh`, which reads `/etc/sh.rc` from the disk image and
-writes `/shout.txt` back; `make test-user3` is the 50th gate.
+writes `/shout.txt` back; `make test-user3` is the 50th gate. Phase U4 adds
+spawn, exec and wait: a ring-3 program starts another program image as a
+thread and waits for its exit code, and `SYS_EXEC` replaces the calling image
+in place while keeping its tid; `make test-user4` is the 51st gate.
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -1090,6 +1093,77 @@ CRUGOS: sh exit 7
 CRUGOS: user shell finished (exit 7)
 ```
 
+Phase U4 gives ring 3 a process model: three syscalls spawn, wait for and
+replace program images, so a user program can run another one and read its
+exit code instead of the kernel doing it. `make test-user4` is the 51st gate.
+
+- `include/crug/syscall.h` gains `SYS_SPAWN` (21), `SYS_WAIT` (22) and
+  `SYS_EXEC` (23): `SYS_MAX` becomes 24 and `SYS_ESRCH` (-3) is the new
+  missing-child error;
+- `elf_spawn_user(path, argc, argv, parent_id, out)` in
+  `kernel/exec/elf_exec.c` starts a new program image as a new ring-3 thread
+  and returns its tid; the new `parent_id` field in `struct thread` records
+  the caller, `elf_exec_run()` becomes the `argc == 0` wrapper and
+  `elf_exec_run_args()` calls it with parent id 0 for kernel-owned programs;
+- `SYS_WAIT(tid)` blocks until that child exits and returns its code. The new
+  `thread_find(id)` walks a global all-threads list that keeps zombies, so a
+  wait arriving after the exit still sees the code, and monotonic ids mean a
+  stale tid never matches a recycled thread. A wait is accepted only when
+  `child->parent_id` is the caller and `child != caller`, otherwise it
+  returns `SYS_ESRCH`; `thread_join_code()` reaps the thread;
+- `SYS_EXEC(path, argc, argv)` replaces the calling image in place:
+  `elf_exec_in_place()` loads the ELF into a fresh `vm_space`, points the
+  thread's `space`/`user_rip`/`user_rsp` at it, activates the new space
+  before destroying the old one (CR3 still points at it) and returns the new
+  entry, so the syscall layer rewrites the saved `rip`/`rsp` and `rax` and
+  the `iretq` lands in the new image. The thread keeps its tid and the log
+  prints `CRUGOS: user exec /bin/child (tid 14)`; a CPL0 caller gets
+  `SYS_EINVAL`;
+- `syscall_argv()` in `kernel/core/syscall.c` copies arguments for all three
+  calls: CPL3 callers through `uaccess_check`/`uaccess_user_read`/
+  `uaccess_user_str` into `g_argv_buf[EXEC_ARGS_STR_MAX]`, CPL0 callers
+  through `harden_range_ok` and `memcpy`, both ending in
+  `exec_args_ok(argc, str_bytes)`, which rejects more than 16 arguments or
+  2048 string bytes;
+- `user/spawn.c` and `user/child.c` become `/bin/spawn` and `/bin/child`:
+  spawn starts its child with `from-spawn`, prints the tid, waits for exit 5,
+  then execs the child with `from-exec`; the child prints its tid, argc and
+  the second argument, which is how the log proves both paths;
+- `user.test=4` runs the U1 trio, the U2 pair, the shell and then
+  `user_spawn()`, which joins `/bin/spawn` and requires exit 5;
+- `make test-user4` is the 51st gate: it rebuilds the disk with all seven
+  programs, boots with `user.test=4`, passes boot-check the new
+  `EXPECT_SPAWN` argument (`argv[30]`, guard now 3..31) with
+  `SPAWN_RUN_TIMEOUT_SEC` (240), so the boot-check line ends
+  `ushell yes spawn yes`, and runs the plain check-disk pass (no
+  `--expect-shell-write`; that proof belongs to gate 50);
+- `tests/host/test_argv.c` gained `exec_args_ok` cases. `make test-host`
+  reports 3670 checks, the kernel is 276408 B (269 KiB) on disk and 844414 B
+  (824 KiB) loaded (`.text` 192902 B, `.rodata` 28864 B, `.bss` 622592 B),
+  and all 51 gates pass.
+
+The user part of the gate 51 log (the `...` stands for the U1-U3 markers, which
+are unchanged from gate 50):
+
+```
+CRUGOS: user selftest start
+...
+CRUGOS: user spawn test start
+CRUGOS: user spawn start
+CRUGOS: user spawn tid 15
+CRUGOS: user child running (tid 15)
+CRUGOS: user child argc 2
+CRUGOS: user child arg from-spawn
+CRUGOS: user spawn child exit 5
+CRUGOS: user spawn exec
+CRUGOS: user exec /bin/child (tid 14)
+CRUGOS: user child running (tid 14)
+CRUGOS: user child argc 2
+CRUGOS: user child arg from-exec
+CRUGOS: user spawn test ok (child exit 5, exec exit 5)
+CRUGOS: user selftest ok (3 program(s), 1 fault(s))
+```
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -1098,9 +1172,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.37.0 (phase u3) -- Amiga-inspired microkernel bring-up
+CrugOS 0.38.0 (phase u4) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.37.0
+CRUGOS: version 0.38.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -1149,7 +1223,7 @@ CRUGOS: tcp http served (72 bytes)
 CRUGOS: net selftest ok
 CRUGOS: gfx ready (1024x768, cursor at 512,384)
 CRUGOS: selftest ok
-kernel : 0x0000000000100000 size=261 KiB
+kernel : 0x0000000000100000 size=269 KiB
 boot   : cpu=0 acpi_rsdp=0x1f77e000 fdt=0x0 initrd=0x0
 memory : 36 regions, usable 474080 KiB (462 MiB)
 pmm    : total=118520 free=118462 bitmap=131072 B
@@ -1159,9 +1233,9 @@ entropy: ca02033c50b53413
 wx     : audit ok, identity map 0..4 GiB, guard unmapped
 heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
-boot   : pmm=30266 us cpu=453 us vm=731 us traps=517 us timer=65587 us heap=411 us storage=96353 us sched=328 us syscall=98 us total=194748 us
+boot   : pmm=28772 us cpu=395 us vm=638 us traps=340 us timer=65291 us heap=471 us storage=95931 us sched=326 us syscall=96 us total=192263 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase u3 boot ok
+CRUGOS: phase u4 boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -1372,14 +1446,15 @@ make test-fuzz   # mutate a real disk image and fuzz the mount path
 make test-user   # boot with user.test=1 and run three ring-3 programs
 make test-user2  # boot with user.test=2, run the three programs and the isolation pair
 make test-user3  # boot with user.test=3 and run the scripted ring-3 shell
+make test-user4  # spawn and exec ring-3 programs and wait for their exit codes
 make iso         # build a bootable hybrid UEFI ISO (build/x86_64/crugos.iso)
 make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
 make usb         # write the ISO to a USB block device (USB_DEV=/dev/sdX)
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
-make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows/menus/gadgets, resize grips, keyboard focus and keys, icon dragging, the send-to-front gadget and keyboard icon focus, the body input handler, the text grid and the shell, the user-window and uaccess validators, the per-space page-table tests, and the ELF exec mapper)
+make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows/menus/gadgets, resize grips, keyboard focus and keys, icon dragging, the send-to-front gadget and keyboard icon focus, the body input handler, the text grid and the shell, the user-window and uaccess validators, the per-space page-table tests, the ELF exec mapper and the argv predicates)
 make check-disk  # e2fsck + persisted-file checks on the latest test disk
-make user        # build the five ring-3 programs the disk image carries
+make user        # build the seven ring-3 programs the disk image carries
 make disk        # generate the GPT/ext4 test disk
 make raid-disks  # generate the two RAID1 member disks
 make raid10-disks  # generate the four RAID10 member disks
@@ -1404,7 +1479,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `EXPECT_USB`, `EXPECT_MOUSE`, `EXPECT_AUDIO`, `EXPECT_GFX`, `EXPECT_WB`,
 `EXPECT_MENU`, `EXPECT_SHELL`, `EXPECT_KEYS`, `EXPECT_DESK`, `EXPECT_ICONS`,
 `EXPECT_DRAWER`, `EXPECT_SELECT`, `EXPECT_HEAP`, `EXPECT_USER`, `EXPECT_USERS`,
-`EXPECT_USHELL`,
+`EXPECT_USHELL`, `EXPECT_SPAWN`,
 `AUDIO_RUN_TIMEOUT_SEC`, `AUDIO_QEMU_EXTRA`, `GFX_WAIT`, `GFX_MOVES`,
 `GFX_RUN_TIMEOUT_SEC`, `GFX_QEMU_EXTRA`, `WB_WAIT`, `WB_DRAG`,
 `WB_RUN_TIMEOUT_SEC`, `WB_QEMU_EXTRA`, `WB_MENU_WAIT`, `WB_MENU_ACTS`,
@@ -1417,7 +1492,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `WB_SELECT_FILL`, `WB_SELECT_RUN_TIMEOUT_SEC`, `HARDEN_TIMEOUT_SEC`,
 `HEAP_STRESS_OPS`, `HEAP_RUN_TIMEOUT_SEC`, `TRAP_TIMEOUT_SEC`, `FUZZ_CASES`,
 `FUZZ_CRYPT_CASES`, `FUZZ_SEED`, `FUZZ_TIMEOUT_SEC`, `USER_RUN_TIMEOUT_SEC`,
-`USER2_RUN_TIMEOUT_SEC`, `SHELL_RUN_TIMEOUT_SEC`,
+`USER2_RUN_TIMEOUT_SEC`, `SHELL_RUN_TIMEOUT_SEC`, `SPAWN_RUN_TIMEOUT_SEC`,
 `DEMO_DISPLAY`, `DEMO_HOLD_SEC`,
 `DEMO_TIMEOUT_SEC`, `DEMO_CMDLINE`, `DEMO_MACHINE_EXTRA`, `DEMO_QEMU_EXTRA`,
 `ISO_IMAGE`, `ISO_STAGE`, `ISO_FAT_IMG`, `ISO_SIZE_MB`, `ISO_VOLID`,

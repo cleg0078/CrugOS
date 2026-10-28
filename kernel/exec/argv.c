@@ -7,6 +7,17 @@
 #include <crug/exec.h>
 #include <crug/string.h>
 
+/* Phase U4: the syscall layer copies argv out of user memory before building
+ * the block, so it needs the same limits as a pure predicate. */
+int exec_args_ok(u32 argc, u64 str_bytes)
+{
+    if (argc > EXEC_ARGS_MAX)
+        return 0;
+    if (str_bytes > EXEC_ARGS_STR_MAX)
+        return 0;
+    return 1;
+}
+
 static void put64(u8 *area, u64 off, u64 value)
 {
     memcpy(area + off, &value, 8);

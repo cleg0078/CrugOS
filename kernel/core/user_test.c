@@ -12,6 +12,10 @@
  * `user.test=3` adds /bin/sh, the ring-3 shell: it opens /etc/sh.rc, runs
  * the script through the file syscalls, writes /shout.txt and exits 7.
  *
+ * `user.test=4` adds /bin/spawn: it starts /bin/child with SYS_SPAWN, blocks in
+ * SYS_WAIT for the child's exit code, then replaces itself with /bin/child
+ * through SYS_EXEC.
+ *
  * `user.test=2` runs those three and then two concurrent instances of
  * /bin/iso, which write the SAME virtual address (0x8000030000, pinned by
  * user/iso.ld) and yield between write and check. The kernel asserts the two
@@ -29,7 +33,8 @@
 /* The address /bin/iso links its private word at (see user/iso.ld). */
 #define USER_ISO_WORD 0x0000008000030000ull
 
-/* 0 = off, 1 = U1 programs, 2 = U1 programs plus the isolation pair. */
+/* 0 = off, 1 = U1 programs, 2 = U1 programs plus the isolation pair,
+   3 = plus the ring-3 shell, 4 = plus spawn/wait/exec. */
 static int g_user_test;
 
 static int user_space(char c)
@@ -179,6 +184,32 @@ static int user_shell(void)
     return 0;
 }
 
+/* Phase U4: /bin/spawn starts /bin/child, waits for its exit code and then
+   execs into /bin/child itself. Both images exit 5, so a wrong wait result or
+   a failed exec shows up as a different code here. */
+static int user_spawn(void)
+{
+    elf_exec_result res;
+    thread *t;
+    i64 code;
+
+    kprintf("CRUGOS: user spawn test start\n");
+    memset(&res, 0, sizeof(res));
+    t = elf_exec_run("/bin/spawn", &res);
+    if (!t) {
+        kprintf("CRUGOS: user selftest failed (/bin/spawn did not start)\n");
+        return -1;
+    }
+    code = thread_join_code(t);
+    if (code != 5) {
+        kprintf("CRUGOS: user selftest failed (/bin/spawn exited %lld, expected 5)\n",
+                code);
+        return -1;
+    }
+    kprintf("CRUGOS: user spawn test ok (child exit 5, exec exit 5)\n");
+    return 0;
+}
+
 int user_selftest(void)
 {
     if (!g_user_test)
@@ -194,6 +225,8 @@ int user_selftest(void)
     if (g_user_test >= 2 && user_isolation() != 0)
         return -1;
     if (g_user_test >= 3 && user_shell() != 0)
+        return -1;
+    if (g_user_test >= 4 && user_spawn() != 0)
         return -1;
     kprintf("CRUGOS: user selftest ok (3 program(s), 1 fault(s))\n");
     return 0;

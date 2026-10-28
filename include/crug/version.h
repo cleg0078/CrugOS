@@ -13,7 +13,7 @@
    Kept separate from the version so a version bump does not silently rewrite
    the phase the boot markers and the gate scripts match on. */
 #ifndef CRUG_PHASE_STR
-#define CRUG_PHASE_STR "u3"
+#define CRUG_PHASE_STR "u4"
 #endif
 
 /* Stringify a numeric macro (useful for generated build ids later). */

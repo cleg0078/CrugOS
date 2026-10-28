@@ -119,14 +119,13 @@ static void exec_unwind(exec_ctx *ctx)
     ctx->space = 0;
 }
 
-static thread *elf_exec_impl(const char *path, u32 argc,
-                             const char *const *argv, elf_exec_result *out)
+int elf_load_user(const char *path, u32 argc, const char *const *argv,
+                  elf_image_load *out)
 {
     struct ext4_fs *fs = storage_root();
     elf_ops ops;
     elf_image image;
     exec_ctx ctx;
-    thread *t;
     u8 *blob;
     u8 args[EXEC_ARGS_BLOCK_MAX];
     u64 size = 0;
@@ -134,26 +133,27 @@ static thread *elf_exec_impl(const char *path, u32 argc,
     u64 rsp_va = USER_STACK_TOP - 8ull;
 
     if (!fs || !path || !out)
-        return 0;
+        return -1;
+    memset(out, 0, sizeof(*out));
     memset(&ctx, 0, sizeof(ctx));
     ctx.space = (vm_space *)kmalloc(sizeof(vm_space));
     if (!ctx.space)
-        return 0;
+        return -1;
     if (vm_space_create(ctx.space) != 0) {
         kfree(ctx.space);
         ctx.space = 0;
         kprintf("CRUGOS: exec %s failed (no address space)\n", path);
-        return 0;
+        return -1;
     }
     blob = (u8 *)kmalloc(ELF_MAX_BYTES);
     if (!blob) {
         exec_unwind(&ctx);
-        return 0;
+        return -1;
     }
     if (ext4_read_file(fs, path, blob, ELF_MAX_BYTES, &size) != 0 || size == 0) {
         kfree(blob);
         exec_unwind(&ctx);
-        return 0;
+        return -1;
     }
     memset(&image, 0, sizeof(image));
     ops.ctx = &ctx;
@@ -166,7 +166,7 @@ static thread *elf_exec_impl(const char *path, u32 argc,
                 ctx.error ? ctx.error : "bad ELF image");
         exec_unwind(&ctx);
         kfree(blob);
-        return 0;
+        return -1;
     }
     kfree(blob);
     stack_va = USER_STACK_TOP - (u64)USER_STACK_PAGES * CRUG_PAGE_SIZE;
@@ -175,7 +175,7 @@ static thread *elf_exec_impl(const char *path, u32 argc,
         kprintf("CRUGOS: exec %s failed (%s)\n", path,
                 ctx.error ? ctx.error : "no user stack");
         exec_unwind(&ctx);
-        return 0;
+        return -1;
     }
     if (argc != 0) {
         u64 area = EXEC_ARGS_BLOCK_MAX;
@@ -187,37 +187,86 @@ static thread *elf_exec_impl(const char *path, u32 argc,
         if (exec_args_build(args, area, area_va, argc, argv, 0, &rsp_off) != 0) {
             kprintf("CRUGOS: exec %s failed (argv block)\n", path);
             exec_unwind(&ctx);
-            return 0;
+            return -1;
         }
         if (write_segment(&ctx, area_va, args, (usize)area, 0) != 0) {
             kprintf("CRUGOS: exec %s failed (cannot write argv)\n", path);
             exec_unwind(&ctx);
-            return 0;
+            return -1;
         }
         rsp_va = area_va + rsp_off;
     }
-    t = thread_create_user(path, image.entry, rsp_va,
-                           ctx.space, SCHED_NORMAL);
-    if (!t) {
-        kprintf("CRUGOS: exec %s failed (cannot create a user thread)\n", path);
-        exec_unwind(&ctx);
-        return 0;
-    }
-    out->tid = t->id;
-    out->reserved = 0;
+    out->space = ctx.space;
     out->entry = image.entry;
+    out->rsp = rsp_va;
     out->base = image.base;
     out->size = image.size;
+    return 0;
+}
+
+thread *elf_spawn_user(const char *path, u32 argc, const char *const *argv,
+                       u32 parent_id, elf_exec_result *out)
+{
+    elf_image_load img;
+    thread *t;
+
+    if (elf_load_user(path, argc, argv, &img) != 0)
+        return 0;
+    t = thread_create_user(path, img.entry, img.rsp, img.space, SCHED_NORMAL);
+    if (!t) {
+        kprintf("CRUGOS: exec %s failed (cannot create a user thread)\n", path);
+        vm_space_destroy(img.space);
+        kfree(img.space);
+        return 0;
+    }
+    t->parent_id = parent_id;
+    if (out) {
+        out->tid = t->id;
+        out->reserved = 0;
+        out->entry = img.entry;
+        out->base = img.base;
+        out->size = img.size;
+    }
     return t;
+}
+
+/* Phase U4: exec replaces the running image. The new space must be active
+   BEFORE the old one is destroyed: CR3 still points at the old root, and
+   vm_space_destroy frees that root page. Kernel code, the kernel stack and
+   the timer are all in the shared slot 0 of both spaces, so the switch is
+   safe there. */
+int elf_exec_in_place(const char *path, u32 argc, const char *const *argv,
+                      u64 *out_entry, u64 *out_rsp)
+{
+    thread *t = sched_current();
+    elf_image_load img;
+    vm_space *old;
+
+    if (!t || !(t->flags & THREAD_FLAG_USER) || !out_entry || !out_rsp)
+        return -1;
+    if (elf_load_user(path, argc, argv, &img) != 0)
+        return -1;
+    old = t->space;
+    t->space = img.space;
+    t->user_rip = img.entry;
+    t->user_rsp = img.rsp;
+    vm_space_activate(img.space);
+    if (old) {
+        vm_space_destroy(old);
+        kfree(old);
+    }
+    *out_entry = img.entry;
+    *out_rsp = img.rsp;
+    return 0;
 }
 
 thread *elf_exec_run(const char *path, elf_exec_result *out)
 {
-    return elf_exec_impl(path, 0, 0, out);
+    return elf_spawn_user(path, 0, 0, 0, out);
 }
 
 thread *elf_exec_run_args(const char *path, u32 argc, const char *const *argv,
                           elf_exec_result *out)
 {
-    return elf_exec_impl(path, argc, argv, out);
+    return elf_spawn_user(path, argc, argv, 0, out);
 }

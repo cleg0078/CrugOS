@@ -3,6 +3,7 @@
 #define CRUG_EXEC_H
 
 #include <crug/types.h>
+#include <crug/vm.h>
 
 #define ELF_MAX_BYTES (512u * 1024u)
 #define USER_STACK_PAGES 4u
@@ -40,6 +41,37 @@ struct thread *elf_exec_run(const char *path, elf_exec_result *out);
 struct thread *elf_exec_run_args(const char *path, u32 argc,
                                  const char *const *argv,
                                  elf_exec_result *out);
+
+/* Phase U4. A loaded image: a private address space with the ELF mapped, the
+   stack reserved and the argv block copied in. The caller owns space. */
+typedef struct elf_image_load {
+    vm_space *space;
+    u64 entry;
+    u64 rsp;
+    u64 base;
+    u64 size;
+} elf_image_load;
+
+/* Load PATH into a fresh address space without creating a thread. Returns 0
+   and fills OUT, or -1 (nothing is leaked). */
+int elf_load_user(const char *path, u32 argc, const char *const *argv,
+                  elf_image_load *out);
+
+/* Spawn: load PATH and start it as a new user thread that records PARENT_ID
+   as its parent (0 for the kernel). Returns the thread or 0. */
+struct thread *elf_spawn_user(const char *path, u32 argc,
+                              const char *const *argv, u32 parent_id,
+                              elf_exec_result *out);
+
+/* Exec: replace the calling user thread's image in place. Returns 0 and the
+   new entry and stack pointer; on success it never returns to user space
+   through the old image. The caller rewrites the trap frame. */
+int elf_exec_in_place(const char *path, u32 argc, const char *const *argv,
+                      u64 *out_entry, u64 *out_rsp);
+
+/* Pure bounds check shared by SYS_SPAWN and SYS_EXEC: ARGC pointers and
+   STR_BYTES of strings must fit the block limit. Returns 1 when they do. */
+int exec_args_ok(u32 argc, u64 str_bytes);
 
 /* Ring-3 selftest (make test-user, boot token user.test=1). */
 void user_test_cmdline(const struct boot_info *bi);

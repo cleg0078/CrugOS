@@ -1,6 +1,6 @@
 # Roadmap
 
-The specification defines 50 phases/gates. Phase 0 established the smallest
+The specification defines 51 phases/gates. Phase 0 established the smallest
 end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
 phase 1 makes the kernel own physical memory, page tables, exceptions and
 timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
@@ -968,12 +968,13 @@ checker. Phase H3 then replaced the per-vector panic one-liner with a trap polic
 and put the four stack-destroying vectors on IST stacks, phase H4 took the
 mount path to the host with a seeded image fuzzer, phase U1 crossed into ring 3,
 phase U2 gave every ring-3 thread its own PML4, so two programs now run at the
-same time without sharing a window, and phase U3 put a real shell in ring 3 with
-file descriptors and an exec-time `argv` block. What remains is `fork` and
-runtime `exec` (the kernel still starts one program per thread) with an
-environment, weak EFI entropy, and the AHCI timeout bounce reuse. Those are the
-prerequisites for a shell that starts programs on its own, and several of the
-remaining Mediums stay reachable until then.
+same time without sharing a window, phase U3 put a real shell in ring 3 with
+file descriptors and an exec-time `argv` block, and phase U4 let a user program
+start another one, wait for its exit code and replace its own image in place.
+What remains is `fork` (a child still gets an empty address space and inherits
+nothing), a populated environment, weak EFI entropy, and the AHCI timeout bounce
+reuse. Those are the prerequisites for a shell that builds process trees, and
+several of the remaining Mediums stay reachable until then.
 
 ## Phase H2 - hardened kernel heap (done)
 
@@ -1340,6 +1341,67 @@ remaining Mediums stay reachable until then.
 - docs: `docs/userspace.md` (reworked for U3) plus README, roadmap, versioning,
   build, boot and hardening.
 - All 50 gates pass at `v0.37.0`.
+
+## Phase U4 - spawn, exec and wait in ring 3 (done)
+
+- Phase U4 gives ring 3 a process model. A user program can start another
+  program image, block until it exits and read its exit code, or replace its own
+  image without changing threads - all of it driven from CPL3 instead of the
+  kernel. The phase adds three syscalls, two programs and one gate; the kernel
+  image layout, the `BootInfo` v1 handoff and every boot path are unchanged.
+- `include/crug/syscall.h` adds `SYS_SPAWN` (21), `SYS_WAIT` (22) and
+  `SYS_EXEC` (23), so `SYS_MAX` becomes 24, plus `SYS_ESRCH` (-3) for a tid
+  that is not the caller's child.
+- `kernel/exec/elf_exec.c` gains
+  `elf_spawn_user(path, argc, argv, parent_id, out)`, which is the old exec path
+  with an argument block and a parent id: the new `parent_id` field of
+  `struct thread` records the caller. `elf_exec_run()` stays the `argc == 0`
+  wrapper and `elf_exec_run_args()` passes parent id 0, which is how
+  kernel-launched programs (the U1 suite, the shell) differ from real children.
+- `SYS_WAIT(tid)` blocks until that child exits and returns its code. The new
+  `thread_find(id)` in `kernel/core/thread.c` walks an all-threads list kept by
+  the scheduler that still holds zombies, so a wait arriving after the exit finds
+  the record and its code; ids are monotonic, so a stale tid never matches a
+  recycled thread. The kernel accepts the wait only when the target's
+  `parent_id` is the caller's tid and the target is not the caller, and reaps it
+  through the existing `thread_join_code()`.
+- `SYS_EXEC(path, argc, argv)` replaces the calling image in place:
+  `elf_exec_in_place()` loads the ELF into a fresh `vm_space`, points the
+  thread's `space`/`user_rip`/`user_rsp` at it, and activates the new space
+  before destroying the old one because CR3 still points at the old tables. The
+  syscall layer then rewrites the saved trap frame (`rip`, `rsp`, `rax`), so the
+  `iretq` lands in the new image. The thread keeps its tid and the log proves it
+  with `CRUGOS: user exec /bin/child (tid 14)`; a CPL0 caller gets
+  `SYS_EINVAL`.
+- `syscall_argv()` in `kernel/core/syscall.c` is the first argument path that
+  starts in user memory: CPL3 callers go through `uaccess_check` and
+  `uaccess_user_read`/`uaccess_user_str` into `g_argv_buf`, CPL0 callers keep
+  the identity-map path through `harden_range_ok` and `memcpy`, and both finish in
+  `exec_args_ok(argc, str_bytes)`, a pure predicate in `kernel/exec/argv.c`
+  that enforces `EXEC_ARGS_MAX` 16 and `EXEC_ARGS_STR_MAX` 2048 bytes before an
+  address space is allocated.
+- `user/spawn.c` and `user/child.c` become `/bin/spawn` and `/bin/child`.
+  spawn starts the child with `from-spawn`, prints its tid, waits for exit 5,
+  then execs the child with `from-exec` and exits 5; the child prints its tid,
+  `argc 2` and the second argument, so the log shows the same program on two
+  different tids and then the same tid on a replaced image.
+- `kernel/core/user_test.c` understands `user.test=4`: the U1 trio, the U2
+  isolation pair, the shell and then `user_spawn()`, which joins `/bin/spawn`
+  and requires exit 5. `scripts/mkdisk.sh` now installs seven programs.
+- `make test-user4` is the 51st gate: it rebuilds the disk with all seven
+  programs, boots with `user.test=4` under `SPAWN_RUN_TIMEOUT_SEC` (240 s), and
+  passes boot-check the new final `EXPECT_SPAWN` argument (`argv[30]`, guard
+  `tuple(range(3, 32))`), so the line reports
+  `user yes isolated yes ushell yes spawn yes`. It then runs the plain
+  check-disk pass - no `--expect-shell-write`, which stays with gate 50.
+- `make test-host` reports 3670 checks (the new `exec_args_ok` cases live in
+  `tests/host/test_argv.c`); the kernel is 276408 B (269 KiB) on disk and
+  844414 B (824 KiB) loaded (`.text` 192902 B, `.rodata` 28864 B, `.bss`
+  622592 B), inside the 1 MiB stretch and 2 MiB hard budgets.
+- docs: `docs/userspace.md` (spawn, wait, in-place exec and the argv boundary)
+  plus README, roadmap, versioning, build, boot, traps, hardening, iso, workbench,
+  fuzzing and heap.
+- All 51 gates pass at `v0.38.0`.
 
 ## Bootable media - hybrid UEFI ISO (done, `v0.23.1`)
 

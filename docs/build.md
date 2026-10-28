@@ -50,6 +50,7 @@ make test-fuzz   # mutate a real disk image and fuzz the mount path
 make test-user   # boot with user.test=1 and run three ring-3 programs
 make test-user2  # boot with user.test=2, run the three programs and the isolation pair
 make test-user3  # boot with user.test=3 and run the scripted ring-3 shell
+make test-user4  # spawn and exec ring-3 programs and wait for their exit codes
 make iso         # build a bootable hybrid UEFI ISO (build/<arch>/crugos.iso)
 make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
@@ -76,8 +77,8 @@ make test-crypt-keyboard  # type the passphrase on the PS/2 keyboard and boot
 make test-crypt-keyboard-wrong  # three wrong keyboard passphrases must lock the volume
 make crypt-run   # boot the encrypted disk in a QEMU window for real typing
 make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
-make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/USB HID keyboard and mouse descriptors and reports/pointer state/IPv4/TCP/UDP checksums/DHCP parsing/DNS/audio mixer, tone and PCM ring/framebuffer cursor/intuition windows, menus and gadgets, icon dragging, the send-to-front gadget and keyboard icon focus, the drawer viewport, scrollbar and refresh, the drawer body-input handler, the seven hardening validators, the heap integrity checker, the trap report formatter and classification policy, the user-window and uaccess validators, the ELF exec mapper, the per-space page-table tests, 3663 checks
-make user        # build the five ring-3 programs the disk image carries
+make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/USB HID keyboard and mouse descriptors and reports/pointer state/IPv4/TCP/UDP checksums/DHCP parsing/DNS/audio mixer, tone and PCM ring/framebuffer cursor/intuition windows, menus and gadgets, icon dragging, the send-to-front gadget and keyboard icon focus, the drawer viewport, scrollbar and refresh, the drawer body-input handler, the seven hardening validators, the heap integrity checker, the trap report formatter and classification policy, the user-window and uaccess validators, the ELF exec mapper, the per-space page-table tests, the argv predicates, 3670 checks
+make user        # build the seven ring-3 programs the disk image carries
 make disk        # build the GPT/ext4 test disk at build/<arch>/disk.img
 make raid-disks  # build the two GPT/ext4 RAID1 member disks
 make raid10-disks  # build the four GPT/ext4 RAID10 member disks
@@ -184,6 +185,7 @@ options` prints the complete resolved set (including paths derived from
 | `EXPECT_USER` | `no` | `yes` requires the `user hello` / `user badptr blocked (EFAULT)` / `user fault killed tid` / `user selftest ok` markers written by `make test-user`; any other gate fails if a `user selftest ok` line appears |
 | `EXPECT_USERS` | `no` | `yes` additionally requires the two `iso tid` lines, the isolation frame pair and `user isolation ok` written by `make test-user2` |
 | `EXPECT_USHELL` | `no` | `yes` additionally requires the shell markers (`user shell start` through `user shell finished (exit 7)`) written by `make test-user3` |
+| `EXPECT_SPAWN` | `no` | `yes` additionally requires the spawn and exec markers (`user spawn start` through `user spawn test ok (child exit 5, exec exit 5)`) written by `make test-user4` |
 | `HEAP_STRESS_OPS` | `4000` | operations the `heap.stress=` pass churns inside `make test-heap` |
 | `HEAP_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for the `make test-heap` boot |
 | `TRAP_TIMEOUT_SEC` | `60` | wall-clock budget in seconds for each boot of `make test-trap` |
@@ -194,6 +196,7 @@ options` prints the complete resolved set (including paths derived from
 | `USER_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for the `make test-user` boot, which loads and joins three ring-3 programs |
 | `USER2_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for the `make test-user2` boot, which also runs the two-instance isolation pair |
 | `SHELL_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for the `make test-user3` boot, which also runs the scripted `/bin/sh` |
+| `SPAWN_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for the `make test-user4` boot, which also runs the spawn and exec stage |
 | `DEMO_DISPLAY` | `gtk` | QEMU display `make demo` opens (any `-display` value, for example `sdl` or `none`) |
 | `DEMO_HOLD_SEC` | `600` | seconds `make demo` keeps the desktop on screen before the guest exits by itself |
 | `DEMO_TIMEOUT_SEC` | `900` | wall-clock budget for the whole `make demo` boot |
@@ -329,7 +332,7 @@ OVMF 4M needs a substantial amount of RAM before it will boot from QEMU's
 | 512 | reliable; used by all gates |
 
 This is a firmware limit, not a kernel limit: the kernel load image is about
-822 KiB. The specification's 16 MiB headless target needs a leaner boot path and
+824 KiB. The specification's 16 MiB headless target needs a leaner boot path and
 is tracked in [roadmap.md](roadmap.md).
 
 ## Test disk
@@ -646,7 +649,7 @@ the pristine test disk and encrypted disk per case, patches exactly one field
 35 -- `CRUGOS: ext4 mount rejected (geometry)`, `CRUGOS: ext4 mount rejected
 (root extent)`, `CRUGOS: crypt unlock failed (kdf policy)` or `CRUGOS: crypt
 unlock failed (volume exceeds partition)` -- while the unpatched control must
-still reach `CRUGOS: phase u3 boot ok` (the driver accepts any phase id) and
+still reach `CRUGOS: phase u4 boot ok` (the driver accepts any phase id) and
 exit 33. Every case forbids
 `CRUGOS: panic` and `trap   : page fault`, a hostile case must not print
 `CRUGOS: ext4 ready` or `CRUGOS: storage ready`, and a QEMU timeout fails the
@@ -672,7 +675,7 @@ disk copies under `build/x86_64/trap/`, each with
 a `TRAP_TIMEOUT_SEC` (60 s) budget. Every hostile boot must print
 `CRUGOS: trap test <recipe>`, the report's vector, IST and `from=kernel`
 fragments, `CRUGOS PANIC: <name>` and `CRUGOS: panic`, and exit 35; the control
-must reach `CRUGOS: phase u3 boot ok` and `CRUGOS: selftest ok`, exit 33 and
+must reach `CRUGOS: phase u4 boot ok` and `CRUGOS: selftest ok`, exit 33 and
 never panic. No case may print `trap test unknown` or `trap test survived`, an
 exit 33 from a hostile case means the injection never ran, and a missing exit
 file or a 124 timeout is a hang. The driver prints
@@ -680,8 +683,8 @@ file or a 124 timeout is a hang. The driver prints
 `ok: trap policy reported 8 crafted fault(s) (control boot exit 33)`;
 `run-trap.py` accepts `--keep` to leave those disks in the serial-log
 directory, and `tests/host/test_trap.c` covers the same matrix on the host, so
-`make test-host` reports 3663 checks. `make size` reports a 267976 B (261 KiB)
-file and an 842046 B (822 KiB) load image.
+`make test-host` reports 3670 checks. `make size` reports a 276408 B (269 KiB)
+file and an 844414 B (824 KiB) load image.
 
 `make test-fuzz` is gate 47 and proves the phase H4 host mount-path fuzzer.
 Unlike every other gate it never boots QEMU: it deletes
@@ -722,7 +725,7 @@ runs `scripts/boot-check.py` with `EXPECT_USER=yes` plus `scripts/check-disk.py`
 The serial log must carry `CRUGOS: user hello from ring 3`,
 `CRUGOS: user badptr blocked (EFAULT)`, a `CRUGOS: user fault killed tid N
 code -14` line and `CRUGOS: user selftest ok (3 program(s), 1 fault(s))`, reach
-`CRUGOS: phase u3 boot ok` and exit 33; the boot in practice also shows the
+`CRUGOS: phase u4 boot ok` and exit 33; the boot in practice also shows the
 `CRUGOS: user selftest start` line and, before the kill line, the phase H3
 report with `from=user` and `cr2=0x10000000000`. A kernel/user exit-code
 mismatch ends the boot with status 35 before the report and the phase marker,
@@ -733,8 +736,8 @@ Every other gate runs with `EXPECT_USER=no`, and `boot-check.py` fails any of
 them that prints `user selftest ok`, so the userspace selftest cannot leak into
 an unrelated boot. `tests/host/test_uaccess.c` and `tests/host/test_exec.c`
 cover the same window, segment and entry validators and the ELF segment policy
-on the host. `make test-host` reports 3663 checks and `make size` a 267976 B
-(261 KiB) file and an 842046 B (822 KiB) load image. The marker set, the
+on the host. `make test-host` reports 3670 checks and `make size` a 276408 B
+(269 KiB) file and an 844414 B (824 KiB) load image. The marker set, the
 syscall boundary, the loader pipeline and the limits are documented in
 [userspace.md](userspace.md).
 
@@ -750,7 +753,7 @@ then `/bin/iso` twice; the serial log must carry the gate-48 markers plus
 `CRUGOS: user isolation start`, `CRUGOS: user isolation frames 0x28000 vs
 0x38000 at 0x8000030000`, `CRUGOS: iso tid 11 word 0x15500b00 ok`,
 `CRUGOS: iso tid 12 word 0x15500c00 ok` and `CRUGOS: user isolation ok
-(2 program(s), 0 mismatch(es))`, reach `CRUGOS: phase u3 boot ok` and exit 33,
+(2 program(s), 0 mismatch(es))`, reach `CRUGOS: phase u4 boot ok` and exit 33,
 and `boot-check.py` prints `user yes isolated yes` in its `ok: boot markers
 found` line. A wrong frame pair or an iso instance that reads back the other
 instance's word fails the gate with a non-zero `mismatch(es)` count and a
@@ -773,7 +776,7 @@ the disk image with all five programs and `/etc/sh.rc`, boots with
 `CRUGOS: storage remounted read-write`/`read-only` lines,
 `CRUGOS: sh write /shout.txt 22 byte(s)`, `CRUGOS: sh exit 7` and
 `CRUGOS: user shell finished (exit 7)`, and it must reach
-`CRUGOS: phase u3 boot ok` and exit 33 while boot-check reports
+`CRUGOS: phase u4 boot ok` and exit 33 while boot-check reports
 `user yes isolated yes ushell yes`. `check-disk --expect-shell-write`
 asserts `/shout.txt` is exactly `hello-from-user-shell` plus a newline after
 a clean umount and `e2fsck`, and ends with `ok: ext4 root is clean,
@@ -783,6 +786,31 @@ unsynced fails before the phase marker; a 124 is a hang. Every other gate runs
 with `EXPECT_USHELL=no`, and `boot-check.py` fails any boot that prints a
 shell marker. The file syscalls, the descriptor table and the script language
 are documented in [userspace.md](userspace.md).
+
+`make test-user4` is gate 51 and proves phase U4: a ring-3 program starts
+another one, waits for its exit code and then replaces its own image. It
+rebuilds the disk image with all seven programs, boots with
+`CMDLINE_EXTRA='user.test=4'` under `SPAWN_RUN_TIMEOUT_SEC` (240 s), runs
+`scripts/boot-check.py` with `EXPECT_USER=yes`, `EXPECT_USERS=yes`,
+`EXPECT_USHELL=yes` and the new `EXPECT_SPAWN=yes`, then the plain
+`check-disk` pass - it does not pass `--expect-shell-write`, so the
+`/shout.txt` proof stays with gate 50. The log must carry
+`CRUGOS: user spawn test start`, `CRUGOS: user spawn start`,
+`CRUGOS: user spawn tid 15`, `CRUGOS: user child running (tid 15)`,
+`CRUGOS: user child argc 2`, `CRUGOS: user child arg from-spawn`,
+`CRUGOS: user spawn child exit 5`, `CRUGOS: user spawn exec`,
+`CRUGOS: user exec /bin/child (tid 14)`, `CRUGOS: user child arg from-exec`
+and `CRUGOS: user spawn test ok (child exit 5, exec exit 5)`, and it must reach
+`CRUGOS: phase u4 boot ok` and exit 33 while boot-check reports
+`user yes isolated yes ushell yes spawn yes`. The two tids are the assertion:
+the spawned child runs as a new thread (tid 15), while the exec'd child keeps the
+spawner's tid (14), so a `SYS_EXEC` that started a new thread instead of
+replacing the image fails the gate. A spawn error, a wait returning the wrong
+code or a missing argument fails before the phase marker; a 124 is a hang. Every
+other gate runs with `EXPECT_SPAWN=no`, and `boot-check.py` fails any boot
+that prints a spawn marker. `tests/host/test_argv.c` covers `exec_args_ok`
+on the host, and the syscalls, the parent link and the in-place exec are
+documented in [userspace.md](userspace.md).
 
 ## Interactive demo
 

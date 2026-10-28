@@ -11,6 +11,7 @@
 #include <crug/uaccess.h>
 #include <crug/ext4.h>
 #include <crug/storage.h>
+#include <crug/exec.h>
 
 static i64 syscall_port_create(void)
 {
@@ -162,6 +163,8 @@ static const struct ufile_backend g_ufile_backend = {
 /* Shared bounce buffers: one syscall is in flight at a time per CPU. */
 static u8 g_io_buf[SYS_USER_IO_MAX];
 static char g_path_buf[SYS_USER_NAME_MAX];
+/* Phase U4: the string area for a spawn or exec argv vector. */
+static char g_argv_buf[EXEC_ARGS_STR_MAX];
 
 /* Copies a user path into the kernel buffer, or hands back the CPL0 pointer. */
 static const char *syscall_path(const trap_frame *frame, int user, u64 uaddr)
@@ -213,6 +216,58 @@ static i64 syscall_file_write(const trap_frame *frame, int user)
                        (const void *)(uintptr)frame->rsi, (u32)len);
 }
 
+/* Phase U4: copies an argv vector (a user or kernel array of string
+   pointers) into the kernel string buffer and fills out[] with pointers
+   inside it. The caller keeps strbuf alive for the following call. */
+static int syscall_argv(int user, u64 uargv, u32 argc, char *strbuf,
+                        usize strcap, const char **out)
+{
+    u64 ptrs[EXEC_ARGS_MAX];
+    usize used = 0;
+    u32 i;
+
+    if (argc == 0)
+        return 0;
+    if (argc > EXEC_ARGS_MAX || uargv == 0)
+        return -1;
+    if (user) {
+        if (uaccess_check(uargv, (u64)argc * sizeof(u64)) != 0)
+            return -1;
+        if (uaccess_user_read(ptrs, uargv, (usize)argc * sizeof(u64)) != 0)
+            return -1;
+    } else {
+        if (!harden_range_ok(uargv, (u64)argc * sizeof(u64),
+                             HARDEN_IDENTITY_LIMIT))
+            return -1;
+        memcpy(ptrs, (const void *)(uintptr)uargv, (usize)argc * sizeof(u64));
+    }
+    for (i = 0; i < argc; i++) {
+        usize room = used < strcap ? strcap - used : 0;
+        usize n;
+
+        if (room < 2)
+            return -1;
+        if (user) {
+            if (uaccess_user_str(&strbuf[used], ptrs[i], (u64)room) != 0)
+                return -1;
+        } else {
+            const char *src;
+
+            if (!harden_range_ok(ptrs[i], 1, HARDEN_IDENTITY_LIMIT))
+                return -1;
+            src = (const char *)(uintptr)ptrs[i];
+            n = strlen(src);
+            if (n + 1u > room)
+                return -1;
+            memcpy(&strbuf[used], src, n + 1u);
+        }
+        out[i] = &strbuf[used];
+        used += strlen(&strbuf[used]) + 1u;
+    }
+    if (!exec_args_ok(argc, (u64)used))
+        return -1;
+    return 0;
+}
 void syscall_dispatch(trap_frame *frame)
 {
     i64 ret;
@@ -624,6 +679,114 @@ void syscall_dispatch(trap_frame *frame)
         }
         ret = (i64)n;
         break;
+    }
+    case SYS_SPAWN: {
+        thread *cur = sched_current();
+        const char *path;
+        const char *av[EXEC_ARGS_MAX];
+        char pathbuf[SYS_USER_NAME_MAX];
+        u32 argc = (u32)frame->rsi;
+        elf_exec_result res;
+        usize plen;
+
+        if (!cur) {
+            ret = SYS_EINVAL;
+            break;
+        }
+        path = syscall_path(frame, user, frame->rdi);
+        if (!path || path[0] == 0) {
+            ret = SYS_EFAULT;
+            break;
+        }
+        plen = strlen(path);
+        if (plen + 1u > sizeof(pathbuf)) {
+            ret = SYS_EINVAL;
+            break;
+        }
+        memcpy(pathbuf, path, plen + 1u);
+        if (argc > EXEC_ARGS_MAX) {
+            ret = SYS_EINVAL;
+            break;
+        }
+        memset(av, 0, sizeof(av));
+        if (syscall_argv(user, frame->rdx, argc, g_argv_buf,
+                         sizeof(g_argv_buf), av) != 0) {
+            ret = SYS_EFAULT;
+            break;
+        }
+        memset(&res, 0, sizeof(res));
+        if (!elf_spawn_user(pathbuf, argc, av, cur->id, &res)) {
+            ret = SYS_EIO;
+            break;
+        }
+        ret = (i64)res.tid;
+        break;
+    }
+    case SYS_WAIT: {
+        thread *cur = sched_current();
+        thread *child;
+
+        if (!cur) {
+            ret = SYS_ESRCH;
+            break;
+        }
+        child = thread_find((u32)frame->rdi);
+        /* Only the thread that spawned a child may wait for it. */
+        if (!child || child->parent_id != cur->id || child == cur) {
+            ret = SYS_ESRCH;
+            break;
+        }
+        ret = thread_join_code(child);
+        break;
+    }
+    case SYS_EXEC: {
+        thread *cur = sched_current();
+        const char *path;
+        const char *av[EXEC_ARGS_MAX];
+        char pathbuf[SYS_USER_NAME_MAX];
+        u32 argc = (u32)frame->rsi;
+        u64 entry = 0;
+        u64 rsp = 0;
+        usize plen;
+
+        /* Exec is a user-image operation: it rewrites the trap frame that
+           leads back to CPL3, so a CPL0 caller has nothing to rewrite. */
+        if (!user || !cur) {
+            ret = SYS_EINVAL;
+            break;
+        }
+        path = syscall_path(frame, user, frame->rdi);
+        if (!path || path[0] == 0) {
+            ret = SYS_EFAULT;
+            break;
+        }
+        plen = strlen(path);
+        if (plen + 1u > sizeof(pathbuf)) {
+            ret = SYS_EINVAL;
+            break;
+        }
+        memcpy(pathbuf, path, plen + 1u);
+        if (argc > EXEC_ARGS_MAX) {
+            ret = SYS_EINVAL;
+            break;
+        }
+        memset(av, 0, sizeof(av));
+        if (syscall_argv(user, frame->rdx, argc, g_argv_buf,
+                         sizeof(g_argv_buf), av) != 0) {
+            ret = SYS_EFAULT;
+            break;
+        }
+        if (elf_exec_in_place(pathbuf, argc, av, &entry, &rsp) != 0) {
+            ret = SYS_EIO;
+            break;
+        }
+        /* Return straight into the new image: the interrupt epilogue pops
+           rip/rsp from the frame we just rewrote. */
+        frame->rip = entry;
+        frame->rsp = rsp;
+        frame->rax = 0;
+        kprintf("CRUGOS: user exec %s (tid %u)\n", pathbuf, cur->id);
+        return;
     }
     case SYS_WRITE:
         if (frame->rdi >= UFILE_FD_BASE)

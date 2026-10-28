@@ -1,4 +1,4 @@
-/* Minimal freestanding syscall library for CrugOS ring-3 programs (U1/U2). */
+/* Minimal freestanding syscall library for CrugOS ring-3 programs (U1..U4). */
 #ifndef CRUG_USER_LIB_H
 #define CRUG_USER_LIB_H
 
@@ -12,6 +12,9 @@
 #define U_SYS_READ 18u
 #define U_SYS_CLOSE 19u
 #define U_SYS_LISTDIR 20u
+#define U_SYS_SPAWN 21u
+#define U_SYS_WAIT 22u
+#define U_SYS_EXEC 23u
 
 /* SYS_OPEN flags (phase U3). U_O_RDONLY is the zero flag. */
 #define U_O_RDONLY 0u
@@ -148,6 +151,28 @@ static inline i64 u_atoi(const char *s)
     return neg ? -v : v;
 }
 
+static inline i64 u_spawn(const char *path, u32 argc, const char *const *argv)
+{
+    return u_syscall3(U_SYS_SPAWN, (u64)(uintptr)path, (u64)argc,
+                      (u64)(uintptr)argv);
+}
+
+static inline i64 u_wait(u32 tid)
+{
+    return u_syscall3(U_SYS_WAIT, (u64)tid, 0, 0);
+}
+
+/* Replaces the running image; only returns when the exec failed. */
+static inline i64 u_exec(const char *path, u32 argc, const char *const *argv)
+{
+    return u_syscall3(U_SYS_EXEC, (u64)(uintptr)path, (u64)argc,
+                      (u64)(uintptr)argv);
+}
+
+static inline i64 u_gettid(void)
+{
+    return u_syscall3(U_SYS_GETTID, 0, 0, 0);
+}
 static inline i64 u_write_bad_ptr(void)
 {
     /* A kernel address: the syscall layer must refuse it with -EFAULT. */

@@ -57,8 +57,11 @@ fault injector, parsed by `trap_cmdline()` right after `heap_cmdline()`, and
 phase U1 adds `user.test=`, parsed by `user_test_cmdline()` right after
 `trap_cmdline()`: `user.test=1` runs three ring-3 programs from `/bin` after the
 kernel self-test, phase U2's `user.test=2` also runs the two-instance
-isolation pair, and phase U3's `user.test=3` adds the scripted ring-3 shell
-(`/bin/sh` reading `/etc/sh.rc`) as a final stage. A boot
+isolation pair, phase U3's `user.test=3` adds the scripted ring-3 shell
+(`/bin/sh` reading `/etc/sh.rc`), and phase U4's `user.test=4` adds
+`/bin/spawn`, which spawns `/bin/child`, waits for its exit code and then
+execs the same child in place. Without the token the user level is 0 and the
+self-test is silent. A boot
 medium that ships no block device (the hybrid
 ISO) passes `storage=none`, which is the one token that changes the storage
 contract instead of adding work to it. The
@@ -256,11 +259,15 @@ post-snapshot allocations cannot push it over capacity.
     0 and -14. `user.test=2` runs the same three and then `/bin/iso` twice in
     two address spaces at once, checking the isolation lines below as well as
     the same exit codes. `user.test=3` runs levels 1 and 2 and then `/bin/sh`
-    with the script `/etc/sh.rc`, expecting exit 7. A mismatch exits 35 before
-    the report. Without the token it prints nothing.
+    with the script `/etc/sh.rc`, expecting exit 7. `user.test=4` runs level 3
+    and then `user_spawn()`, which runs `/bin/spawn`, joins it and requires exit
+    5; the spawn program itself spawns `/bin/child`, waits for exit 5 and then
+    execs the same binary, so the level proves spawn, wait and in-place exec at
+    once. A mismatch exits 35 before the report. Without the token the user
+    level is 0 and nothing is printed.
 14. The user self-test of step 13, when it ran, has already joined its threads;
     then `report_boot`, `storage_lock` (wipes the passphrase, the volume keys
-    and the bounce buffer), `CRUGOS: phase u3 boot ok`, then
+    and the bounce buffer), `CRUGOS: phase u4 boot ok`, then
     `wb_hold` (only when
     `wb.hold=` was given: the guest stays alive with the desktop on screen until
     the deadline), `trap_test_run()` (only when `trap.test=` was given, so the
@@ -529,7 +536,7 @@ CRUGOS: wb window 1 sent to front
 CRUGOS: wb action 6 front window 1
 CRUGOS: wb icons selftest ok (1 move(s), 1 front(s))
 CRUGOS: sh run 'ver'
-CRUGOS: sh out CrugOS 0.37.0 (phase u3), x86_64
+CRUGOS: sh out CrugOS 0.38.0 (phase u4), x86_64
 CRUGOS: wb selftest ok (1 drag(s), 1 action(s))
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb drawer selftest ok (3 scroll(s), 1 refresh(es))
@@ -569,12 +576,12 @@ CRUGOS: sh cmd exit
 CRUGOS: sh exit 7
 CRUGOS: user shell finished (exit 7)
 CRUGOS: user selftest ok (3 program(s), 1 fault(s))
-boot   : pmm=30266 us cpu=453 us vm=731 us traps=517 us timer=65587 us heap=411 us storage=96353 us sched=328 us syscall=98 us total=194748 us
-CRUGOS: phase u3 boot ok
+boot   : pmm=28772 us cpu=395 us vm=638 us traps=340 us timer=65291 us heap=471 us storage=95931 us sched=326 us syscall=96 us total=192263 us
+CRUGOS: phase u4 boot ok
 ```
 
 With `trap.test=<recipe>` the same boot ends differently: the injector runs after
-`CRUGOS: phase u3 boot ok`, injects exactly one fault and the guest exits 35
+`CRUGOS: phase u4 boot ok`, injects exactly one fault and the guest exits 35
 instead of 33. A `trap.test=de` boot ends:
 
 ```
@@ -607,7 +614,8 @@ self-test, so the user markers appear after `CRUGOS: selftest ok`, before the
 three plus the two-instance isolation pair, whose five lines sit between the
 fault program and the summary, and `user.test=3` then runs `/bin/sh` on
 `/etc/sh.rc`, whose shell lines sit between the isolation summary and the
-`user selftest ok` line. A `make test-user3` boot ends:
+`user selftest ok` line; `user.test=4` continues after the shell with
+`/bin/spawn`, whose lines are shown below. A `make test-user3` boot ends:
 
 ```
 CRUGOS: user selftest start
@@ -643,13 +651,37 @@ CRUGOS: sh cmd exit
 CRUGOS: sh exit 7
 CRUGOS: user shell finished (exit 7)
 CRUGOS: user selftest ok (3 program(s), 1 fault(s))
-boot   : pmm=30266 us cpu=453 us vm=731 us traps=517 us timer=65587 us heap=411 us storage=96353 us sched=328 us syscall=98 us total=194748 us
-CRUGOS: phase u3 boot ok
+boot   : pmm=28772 us cpu=395 us vm=638 us traps=340 us timer=65291 us heap=471 us storage=95931 us sched=326 us syscall=96 us total=192263 us
+CRUGOS: phase u4 boot ok
 ```
 
 Both user excerpts keep the lines the check asserts; a real boot also prints the
 report's `trap rip=` line and the two `trap regs` lines around the `trap fault`
 line, which the curated samples above leave out.
+
+`make test-user4` adds the spawn stage after the shell, and its lines sit between
+`user shell finished` and `user selftest ok`:
+
+```
+CRUGOS: user spawn test start
+CRUGOS: user spawn start
+CRUGOS: user spawn tid 15
+CRUGOS: user child running (tid 15)
+CRUGOS: user child argc 2
+CRUGOS: user child arg from-spawn
+CRUGOS: user spawn child exit 5
+CRUGOS: user spawn exec
+CRUGOS: user exec /bin/child (tid 14)
+CRUGOS: user child running (tid 14)
+CRUGOS: user child argc 2
+CRUGOS: user child arg from-exec
+CRUGOS: user spawn test ok (child exit 5, exec exit 5)
+```
+
+The two tids are the proof: the spawned child runs as a new thread (tid 15) and
+exits 5, while the exec'd child prints tid 14, which is the spawn program's own
+tid, because `SYS_EXEC` replaced the image inside the calling thread. The
+`from-spawn` and `from-exec` arguments distinguish the two argument blocks.
 
 `/bin/hello` writes one line through `SYS_WRITE` and exits 0. `/bin/badptr`
 passes an address above `USER_TOP`, gets `SYS_EFAULT` and still exits 0, which
@@ -664,13 +696,17 @@ the shell proof: `user.test=3` points it at `/etc/sh.rc`, it opens and reads the
 script through `SYS_OPEN`/`SYS_READ`, runs `ver`, `echo`, `cat`, `ls`, `write`
 and `exit`, and the `write` remounts the root read-write, writes `/shout.txt`
 and returns it to read-only, so `check-disk --expect-shell-write` finds the 22
-bytes after a clean umount. No other gate may print a `CRUGOS: user` line:
-`scripts/boot-check.py` takes the user expectation as `EXPECT_USER`
-(argv[27]), the isolation expectation as `EXPECT_USERS` (argv[28]) and the
-shell expectation as `EXPECT_USHELL` (argv[29]), so the plain boot markers
-above stay the contract for every gate except `make test-user` (gate 48),
-`make test-user2` (gate 49) and `make test-user3` (gate 50; see
-[userspace.md](userspace.md)).
+bytes after a clean umount. `/bin/spawn` is the process proof: it starts
+`/bin/child` with `from-spawn`, prints the new tid, waits for its exit code
+through `SYS_WAIT` and then execs the same program with `from-exec`, so one
+thread id appears before and after the image swap. No other gate may print a
+`CRUGOS: user` line: `scripts/boot-check.py` takes the user expectation as
+`EXPECT_USER` (argv[27]), the isolation expectation as `EXPECT_USERS`
+(argv[28]), the shell expectation as `EXPECT_USHELL` (argv[29]) and the new
+spawn expectation as `EXPECT_SPAWN` (argv[30]), so the plain boot markers above
+stay the contract for every gate except `make test-user` (gate 48),
+`make test-user2` (gate 49), `make test-user3` (gate 50) and
+`make test-user4` (gate 51; see [userspace.md](userspace.md)).
 
 The `virtio : net eth0 mac ...` line, the lease, the ARP resolution, the echo
 reply and `net selftest ok` appear only when a NIC is present and the network
@@ -758,14 +794,14 @@ replaced by the skip marker, and the USB device the firmware booted from shows
 up in the USB lines as an unsupported mass-storage function:
 
 ```
-CRUGOS: version 0.37.0
+CRUGOS: version 0.38.0
 CRUGOS: usb controller ready (xhci, 8 port(s))
 CRUGOS: usb device 46f4:0001 on port 1 (speed 4)
 CRUGOS: usb device class 8 on port 1 (unsupported)
 CRUGOS: storage skipped (storage=none)
 CRUGOS: heap check ok (6 slab(s), 8 object(s), 1 large block(s))
 CRUGOS: selftest ok
-CRUGOS: phase u3 boot ok
+CRUGOS: phase u4 boot ok
 ```
 
 `kernel/core/report.c` prints the machine description between them: kernel
@@ -798,10 +834,12 @@ reading the byte queue. See [input.md](input.md) for the scancode decoder and
   slot 1 holds the thread's 512 GiB to 1 TiB window. Two user programs can run
   at once and the same virtual address maps to different frames, but that is
   isolation between user programs, not against the kernel: slot 0 is still
-  shared. Phase U3 adds file descriptors and an exec-time `argv` block, but
-  there is still no fork, no runtime exec, no environment, no pipes or seek,
-  and descriptors are per thread; there is still no `SYSCALL` MSR gateway,
-  `int 0x80` reaches the same dispatcher.
+  shared. Phase U3 adds file descriptors and an exec-time `argv` block, phase U4
+  adds spawn, wait and in-place exec, but there is still no fork (a child starts
+  with an empty address space and inherits no memory or descriptors), no
+  environment, no pipes or seek, no wait-any or signals, and descriptors are per
+  thread; there is still no `SYSCALL` MSR gateway, `int 0x80` reaches the same
+  dispatcher.
 - RAID support is RAID1 and RAID10: one `md0` array. A fully blank member is
   rebuilt at boot before ext4 mounts; there is no online rebuild, no hot
   spare, no scrub, no write-intent bitmap and no generation bump. The kernel
