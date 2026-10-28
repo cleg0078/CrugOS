@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 5D framebuffer cursor (`v0.22.0`)
+## Status: phase 6A Workbench desktop (`v0.23.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -21,8 +21,9 @@ adds a caching DNS stub resolver with a TCP fallback and a name syscall, phase
 5A adds an xHCI host controller with a USB HID boot keyboard that can be plugged
 into the running guest, phase 5B adds a USB HID boot mouse whose reports become
 pointer events, phase 5C adds a USB Audio Class path with a PCM ring and a
-per-channel mixer, and phase 5D adds a pointer-driven cursor composited onto the
-GOP framebuffer console:
+per-channel mixer, phase 5D adds a pointer-driven cursor composited onto the
+GOP framebuffer console, and phase 6A adds the first Workbench slice -- a
+software desktop of intuition windows on that same framebuffer:
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -406,6 +407,31 @@ Phase 5D gives the pointer state a consumer: a cursor on the framebuffer.
   tolerance), which also pins the framebuffer pixel packing. See
   [gfx.md](docs/gfx.md).
 
+Phase 6A starts the Workbench: a small software window manager in the kernel.
+
+- `intuition.device` (`kernel/gfx/intuition.c`) owns four window slots, a
+  stacking order and one active window. A left press hit-tests top down, raises
+  and activates the window, and a press on the title bar starts a drag with the
+  grab offset; drags are clamped into the screen, and the release prints the
+  final position and counts the drag. The geometry and the palette live in
+  `include/crug/intuition.h`;
+- windows are drawn with the framebuffer primitives added in this phase
+  (`fb_fill_rect()`, `fb_frame_rect()`, `fb_draw_text()`, `fb_set_text_enabled()`):
+  a white frame, a 20-pixel title bar that is amber on the active window and
+  grey on the others, and 8x16 body text on a 20-pixel line pitch. Every state
+  change repaints the whole desktop;
+- `kernel/gfx/workbench.c` is the bring-up resident: with `wb.enable=1` it takes
+  the framebuffer away from the text console (the serial port keeps every
+  diagnostic), opens two demo windows, installs the `gfx.device` pointer hook and
+  an `input.device` poll hook that pumps the USB stack, and `wb_selftest()` waits
+  for `wb.drag=` title-bar drags within `wb.wait=` seconds. Without the token no
+  boot changes at all;
+- `make test-workbench` boots `usb=off,i8042=off` with `qemu-xhci`, hotplugs a
+  `usb-mouse`, drags window 2 by its title bar with QMP motion events and reads a
+  `screendump`: the active title bar must be at the new origin and the old one
+  must be idle, so a window that logs a move without drawing it fails. See
+  [workbench.md](docs/workbench.md).
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -414,9 +440,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.22.0 (phase 5d) -- Amiga-inspired microkernel bring-up
+CrugOS 0.23.0 (phase 6a) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.22.0
+CRUGOS: version 0.23.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -464,7 +490,7 @@ CRUGOS: tcp http served (72 bytes)
 CRUGOS: net selftest ok
 CRUGOS: gfx ready (1024x768, cursor at 512,384)
 CRUGOS: selftest ok
-kernel : 0x0000000000100000 size=716 KiB
+kernel : 0x0000000000100000 size=720 KiB
 boot   : cpu=0 acpi_rsdp=0x1f77e000 fdt=0x0 initrd=0x0
 memory : 36 regions, usable 474080 KiB (462 MiB)
 pmm    : total=118520 free=118462 bitmap=131072 B
@@ -476,7 +502,7 @@ heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
 boot   : pmm=28552 us cpu=438 us vm=626 us traps=360 us timer=65357 us heap=60 us storage=94487 us sched=354 us syscall=122 us total=190359 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase 5d boot ok
+CRUGOS: phase 6a boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -575,6 +601,37 @@ amber sprite centroid moved by `+60,+40`, `-25,-10` and `+100,-70` pixels, so a
 cursor that reports coordinates without drawing them fails. The self-test lingers
 for 1.5 s after the last move so the final dump cannot race the QEMU exit.
 
+The Workbench gate (`make test-workbench`) uses the same machine and QMP setup,
+but drags a window instead of a sprite:
+
+```
+CRUGOS: input ready (serial only)
+CRUGOS: gfx ready (1024x768, cursor at 512,384)
+CRUGOS: wb window 1 opened (80, 90, 360x220)
+CRUGOS: wb window 2 opened (480, 300, 320x200)
+CRUGOS: wb desktop ready (1024x768, 2 window(s))
+CRUGOS: usb mouse ready (endpoint 0x81, 4 byte reports)
+CRUGOS: usb mouse move dx=0 dy=-72
+CRUGOS: wb cursor at (512, 312)
+CRUGOS: usb mouse button 0x01
+CRUGOS: wb window 2 drag start (512, 312)
+CRUGOS: wb window 2 active
+CRUGOS: usb mouse move dx=45 dy=25
+CRUGOS: wb cursor at (557, 337)
+CRUGOS: wb window 2 drag to (525, 325)
+CRUGOS: usb mouse move dx=45 dy=25
+CRUGOS: wb cursor at (602, 362)
+CRUGOS: wb window 2 drag to (570, 350)
+CRUGOS: usb mouse button 0x00
+CRUGOS: wb window 2 moved to (570, 350)
+CRUGOS: wb selftest ok (1 drag(s))
+```
+
+Between those markers the gate checks the `screendump` pixels: the amber title
+bar of window 2 sits at `(570, 350)`, the old bar position is idle grey, and the
+white frame of window 1 is unchanged. The drag offset is `(32, 12)` (the grab
+point inside the title bar), so the window moves less than the pointer.
+
 With no xHCI function in the default machine the driver prints
 `CRUGOS: usb controller absent` (as in the excerpt above) and the PS/2 keyboard
 stays in charge; the USB gates are the only ones that install the controller and
@@ -616,8 +673,9 @@ make test-usb-hotplug  # hotplug a USB keyboard into xHCI and type at it
 make test-usb-mouse    # hotplug a USB mouse into xHCI and move the pointer
 make test-audio        # stream PCM to a USB Audio Class device through the mixer
 make test-gfx          # move a hotplugged USB mouse and verify the framebuffer cursor
+make test-workbench    # drag a window on the software-rendered desktop
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
-make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor)
+make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows)
 make check-disk  # e2fsck + persisted-file checks on the latest test disk
 make disk        # generate the GPT/ext4 test disk
 make raid-disks  # generate the two RAID1 member disks
@@ -640,9 +698,10 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `QEMU_DISPLAY`, `QEMU_EXTRA`, `OVMF_CODE`, `OVMF_VARS`, `REQUIRE_AVX2`,
 `EXPECT_AVX2`, `EXPECT_RAID`, `EXPECT_NVME`, `EXPECT_REBUILD`, `EXPECT_AHCI`,
 `EXPECT_CRYPT`, `EXPECT_AES`, `EXPECT_NET`, `EXPECT_TCP`, `EXPECT_DNS`,
-`EXPECT_USB`, `EXPECT_MOUSE`, `EXPECT_AUDIO`, `EXPECT_GFX`,
+`EXPECT_USB`, `EXPECT_MOUSE`, `EXPECT_AUDIO`, `EXPECT_GFX`, `EXPECT_WB`,
 `AUDIO_RUN_TIMEOUT_SEC`, `AUDIO_QEMU_EXTRA`, `GFX_WAIT`, `GFX_MOVES`,
-`GFX_RUN_TIMEOUT_SEC`, `GFX_QEMU_EXTRA`, `NET_MODE`, `NET_HOSTFWD`, `TCP_SERVE_SEC`,
+`GFX_RUN_TIMEOUT_SEC`, `GFX_QEMU_EXTRA`, `WB_WAIT`, `WB_DRAG`,
+`WB_RUN_TIMEOUT_SEC`, `WB_QEMU_EXTRA`, `NET_MODE`, `NET_HOSTFWD`, `TCP_SERVE_SEC`,
 `TCP_RUN_TIMEOUT_SEC`, `DNS_NAME`, `DNS_ADDRESS`, `DNS_TTL`,
 `DNS_RUN_TIMEOUT_SEC`, `USB_WAIT`, `USB_KEYS`, `USB_RUN_TIMEOUT_SEC`,
 `MOUSE_MOVES`, `MOUSE_WAIT`, `MOUSE_RUN_TIMEOUT_SEC`, `MACHINE_EXTRA`,
@@ -665,7 +724,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/input/` | `input.device`: set-1 scancode decoder, the console byte queue and the pointer state |
 | `kernel/audio/` | `audio.device` PCM ring, the per-channel mixer and the tone generator |
 | `kernel/net/` | `net.device`, Ethernet/ARP/IPv4/ICMP/UDP, TCP, the DHCP client and the DNS resolver |
-| `kernel/gfx/` | `gfx.device`: the pointer-driven framebuffer cursor |
+| `kernel/gfx/` | `gfx.device` (the pointer-driven framebuffer cursor) and `intuition.device` with the phase 6A desktop |
 | `kernel/mm/` | physical allocator, W^X page tables, kernel heap |
 | `kernel/block/` | block-device registry, partitions, bounds checks, RAID1/RAID10, boot-time rebuild and the AES-256-XTS `crypt.device` |
 | `kernel/fs/` | GPT, writable checksummed ext4, checksummed JBD2 journal and the storage boot policy (including the console passphrase prompt) |
@@ -675,7 +734,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `tests/host/` | host unit tests for freestanding code |
 | `tools/` | host-side development tools (`gen-font.py`, `mkcrypt.c`, `gen-crc32c.py`) |
 | `docs/` | [build](docs/build.md), [boot](docs/boot.md), [storage](docs/storage.md), [checksums](docs/checksums.md), [crypto](docs/crypto.md), [input](docs/input.md), [network](docs/network.md),
-[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [USB/xHCI](docs/usb.md), [audio](docs/audio.md), [graphics](docs/gfx.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
+[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [USB/xHCI](docs/usb.md), [audio](docs/audio.md), [graphics](docs/gfx.md), [Workbench](docs/workbench.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
 
 ## Versioning
 
@@ -741,13 +800,15 @@ per-channel mixer and a USB Audio Class driver that streams isochronous packets
 from a PCM ring, gated with a hermetic QEMU audio function; phase 5D added
 `gfx.device`, a 12x19 cursor the framebuffer console saves and recomposites
 around its text, gated by comparing QEMU screendumps against the guest's own
-coordinates. Remaining phase 3B work is
+coordinates; phase 6A added `intuition.device`, a software window manager of
+four stacked, draggable windows on that framebuffer, and the gated two-window
+desktop bring-up. Remaining phase 3B work is
 online RAID rebuild, hot spare, scrub and a write-intent bitmap, RAID below
 encryption, a redundant ESP, TPM/keyfile keyslots and USB storage; phase 4
 continues with framebuffer (GOP) console input and virtual terminals, plus a
 routing table and richer resolver features on top of the phase 4B-4D stack;
-the next step is console scrollback and click handling on top of the phase 5D
-cursor. Later phases cover
+the next step is Workbench userspace: gadgets, a shell window and console
+scrollback on top of the phase 6A desktop. Later phases cover
 USB storage, graphics, Workbench userspace, SMP/IOMMU and virtualisation. See
 [docs/roadmap.md](docs/roadmap.md) for the full sequence and the known
 specification gaps (Crug syntax, cross-architecture compilers and the OVMF

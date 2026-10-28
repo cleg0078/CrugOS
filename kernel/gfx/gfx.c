@@ -21,6 +21,7 @@ static u32 g_wait_seconds;
 static u32 g_want_moves;
 static int g_ready;
 static int g_reporting;  /* a gate wants one marker per move */
+static gfx_pointer_hook g_pointer_hook;
 
 int gfx_init(void)
 {
@@ -164,6 +165,11 @@ static void gfx_clamp(i32 *x, i32 *y)
     }
 }
 
+void gfx_set_pointer_hook(gfx_pointer_hook hook)
+{
+    g_pointer_hook = hook;
+}
+
 void gfx_pointer_poll(void)
 {
     struct input_pointer event;
@@ -191,6 +197,9 @@ void gfx_pointer_poll(void)
                 kprintf("CRUGOS: gfx pointer buttons 0x%02x\n",
                         (unsigned)event.buttons);
             }
+        }
+        if (g_pointer_hook) {
+            g_pointer_hook(&event);
         }
     }
 }

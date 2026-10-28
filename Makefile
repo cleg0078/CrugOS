@@ -21,6 +21,7 @@
 #   make test-usb-mouse    hotplug a USB mouse into xHCI and move the pointer
 #   make test-audio  stream PCM to a USB Audio Class device through the mixer
 #   make test-gfx    move a hotplugged USB mouse and verify the framebuffer cursor
+#   make test-workbench  drag a window on the software-rendered desktop
 #   make crypt-disk  build the AES-256-XTS crypt test disk
 #   make test-crypt  boot from an encrypted root and verify the disk
 #   make test-crypt-recovery  unlock the encrypted root with the recovery keyslot
@@ -82,6 +83,7 @@ EXPECT_USB ?= no
 EXPECT_MOUSE ?= no
 EXPECT_AUDIO ?= no
 EXPECT_GFX ?= no
+EXPECT_WB ?= no
 
 # QEMU / firmware options.
 MEMORY_MB ?= 512
@@ -110,6 +112,10 @@ GFX_WAIT ?= 40
 GFX_MOVES ?= 3
 GFX_RUN_TIMEOUT_SEC ?= 240
 GFX_QEMU_EXTRA ?= -device qemu-xhci,id=xhci
+WB_WAIT ?= 30
+WB_DRAG ?= 1
+WB_RUN_TIMEOUT_SEC ?= 240
+WB_QEMU_EXTRA ?= -device qemu-xhci,id=xhci
 NET_MODE ?=
 NET_HOSTFWD ?=
 OVMF_CODE ?= /usr/share/OVMF/OVMF_CODE_4M.fd
@@ -216,6 +222,7 @@ HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
         test-crypt-prompt test-crypt-prompt-wrong test-crypt-prompt-timeout \
         test-crypt-keyboard test-crypt-keyboard-wrong crypt-run test-net test-tcp \
         test-net-dns test-usb-hotplug test-usb-mouse test-audio test-gfx \
+        test-workbench \
         crash-disk \
         check-disk size check-efi repro test-host preflight version options clean distclean help
 
@@ -434,6 +441,20 @@ test-gfx: esp
 	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" no no no no no any no no no no no no yes
 	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 
+# Workbench gate: the guest boots with wb.enable=1, opens its windows and waits
+# for a title-bar drag; the driver hotplugs a usb-mouse over QMP, presses on the
+# title bar, drags it and releases. A screendump then proves the active title
+# bar is drawn at the new window origin and no longer at the old one.
+test-workbench: esp
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(PYTHON) scripts/run-workbench.py --repo $(CURDIR) \
+		--disk $(abspath $(DISK_IMG)) --serial-log $(abspath $(SERIAL_LOG)) \
+		--exit-code $(abspath $(QEMU_EXIT)) --drag $(WB_DRAG) \
+		--wb-wait $(WB_WAIT) --run-timeout $(WB_RUN_TIMEOUT_SEC) \
+		--qemu-extra "$(WB_QEMU_EXTRA)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" no no no no no any no no no no no no no yes
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
 test:
 	$(Q)rm -f $(DISK_IMG)
 	$(Q)$(MAKE) --no-print-directory run
@@ -639,6 +660,11 @@ options:
 	@printf '  %-16s %s\n' GFX_MOVES "$(GFX_MOVES)"
 	@printf '  %-16s %s\n' GFX_RUN_TIMEOUT_SEC "$(GFX_RUN_TIMEOUT_SEC)"
 	@printf '  %-16s %s\n' GFX_QEMU_EXTRA "$(GFX_QEMU_EXTRA)"
+	@printf '  %-16s %s\n' EXPECT_WB "$(EXPECT_WB)"
+	@printf '  %-16s %s\n' WB_WAIT "$(WB_WAIT) (seconds)"
+	@printf '  %-16s %s\n' WB_DRAG "$(WB_DRAG)"
+	@printf '  %-16s %s\n' WB_RUN_TIMEOUT_SEC "$(WB_RUN_TIMEOUT_SEC)"
+	@printf '  %-16s %s\n' WB_QEMU_EXTRA "$(WB_QEMU_EXTRA)"
 	@printf '  %-16s %s\n' MEMORY_MB "$(MEMORY_MB)"
 	@printf '  %-16s %s\n' SMP "$(SMP)"
 	@printf '  %-16s %s\n' TIMEOUT_SEC "$(TIMEOUT_SEC)"

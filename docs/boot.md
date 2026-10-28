@@ -35,14 +35,15 @@ OVMF (UEFI firmware)
 `include/crug/bootinfo.h` is the single contract between loader and kernel.
 The structure is versioned (`magic = 0x43524731`, `version = 1`) and the kernel
 refuses to boot if either does not match or if required fields are invalid.
-Phases 1 through 5D did not change the layout; phase 3B-9 is the first
+Phases 1 through 6A did not change the layout; phase 3B-9 is the first
 kernel to consume the `command_line` field, phase 3B-10 falls back to an
 interactive serial passphrase prompt when no token is present, phases 4C and 4D
 read the non-secret `net.tcp=` / `net.serve=` / `net.dns=` /
 `net.dns-tcp=` / `net.name=` tokens from the same field, phase 5A adds
 `usb.wait=` / `usb.keys=`, phase 5B adds `usb.mouse=` / `usb.moves=`, phase
-5C adds `audio.rate=` / `audio.volume=` / `audio.seconds=`, and phase 5D adds
-`gfx.wait=` / `gfx.moves=`. The
+5C adds `audio.rate=` / `audio.volume=` / `audio.seconds=`, phase 5D adds
+`gfx.wait=` / `gfx.moves=`, and phase 6A adds `wb.enable=` / `wb.wait=` /
+`wb.drag=`. The
 loader caps
 the command line at 511 bytes and the kernel wipes the page after it copies the
 `crypt.pass=` value.
@@ -119,7 +120,12 @@ post-snapshot allocations cannot push it over capacity.
    framebuffer and centres the pointer sprite, and `gfx_cmdline` reads
    `gfx.wait=<seconds>` and `gfx.moves=<n>`: the boot prints
    `CRUGOS: gfx framebuffer absent` or
-   `CRUGOS: gfx ready (1024x768, cursor at 512,384)`.
+   `CRUGOS: gfx ready (1024x768, cursor at 512,384)`. `wb_cmdline` then reads
+   `wb.enable=`, `wb.wait=<seconds>` and `wb.drag=<n>`, and `wb_init` builds the
+   desktop only when the token was supplied: it takes the framebuffer away from
+   the text console and prints `CRUGOS: wb desktop ready (1024x768, 2
+   window(s))`. Without the token the framebuffer console keeps its text mode
+   and no Workbench line appears.
 9. `net_init`: reset `net.device` and `tcp_init`, then probe legacy virtio-net
    PCI functions (up to four `eth0`..`eth3`) and register them, bind the DHCP
    client to UDP port 68 and read the `net.tcp=<port>` / `net.serve=<seconds>`
@@ -186,9 +192,11 @@ post-snapshot allocations cannot push it over capacity.
     through the mixer when a USB audio function is present and is silent
     otherwise; then the graphics check, which shows the cursor and waits for
     `gfx.moves=` pointer reports within `gfx.wait=` seconds when those tokens
-    were supplied and is silent otherwise.
+    were supplied and is silent otherwise; then the Workbench check, which shows
+    the desktop and waits for `wb.drag=` title-bar drags within `wb.wait=`
+    seconds when `wb.enable=` enabled it, and is silent otherwise.
 14. `report_boot`, `storage_lock` (wipes the passphrase, the volume keys and
-    the bounce buffer), `CRUGOS: phase 5d boot ok`, `arch_exit_qemu(0x10)`.
+    the bounce buffer), `CRUGOS: phase 6a boot ok`, `arch_exit_qemu(0x10)`.
 
 Storage is still brought up with interrupts disabled: the virtio driver polls
 its used ring, the NVMe driver polls completion queues and the AHCI driver polls
@@ -343,6 +351,8 @@ CRUGOS: heap ready
 CRUGOS: input ready (serial + keyboard)   # or: (serial only)
 CRUGOS: usb controller absent             # or: usb controller ready (xhci, 8 port(s))
 CRUGOS: audio device absent               # or: audio device ready (usb uac1, 2 ch, 16-bit, 48000 Hz)
+CRUGOS: gfx ready (1024x768, cursor at 512,384)
+CRUGOS: wb desktop ready (1024x768, 2 window(s))  # only with wb.enable=1
 CRUGOS: usb keyboard ready (endpoint 0x81, 8 byte reports)  # USB keyboard attached
 CRUGOS: usb key 'a'                       # one per decoded key while usb.wait= is set
 CRUGOS: usb mouse ready (endpoint 0x81, 4 byte reports)     # USB mouse attached
@@ -397,8 +407,12 @@ CRUGOS: audio selftest ok
 CRUGOS: gfx cursor shown at (512, 384)     # only with gfx.wait=/gfx.moves=
 CRUGOS: gfx cursor at (572, 424)
 CRUGOS: gfx selftest ok (3 move(s), buttons 0x00)
+CRUGOS: wb window 2 drag start (512, 312)   # only with wb.enable=1
+CRUGOS: wb window 2 drag to (570, 350)
+CRUGOS: wb window 2 moved to (570, 350)
+CRUGOS: wb selftest ok (1 drag(s))
 CRUGOS: selftest ok
-CRUGOS: phase 5d boot ok
+CRUGOS: phase 6a boot ok
 ```
 
 The `virtio : net eth0 mac ...` line, the lease, the ARP resolution, the echo
@@ -426,6 +440,13 @@ The `gfx` lines appear only in gate mode: `make test-gfx` boots with
 `gfx.wait=`/`gfx.moves=`, hotplugs a USB mouse and compares QEMU screendumps
 before and after each injected move. A normal boot prints neither those lines
 nor `CRUGOS: gfx cursor shown at`. See [gfx.md](gfx.md).
+
+The `wb` lines appear only with `wb.enable=1`: `make test-workbench` boots that
+way, hotplugs a `usb-mouse` and drags a window by its title bar, so the log
+shows the desktop, the two demo windows, the drag lines and
+`CRUGOS: wb selftest ok`. The gate then checks the active title bar in a
+screendump, so a window that logs a move without repainting fails. See
+[workbench.md](workbench.md).
 
 The `audio` lines appear only on machines with a USB audio function: a default
 `q35` boot prints `CRUGOS: audio device absent`, while `make test-audio` adds

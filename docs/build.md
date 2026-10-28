@@ -1,6 +1,6 @@
 # Building CrugOS
 
-This document describes the phase 5D build system: how the kernel, the UEFI
+This document describes the phase 6A build system: how the kernel, the UEFI
 loader, the host crypto tool and the test disk images are built, which
 invariants the link must preserve, and how to diagnose the failure modes that
 are specific to this toolchain.
@@ -33,6 +33,7 @@ make test-usb-hotplug  # hotplug a USB keyboard into xHCI and type at it
 make test-usb-mouse    # hotplug a USB mouse into xHCI and move the pointer
 make test-audio        # stream PCM to a USB Audio Class device through the mixer
 make test-gfx          # move a hotplugged USB mouse and verify the framebuffer cursor
+make test-workbench    # drag a window on the software-rendered desktop
 make test-raid   # boot a two-member RAID1 root and check both members
 make test-raid10 # boot a four-member RAID10 root and check every member
 make test-nvme   # boot from an NVMe namespace and check the image
@@ -55,7 +56,7 @@ make test-crypt-keyboard  # type the passphrase on the PS/2 keyboard and boot
 make test-crypt-keyboard-wrong  # three wrong keyboard passphrases must lock the volume
 make crypt-run   # boot the encrypted disk in a QEMU window for real typing
 make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
-make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/USB HID keyboard and mouse descriptors and reports/pointer state/IPv4/TCP/UDP checksums/DHCP parsing/DNS/audio mixer, tone and PCM ring/framebuffer cursor
+make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/USB HID keyboard and mouse descriptors and reports/pointer state/IPv4/TCP/UDP checksums/DHCP parsing/DNS/audio mixer, tone and PCM ring/framebuffer cursor/intuition windows
 make disk        # build the GPT/ext4 test disk at build/<arch>/disk.img
 make raid-disks  # build the two GPT/ext4 RAID1 member disks
 make raid10-disks  # build the four GPT/ext4 RAID10 member disks
@@ -122,6 +123,11 @@ options` prints the complete resolved set (including paths derived from
 | `GFX_MOVES` | `3` | pointer moves `make test-gfx` injects and verifies in the framebuffer |
 | `GFX_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for `make test-gfx` |
 | `GFX_QEMU_EXTRA` | `-device qemu-xhci,id=xhci` | QEMU arguments `make test-gfx` boots with (the gate adds its own `-qmp` socket) |
+| `EXPECT_WB` | `no` | `yes` requires the `wb desktop ready` / `wb window` / `wb selftest ok` markers written by `make test-workbench` |
+| `WB_WAIT` | `30` | seconds the desktop gate boots with `wb.wait=` so the mouse can be hotplugged late |
+| `WB_DRAG` | `1` | title-bar drags `make test-workbench` performs and verifies |
+| `WB_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for `make test-workbench` |
+| `WB_QEMU_EXTRA` | `-device qemu-xhci,id=xhci` | QEMU arguments `make test-workbench` boots with (the gate adds its own `-qmp` socket) |
 | `CRASH_IMG` | `$(BUILD)/crash.img` | crash-gate image (journal commit, no checkpoint) |
 | `CRASH_REPLAY_IMG` | `$(BUILD)/crash-replay.img` | copy the kernel replays on the second crash-gate boot |
 | `CC` | `crugc` | compiler for kernel and loader objects |
@@ -412,6 +418,22 @@ gate requires exit status 33, `CRUGOS: gfx selftest ok`, the `gfx` markers
 (`EXPECT_GFX=yes`) and a clean `e2fsck`; it prints
 `ok: gfx cursor (3 move(s) verified in the framebuffer, exit 33)`. See
 [gfx.md](gfx.md).
+
+`make test-workbench` proves the phase 6A desktop with the same machine setup
+(`usb=off,i8042=off`) plus `WB_QEMU_EXTRA`;
+[scripts/run-workbench.py](../scripts/run-workbench.py) boots with
+`wb.enable=1 wb.wait=$(WB_WAIT) wb.drag=$(WB_DRAG)` through `CMDLINE_EXTRA`, so
+the framebuffer console is taken over by the desktop and two demo windows are
+opened. It hotplugs `usb-mouse`, moves the pointer onto the title bar of window
+2, presses the left button, injects two `(+45, +25)` motion events and
+releases. The grab offset `(32, 12)` means the window follows with the pointer
+minus that offset. The gate then reads a `screendump` and requires the active
+title bar amber at the new origin, the old bar position idle grey and the frame
+of window 1 still white, which also pins the RGB packing of the framebuffer
+primitives. It requires exit status 33, `CRUGOS: wb selftest ok`, the `wb`
+markers (`EXPECT_WB=yes`) and a clean `e2fsck`; it prints
+`ok: workbench title-bar drag (1 drag(s), window 2 at (570, 350), exit 33)`.
+See [workbench.md](workbench.md).
 
 The supported ext4 subset, write path, checksum layout, journal format and
 failure modes are documented in [storage.md](storage.md) and

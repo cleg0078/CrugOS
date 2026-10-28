@@ -17,6 +17,7 @@
 #include <crug/usb.h>
 #include <crug/audio.h>
 #include <crug/gfx.h>
+#include <crug/workbench.h>
 
 void kernel_main(const boot_info *bi);
 
@@ -35,7 +36,7 @@ void kernel_main(const boot_info *bi)
     trace("K:console");
 
     console_write("\n");
-    console_write("CrugOS " CRUG_VERSION_STR " (phase 5d) -- Amiga-inspired microkernel bring-up\n");
+    console_write("CrugOS " CRUG_VERSION_STR " (phase 6a) -- Amiga-inspired microkernel bring-up\n");
     console_write("CRUGOS: hello\n");
     kprintf("CRUGOS: version %s\n", CRUG_VERSION_STR);
 
@@ -75,6 +76,9 @@ void kernel_main(const boot_info *bi)
     gfx_init();
     gfx_cmdline(bi);
 
+    wb_cmdline(bi);
+    wb_init();
+
     net_init(bi);
     kprintf("CRUGOS: net ready (%u device(s))\n", (unsigned)net_device_count());
 
@@ -102,7 +106,7 @@ void kernel_main(const boot_info *bi)
     report_boot(bi, &t);
 
     storage_lock();
-    kprintf("CRUGOS: phase 5d boot ok\n");
+    kprintf("CRUGOS: phase 6a boot ok\n");
     trace("K:exit-ok");
     arch_exit_qemu(0x10);
 }

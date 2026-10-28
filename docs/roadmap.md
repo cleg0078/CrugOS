@@ -25,7 +25,8 @@ hotplug gate; phase 5B adds a USB HID boot mouse, a four-device table on that
 controller and a pointer device; phase 5C adds `audio.device`, a per-channel
 mixer and a USB Audio Class driver with an isochronous xHCI path; phase 5D adds
 `gfx.device`, a pointer-driven sprite composited onto the GOP framebuffer
-console.
+console; phase 6A adds `intuition.device`, a software window manager of four
+stacked, draggable windows, and the two-window Workbench desktop.
 Every later phase keeps the same BootInfo contract, so the loader does not
 change for memory management, storage, SMP or drivers.
 
@@ -493,6 +494,43 @@ change for memory management, storage, SMP or drivers.
   terminate. `make test-host` reports 2426 checks.
 - All 34 gates pass at `v0.22.0`.
 
+## Phase 6A - Workbench desktop foundation (done)
+
+- `kernel/arch/x86_64/fb.c` gained five primitives above the console:
+  `fb_fill_rect()`, `fb_frame_rect()`, `fb_draw_text()` and the
+  `fb_cursor_begin()` / `fb_cursor_end()` pair that hides and restores the
+  sprite around a batch of drawing, plus `fb_set_text_enabled()` so the desktop
+  can take the framebuffer away from the character console. The cursor save
+  buffer is a single 12x19 slot, so every composite is bracketed by the
+  begin/end pair.
+- `intuition.device` (`kernel/gfx/intuition.c`, `include/crug/intuition.h`)
+  keeps four window slots in a stacking order, hit-tests title bars top-down,
+  raises and activates on press, drags with a grab offset `(px - x, py - y)`,
+  clamps to the screen, repaints the whole desktop (desktop fill, then windows
+  bottom-to-top) and prints `CRUGOS: wb window N opened`, `... active`,
+  `... drag start`, `... drag to` and `... moved to` markers in gate mode.
+- `gfx.device` gained `gfx_set_pointer_hook()`: after it moves the sprite it
+  hands the raw `struct input_pointer` to the desktop, so windows follow the
+  same deltas the cursor does.
+- `kernel/gfx/workbench.c` reads `wb.enable=`, `wb.wait=` and `wb.drag=`, takes
+  the text console away, opens window 1 `(80, 90) 360x220 Workbench` and window
+  2 `(480, 300) 320x200 Shell`, installs `usb_poll()` + `gfx_pointer_poll()` as
+  the console poll hook and prints `CRUGOS: wb desktop ready (1024x768, 2
+  window(s))`. `wb_selftest()` is silent unless `wb.enable=1`, and otherwise
+  waits for `wb.drag=` title-bar drags before printing
+  `CRUGOS: wb selftest ok (N drag(s))` and lingering 1.5 s for the gate.
+- `make test-workbench` boots `wb.enable=1 wb.wait=$(WB_WAIT) wb.drag=$(WB_DRAG)`
+  with `usb=off,i8042=off` plus `qemu-xhci`, hotplugs a `usb-mouse`, presses
+  the title bar of window 2, injects two `(+45, +25)` motions and releases.
+  QEMU screendumps then prove the active title bar is drawn at the new origin,
+  the old bar is idle grey and the frame of window 1 stayed white (which pins
+  the RGB packing of the new primitives). It requires the `wb` markers, exit 33
+  and a clean `e2fsck`.
+- `tests/host/test_intuition.c` drives the real window manager (open, stacking,
+  hit test, drag, clamp, close, repaint counts) over a fake framebuffer.
+  `make test-host` reports 2487 checks.
+- All 35 gates pass at `v0.23.0`.
+
 ## Phase 3B - remaining storage work
 
 - Journal wrapping, revoke records and orphan-file recovery.
@@ -512,7 +550,8 @@ change for memory management, storage, SMP or drivers.
 - USB HID devices beyond the boot keyboard, mouse and audio function (phase 5A
   delivered the xHCI controller and the keyboard, phase 5B the mouse, phase 5C
   `audio.device`, the mixer and the USB Audio Class driver, phase 5D the
-  pointer-driven cursor on the GOP framebuffer; phase 4A delivered the PS/2
+  pointer-driven cursor on the GOP framebuffer and phase 6A the intuition
+  desktop and window manager on top of it; phase 4A delivered the PS/2
   console input step, phase
   4B the virtio-net/IPv4 slice, phase 4C the TCP/socket slice and phase 4D the
   DNS resolver).
@@ -521,7 +560,8 @@ change for memory management, storage, SMP or drivers.
   phase 4B-4D stack, richer socket semantics (bind, options, non-blocking, more
   than four sockets); IPv6, fragmentation and reassembly.
 - Software framebuffer -> VirtIO-GPU -> vendor GPU drivers, starting with
-  console scrollback, click handling and acceleration on top of the phase 5D
+  console scrollback in a Workbench window, click handling beyond the title bar
+  drag, gadgets and window resizing on top of the phase 6A desktop, the phase 5D
   cursor, the phase 5B pointer stack and the phase 5C audio stack.
 - Workbench userspace, `.app` bundles, `.crpkg` packages, capability model.
 - POSIX-like layer: 64-bit UID/GID, ACLs, process groups, signals.

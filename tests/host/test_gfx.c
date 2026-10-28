@@ -65,6 +65,23 @@ u32 fb_cursor_y(void)
     return g_show_y;
 }
 
+/* Shared with tests/host/test_intuition.c, which renders the desktop through
+ * the same fake framebuffer. */
+void test_fb_fake_reset(int ready, u32 width, u32 height)
+{
+    g_fb_ready = ready;
+    g_fb_width = width;
+    g_fb_height = height;
+    g_show_x = 0;
+    g_show_y = 0;
+}
+
+void test_fb_cursor_set(u32 x, u32 y)
+{
+    g_show_x = x;
+    g_show_y = y;
+}
+
 /* Replaces the HLT idle path (include/crug/cpu.h) so the self-test linger and
  * timeout loops step the shared fake clock instead of sleeping. */
 void host_cpu_wait_for_irq(void)

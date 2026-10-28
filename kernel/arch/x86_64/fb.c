@@ -13,6 +13,7 @@ extern const u8 crug_font8x16[128][16];
 
 static framebuffer_info g_fb;
 static int g_ready;
+static int g_text_enabled;
 static u32 g_cols;
 static u32 g_rows;
 static u32 g_x;
@@ -162,6 +163,7 @@ void fb_init(const framebuffer_info *fb)
         return;
     }
     g_fb = *fb;
+    g_text_enabled = 1;
     g_cols = g_fb.width / FB_GLYPH_W;
     g_rows = g_fb.height / FB_GLYPH_H;
     if (g_cols == 0 || g_rows == 0) {
@@ -247,7 +249,7 @@ static void fb_putc_raw(char ch)
 
 void fb_putc(char ch)
 {
-    if (!g_ready) {
+    if (!g_ready || !g_text_enabled) {
         return;
     }
     /* Take the sprite out of the framebuffer before the glyph (or a scroll)
@@ -298,4 +300,102 @@ u32 fb_cursor_x(void)
 u32 fb_cursor_y(void)
 {
     return g_cursor_y;
+}
+
+void fb_cursor_begin(void)
+{
+    fb_cursor_restore();
+}
+
+void fb_cursor_end(void)
+{
+    fb_cursor_composite();
+}
+
+void fb_set_text_enabled(int enabled)
+{
+    g_text_enabled = enabled ? 1 : 0;
+}
+
+int fb_text_enabled(void)
+{
+    return g_text_enabled;
+}
+
+static void fb_fill_raw(u32 x, u32 y, u32 w, u32 h, const framebuffer_info *fb,
+                        u32 color)
+{
+    u32 row, col;
+
+    if (!fb || x >= fb->width || y >= fb->height) {
+        return;
+    }
+    for (row = y; row < fb->height && row - y < h; row++) {
+        for (col = x; col < fb->width && col - x < w; col++) {
+            fb_store(col, row, color);
+        }
+    }
+}
+
+void fb_fill_rect(u32 x, u32 y, u32 w, u32 h, u32 rgb)
+{
+    if (!g_ready || !w || !h) {
+        return;
+    }
+    fb_cursor_restore();
+    fb_fill_raw(x, y, w, h, &g_fb, fb_pixel_color(rgb));
+    fb_cursor_composite();
+}
+
+void fb_frame_rect(u32 x, u32 y, u32 w, u32 h, u32 rgb)
+{
+    u32 color;
+
+    if (!g_ready || w < 2u || h < 2u) {
+        return;
+    }
+    color = fb_pixel_color(rgb);
+    fb_cursor_restore();
+    fb_fill_raw(x, y, w, 1u, &g_fb, color);
+    fb_fill_raw(x, y + h - 1u, w, 1u, &g_fb, color);
+    fb_fill_raw(x, y, 1u, h, &g_fb, color);
+    fb_fill_raw(x + w - 1u, y, 1u, h, &g_fb, color);
+    fb_cursor_composite();
+}
+
+static void fb_glyph_px(u32 x0, u32 y0, unsigned char c, u32 fg, u32 bg)
+{
+    const u8 *glyph = crug_font8x16[c < 128 ? c : (unsigned char)'?'];
+    u32 row, col;
+
+    for (row = 0; row < FB_GLYPH_H; row++) {
+        u8 bits = glyph[row];
+        for (col = 0; col < FB_GLYPH_W; col++) {
+            u32 color = (bits & (0x80u >> col)) ? fg : bg;
+            if (x0 + col < g_fb.width && y0 + row < g_fb.height) {
+                fb_store(x0 + col, y0 + row, color);
+            }
+        }
+    }
+}
+
+void fb_draw_text(u32 x, u32 y, const char *text, u32 fg, u32 bg)
+{
+    u32 fg_color, bg_color;
+
+    if (!g_ready || !text || y >= g_fb.height) {
+        return;
+    }
+    fg_color = fb_pixel_color(fg);
+    bg_color = fb_pixel_color(bg);
+    fb_cursor_restore();
+    while (*text) {
+        if (x + FB_GLYPH_W > g_fb.width) {
+            break;
+        }
+        fb_glyph_px(x, y, (unsigned char)*text, fg_color, bg_color);
+        x += FB_GLYPH_W;
+        text++;
+    }
+    fb_cursor_composite();
 }
