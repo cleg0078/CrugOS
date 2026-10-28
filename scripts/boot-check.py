@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Verify a CrugOS boot: serial markers, guest version, CPU policy, storage mode, encryption, networking, TCP, DNS, USB, HID mice, audio, the framebuffer cursor, the Workbench desktop, its menus and gadgets, its shell window and its keyboard
-navigation, then the exit code.
+"""Verify a CrugOS boot: serial markers, guest version, CPU policy, storage mode, encryption, networking, TCP, DNS, USB, HID mice, audio, the framebuffer cursor, the Workbench desktop, its menus and gadgets, its shell window, its keyboard
+navigation and its desktop objects, then the exit code.
 
 Pass --storage=none anywhere on the command line when the boot medium ships no
 block device (the hybrid ISO does): the storage, journal, GPT and ext4 markers
@@ -10,7 +10,7 @@ usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE \
     [VERSION_FILE [EXPECT_AVX2 [EXPECT_RAID [EXPECT_NVME [EXPECT_REBUILD \
     [EXPECT_AHCI [EXPECT_CRYPT [EXPECT_AES [EXPECT_NET [EXPECT_TCP \
     [EXPECT_DNS [EXPECT_USB [EXPECT_MOUSE [EXPECT_AUDIO \
-    [EXPECT_GFX [EXPECT_WB [EXPECT_MENU [EXPECT_SHELL [EXPECT_KEYS]]]]]]]]]]]]]]]]]]] \
+    [EXPECT_GFX [EXPECT_WB [EXPECT_MENU [EXPECT_SHELL [EXPECT_KEYS [EXPECT_DESK]]]]]]]]]]]]]]]]]]]] \
     [--storage=none]
 """
 
@@ -39,7 +39,7 @@ REQUIRED_MARKERS = (
     "CRUGOS: selftest ok",
     "CRUGOS: nvme ready",
     "CRUGOS: ahci ready",
-    "CRUGOS: phase 6d boot ok",
+    "CRUGOS: phase 6e boot ok",
 )
 # A rejected unlock stops before scheduling, storage mounting and self-tests.
 WRONG_CRYPT_MARKERS = (
@@ -111,13 +111,13 @@ def main() -> int:
             argv.append(arg)
     sys.argv = [sys.argv[0]] + argv
 
-    if len(sys.argv) not in tuple(range(3, 23)):
+    if len(sys.argv) not in tuple(range(3, 24)):
         print("usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE "
               "[VERSION_FILE [EXPECT_AVX2 [EXPECT_RAID [EXPECT_NVME "
               "[EXPECT_REBUILD [EXPECT_AHCI [EXPECT_CRYPT [EXPECT_AES "
               "[EXPECT_NET [EXPECT_TCP [EXPECT_DNS [EXPECT_USB "
               "[EXPECT_MOUSE [EXPECT_AUDIO [EXPECT_GFX [EXPECT_WB "
-              "[EXPECT_MENU [EXPECT_SHELL [EXPECT_KEYS]]]]]]]]]]]]]]]]]]] "
+              "[EXPECT_MENU [EXPECT_SHELL [EXPECT_KEYS [EXPECT_DESK]]]]]]]]]]]]]]]]]]]] "
               "[--storage=none]",
               file=sys.stderr)
         return 2
@@ -143,6 +143,7 @@ def main() -> int:
     expect_menu = sys.argv[19] if len(sys.argv) >= 20 else "no"
     expect_shell = sys.argv[20] if len(sys.argv) >= 21 else "no"
     expect_keys = sys.argv[21] if len(sys.argv) >= 22 else "no"
+    expect_desk = sys.argv[22] if len(sys.argv) >= 23 else "no"
 
     if not serial_path.exists():
         return fail(f"missing serial log {serial_path}", "")
@@ -181,6 +182,8 @@ def main() -> int:
         return fail(f"invalid EXPECT_SHELL {expect_shell!r}", text)
     if expect_keys not in ("no", "yes"):
         return fail(f"invalid EXPECT_KEYS {expect_keys!r}", text)
+    if expect_desk not in ("no", "yes"):
+        return fail(f"invalid EXPECT_DESK {expect_desk!r}", text)
 
     required = list(REQUIRED_MARKERS)
     if storage_mode == "none":
@@ -430,6 +433,31 @@ def main() -> int:
         if not re.search(r"CRUGOS: wb selftest ok \(\d+ drag\(s\), [1-9]\d* action\(s\)\)", text):
             return fail("expected the Workbench to count at least one action", text)
 
+    if expect_desk == "yes":
+        for marker in (
+            "CRUGOS: wb desktop ready",
+            "CRUGOS: wb icon ready",
+            "CRUGOS: wb drawer",
+            "CRUGOS: wb selftest ok",
+            "CRUGOS: wb desk selftest ok",
+        ):
+            if marker not in text:
+                return fail(f"missing serial marker: {marker!r}", text)
+        if not re.search(r"CRUGOS: wb icon ready \('System:', volume\)", text):
+            return fail("expected a volume object on the Workbench desktop", text)
+        if not re.search(r"CRUGOS: wb icon 'System:' selected", text):
+            return fail("expected a desktop object to be selected", text)
+        if not re.search(r"CRUGOS: wb action \d+ icon \d+", text):
+            return fail("expected the Workbench to queue an icon event", text)
+        if not re.search(r"CRUGOS: wb drawer '.+' opened \([1-9]\d* entries\)", text):
+            return fail("expected a double click to open a drawer", text)
+        if not re.search(r"CRUGOS: wb window \d+ sent to back", text):
+            return fail("expected the depth gadget to send a window to the back", text)
+        if not re.search(r"CRUGOS: wb action \d+ depth window \d+", text):
+            return fail("expected the Workbench to queue a depth event", text)
+        if not re.search(r"CRUGOS: wb desk selftest ok \([1-9]\d* drawer\(s\)\)", text):
+            return fail("expected the Workbench to count at least one drawer", text)
+
     if expect_rebuild == "no" and "CRUGOS: raid rebuilt" in text:
         return fail("unexpected RAID member rebuild during boot", text)
     if expect_rebuild != "no":
@@ -463,7 +491,7 @@ def main() -> int:
           "net", expect_net, "tcp", expect_tcp, "dns", expect_dns,
           "usb", expect_usb, "mouse", expect_mouse, "audio", expect_audio,
           "gfx", expect_gfx, "wb", expect_wb, "menu", expect_menu,
-          "shell", expect_shell, "keys", expect_keys,
+          "shell", expect_shell, "keys", expect_keys, "desk", expect_desk,
           "storage", storage_mode,
           "QEMU exit status", status)
     for line in boot_report:

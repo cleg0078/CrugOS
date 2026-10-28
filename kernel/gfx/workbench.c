@@ -5,7 +5,9 @@
    and either waits for a title-bar drag (wb.drag=) or for a sequence of menu,
    gadget and close actions (wb.menu=1 wb.acts=) so the hotplug gate can prove
    the event path with serial markers and screendump comparisons.  Phase 6C
-   adds the live shell: wb.shell=1 paints the shell's text grid into the Shell
+   adds the desktop objects: wb.desk=1 puts a System: volume icon on the
+   background and a double click opens a drawer window listing the root.
+   Phase 6C adds the live shell: wb.shell=1 paints the shell's text grid into the Shell
    window body and routes every key there, and wb.sh=<n> waits for n typed
    commands before the boot finishes. */
 #include <crug/types.h>
@@ -20,6 +22,7 @@
 #include <crug/usb.h>
 #include <crug/shell.h>
 #include <crug/textgrid.h>
+#include <crug/storage.h>
 #include <crug/workbench.h>
 
 static int g_enabled;
@@ -35,6 +38,17 @@ static u32 g_actions_seen;
 
 /* Phase 6D: keyboard navigation (Tab focus, arrow moves, menu keys). */
 static int g_keys_mode;
+
+/* Phase 6E: desktop objects (the System: volume icon) and the drawer window
+   that opens on a double click and lists the mounted root. */
+static int g_desk_mode;
+static int g_drawer_window;
+static u32 g_drawers;
+static int g_icon_last = -1;
+static u64 g_icon_last_ns;
+static char g_drawer_list[512];
+
+static void wb_open_drawer(void);
 
 /* Phase 6C: the Shell window hosts the live shell. */
 static int g_shell_mode;
@@ -138,6 +152,13 @@ static void wb_cmdline_token(const char *tok, usize len)
         }
         return;
     }
+    used = wb_prefix(tok, len, "wb.desk=");
+    if (used >= 0) {
+        if (wb_parse_u32(tok + used, len - (usize)used, &value) == 0) {
+            g_desk_mode = value ? 1 : 0;
+        }
+        return;
+    }
     used = wb_prefix(tok, len, "wb.shell=");
     if (used >= 0) {
         if (wb_parse_u32(tok + used, len - (usize)used, &value) == 0) {
@@ -236,7 +257,123 @@ static void wb_drain_events(void)
             kprintf("CRUGOS: wb action %u resize window %d (%ux%u)\n",
                     (unsigned)g_actions_seen, event.window, (unsigned)event.w,
                     (unsigned)event.h);
+        } else if (event.type == INTUITION_EVENT_ICON) {
+            u64 now = timer_monotonic_ns();
+
+            g_actions_seen++;
+            kprintf("CRUGOS: wb action %u icon %d\n",
+                    (unsigned)g_actions_seen, event.index);
+            if (event.index >= 0 && event.index == g_icon_last &&
+                g_icon_last_ns != 0u && now >= g_icon_last_ns &&
+                now - g_icon_last_ns <= WB_DOUBLE_CLICK_NS) {
+                wb_open_drawer();
+                g_icon_last = -1;
+                g_icon_last_ns = 0u;
+            } else {
+                g_icon_last = event.index;
+                g_icon_last_ns = now;
+            }
+        } else if (event.type == INTUITION_EVENT_DEPTH) {
+            g_actions_seen++;
+            kprintf("CRUGOS: wb action %u depth window %d\n",
+                    (unsigned)g_actions_seen, event.window);
         }
+    }
+}
+
+/* ---- phase 6E: desktop objects and the drawer ----------------------- */
+
+/* Read the mounted root one entry per line into the painter buffer and count
+   them; an absent volume leaves the buffer empty. */
+static u32 wb_drawer_entries(void)
+{
+    struct ext4_fs *fs = storage_root();
+    int n;
+    int i = 0;
+    u32 count = 0;
+
+    g_drawer_list[0] = 0;
+    if (!fs) {
+        return 0u;
+    }
+    n = ext4_list(fs, "/", g_drawer_list, sizeof(g_drawer_list));
+    if (n <= 0) {
+        return 0u;
+    }
+    while (i < n) {
+        if (g_drawer_list[i] != '\n') {
+            count++;
+        }
+        while (i < n && g_drawer_list[i] != '\n') {
+            i++;
+        }
+        i++;
+    }
+    return count;
+}
+
+/* Body painter of the drawer window: the root listing, one name per line. */
+static void wb_drawer_paint(int id, i32 x, i32 y, u32 w, u32 h, void *ctx)
+{
+    u32 line_y = (u32)y + 6u;
+    u32 max_chars = w > 12u ? (w - 12u) / 8u : 0u;
+    int i = 0;
+    u32 drawn = 0;
+
+    (void)id;
+    (void)ctx;
+    if (max_chars > 0u && max_chars > 47u) {
+        max_chars = 47u;
+    }
+    fb_fill_rect((u32)x, (u32)y, w, h, INTUITION_WINDOW_RGB);
+    if (g_drawer_list[0] == 0) {
+        fb_draw_text((u32)x + 6u, line_y, "no volume", INTUITION_BODY_TEXT_RGB,
+                     INTUITION_WINDOW_RGB);
+        return;
+    }
+    while (i < (int)sizeof(g_drawer_list) && g_drawer_list[i] &&
+           line_y + 16u <= (u32)y + h) {
+        char text[48];
+        u32 n = 0;
+
+        while (g_drawer_list[i] && g_drawer_list[i] != '\n' &&
+               n + 1u < sizeof(text)) {
+            text[n++] = g_drawer_list[i++];
+        }
+        text[n] = 0;
+        if (g_drawer_list[i] == '\n') {
+            i++;
+        }
+        if (max_chars != 0u && n > max_chars) {
+            text[max_chars] = 0;
+        }
+        fb_draw_text((u32)x + 6u, line_y, text, INTUITION_BODY_TEXT_RGB,
+                     INTUITION_WINDOW_RGB);
+        line_y += 20u;
+        drawn++;
+        if (drawn >= 10u) {
+            break;
+        }
+    }
+}
+
+static void wb_open_drawer(void)
+{
+    u32 entries;
+
+    if (g_drawer_window > 0) {
+        return;
+    }
+    entries = wb_drawer_entries();
+    g_drawer_window = intuition_open(560, 60, 360, 260, "System:", NULL);
+    if (g_drawer_window < 0) {
+        return;
+    }
+    intuition_set_paint(g_drawer_window, wb_drawer_paint, 0);
+    g_drawers++;
+    if (g_reporting) {
+        kprintf("CRUGOS: wb drawer 'System:' opened (%u entries)\n",
+                (unsigned)entries);
     }
 }
 
@@ -323,17 +460,23 @@ int wb_init(void)
         return -1;
     }
     g_reporting = (g_want_drags > 0u || g_menu_mode || g_keys_mode ||
-                   g_shell_mode)
+                   g_shell_mode || g_desk_mode)
                       ? 1
                       : 0;
     fb_set_text_enabled(0);
     intuition_init();
     intuition_set_reporting(g_reporting);
     top = intuition_open(80, 90, 360, 220, "Workbench",
-                         "CrugOS Workbench\nphase 6d\nsoftware rendered");
+                         "CrugOS Workbench\nphase 6e\nsoftware rendered");
     shell_id = intuition_open(480, 300, 320, 200, "Shell", "4.OS\ncrugos>");
     intuition_set_menus(top, wb_menus_top, 2u);
     intuition_add_gadget(top, 12, 60, 96, 22, "Run");
+    if (g_desk_mode) {
+        if (intuition_add_icon(16, 240, "System:", INTUITION_ICON_VOLUME) <
+            0) {
+            kprintf("CRUGOS: wb icon table full\n");
+        }
+    }
     intuition_set_menus(shell_id, wb_menus_shell, 2u);
     if (g_shell_mode) {
         g_shell_window = shell_id;
@@ -360,6 +503,9 @@ int wb_init(void)
     if (g_keys_mode && !g_shell_mode) {
         kprintf("CRUGOS: wb keys ready (window %d active)\n",
                 intuition_active());
+    }
+    if (g_desk_mode) {
+        kprintf("CRUGOS: wb icon ready ('System:', volume)\n");
     }
     return 0;
 }
@@ -394,7 +540,7 @@ int wb_selftest(void)
         return 1;
     }
     want = g_want_drags;
-    want_actions = (g_menu_mode || g_keys_mode)
+    want_actions = (g_menu_mode || g_keys_mode || g_desk_mode)
                        ? (g_want_actions ? g_want_actions : 1u)
                        : 0u;
     want_commands = g_shell_mode ? (g_want_commands ? g_want_commands : 1u) : 0u;
@@ -433,6 +579,10 @@ int wb_selftest(void)
     if (g_shell_mode) {
         kprintf("CRUGOS: sh selftest ok (%u command(s))\n",
                 (unsigned)g_commands_seen);
+    }
+    if (g_desk_mode) {
+        kprintf("CRUGOS: wb desk selftest ok (%u drawer(s))\n",
+                (unsigned)g_drawers);
     }
     /* Keep the finished desktop on screen for a moment so the gate's last
        screendump does not race the rest of the boot to the exit. */

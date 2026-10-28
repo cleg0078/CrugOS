@@ -28,6 +28,22 @@
 #define INTUITION_RESIZE_SIZE 12u
 #define INTUITION_KEY_STEP 8u
 
+/* Phase 6E: desktop objects (disks, drawers and files as icons) and the depth
+   gadget that sends a window to the back of the stacking order. */
+#define INTUITION_MAX_ICONS 8
+#define INTUITION_ICON_WIDTH 64u
+#define INTUITION_ICON_HEIGHT 48u
+#define INTUITION_ICON_LABEL_GAP 4u
+#define INTUITION_ICON_SELECTED_BORDER_RGB 0x00FFB000u
+/* The depth gadget in a title bar, four pixels left of the close gadget. */
+#define INTUITION_DEPTH_SIZE 12u
+
+/* What a desktop object represents; the Workbench decides what a press on it
+   means, intuition.device only reports the icon index. */
+#define INTUITION_ICON_VOLUME 0u
+#define INTUITION_ICON_DRAWER 1u
+#define INTUITION_ICON_FILE 2u
+
 /* Workbench palette, 0x00RRGGBB. */
 #define INTUITION_DESKTOP_RGB 0x00102030u
 #define INTUITION_WINDOW_RGB 0x00081018u
@@ -43,6 +59,9 @@
 #define INTUITION_GADGET_RGB 0x00A0A0A0u
 #define INTUITION_GADGET_PRESSED_RGB 0x00606060u
 #define INTUITION_GADGET_TEXT_RGB 0x00000000u
+#define INTUITION_ICON_RGB 0x00C0C0C0u
+#define INTUITION_ICON_INNER_RGB 0x00081018u
+#define INTUITION_ICON_TEXT_RGB 0x00E0E0E0u
 
 /* One screen-top menu: a title and its items.  The strings are owned by the
    caller and must stay valid while the window is open (intuition.device
@@ -61,6 +80,8 @@ struct intuition_menu {
 #define INTUITION_EVENT_GADGET 4u   /* a body gadget was clicked */
 #define INTUITION_EVENT_CLOSE 5u    /* the close gadget was clicked */
 #define INTUITION_EVENT_RESIZE 6u   /* a resize-grip drag finished */
+#define INTUITION_EVENT_ICON 7u     /* a desktop icon was pressed */
+#define INTUITION_EVENT_DEPTH 8u    /* a window was sent to the back */
 
 struct intuition_event {
     u32 type;
@@ -86,6 +107,18 @@ int intuition_set_menus(int id, const struct intuition_menu *menus, u32 count);
    returns the gadget index or -1. */
 int intuition_add_gadget(int id, i32 x, i32 y, u32 w, u32 h,
                          const char *label);
+/* Add a desktop object (phase 6E): a labelled icon drawn on the background
+   under every window, hit tested only where no window covers it.  The label
+   is drawn under the box and the string is caller owned.  Returns the icon
+   index or -1 when the table is full or the framebuffer is absent. */
+int intuition_add_icon(i32 x, i32 y, const char *label, u32 kind);
+int intuition_icon_rect(int index, i32 *x, i32 *y, u32 *w, u32 *h);
+/* Index of the selected desktop object, or -1 when none is selected. */
+int intuition_icon_selected(void);
+u32 intuition_icon_count(void);
+u64 intuition_icon_clicks(void);
+/* Windows sent to the back through their depth gadget. */
+u64 intuition_depth_count(void);
 /* Install a body painter: the callback receives the body rectangle in screen
    coordinates and owns every pixel inside it (phase 6C renders the shell text
    grid this way).  A NULL callback restores the static body text. */

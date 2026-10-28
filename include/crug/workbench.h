@@ -14,6 +14,10 @@
 #define WB_ACTS_MAX 8u
 #define WB_HOLD_MAX 3600u
 #define WB_SHELL_CMDS_MAX 8u
+#define WB_DESK_ACTS_MAX 8u
+/* Two presses on the same desktop object within this window open it: the gate
+   driver clicks twice in quick succession on the volume icon. */
+#define WB_DOUBLE_CLICK_NS 600000000ull
 
 int wb_init(void);
 void wb_cmdline(const boot_info *bi);

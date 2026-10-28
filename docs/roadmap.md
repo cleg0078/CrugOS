@@ -1,6 +1,6 @@
 # Roadmap
 
-The specification defines 39 phases/gates. Phase 0 established the smallest
+The specification defines 40 phases/gates. Phase 0 established the smallest
 end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
 phase 1 makes the kernel own physical memory, page tables, exceptions and
 timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
@@ -31,7 +31,9 @@ menu bars with popups, body gadgets, a close gadget and a typed event queue;
 phase 6C adds a live shell window with a scrollback text grid, a line editor and
 a command set over the mounted ext4 root; phase 6D makes every window resizable
 from a corner grip and lets Tab, the arrow keys and Enter drive focus, window
-movement and the menu popups. Release
+movement and the menu popups; phase 6E adds desktop objects that select or open
+a `System:` drawer, and a depth gadget that sends a window to the back of the
+stacking order. Release
 `v0.23.1` adds packaging rather than a spec phase: `make iso` produces a hybrid
 UEFI ISO that boots from a USB stick or a CD-ROM, with the kernel's
 `storage=none` token so an image with no root filesystem still passes the boot
@@ -666,8 +668,62 @@ change for memory management, storage, SMP or drivers.
 - limits: no Shift-Tab (the input layer delivers one byte per key and carries no
   modifier state), no sub-menus, no keyboard text entry outside the 6C shell,
   12x12 grips that are not themeable, body text re-laid out from the top-left
-  rather than reflowed, and no send-to-back in the stacking order.
+  rather than reflowed, and no send-to-back in the stacking order (the phase 6E
+  depth gadget sends a window back, but nothing sends one forward).
 - All 39 gates pass at `v0.26.0`.
+
+## Phase 6E - desktop objects and window depth (done)
+
+- `include/crug/intuition.h` + `kernel/gfx/intuition.c`: a table of
+  `INTUITION_MAX_ICONS` (8) desktop objects. An object is a
+  `INTUITION_ICON_WIDTH` x `INTUITION_ICON_HEIGHT` (64x48) tile with one label
+  line `INTUITION_ICON_LABEL_GAP` (4) pixels under it, drawn on the background
+  under every window, so a press that lands inside a window wins. Tiles are
+  clamped so all 64x48 pixels stay on screen, and `intuition_add_icon()` fails
+  with -1 without a framebuffer, a label or a free slot.
+- kinds and palette: `INTUITION_ICON_VOLUME` (0), `INTUITION_ICON_DRAWER` (1)
+  and `INTUITION_ICON_FILE` (2); `INTUITION_ICON_RGB` `0x00c0c0c0` fill,
+  `INTUITION_ICON_INNER_RGB` `0x00081018` panel, `INTUITION_ICON_TEXT_RGB`
+  `0x00e0e0e0` label and `INTUITION_ICON_SELECTED_BORDER_RGB` `0x00ffb000`
+  for the selected frame and label.
+- selection: a left press inside a tile selects the object, counts one action,
+  queues `INTUITION_EVENT_ICON` (type 7) with the index and the tile origin and
+  prints `CRUGOS: wb icon '<label>' selected`; `intuition_icon_selected()`,
+  `intuition_icon_count()`, `intuition_icon_clicks()` and
+  `intuition_icon_rect()` report the state, and a press on the empty desktop
+  clears the selection.
+- depth gadget: a 12x12 `INTUITION_DEPTH_SIZE` box four pixels left of the
+  close gadget in every title bar. A press sends that window to the bottom of
+  the stacking order, activates the new top window (amber title bar), queues
+  `INTUITION_EVENT_DEPTH` (type 8) followed by `INTUITION_EVENT_ACTIVATE`,
+  counts one action, increments `intuition_depth_count()` and prints
+  `CRUGOS: wb window N sent to back`; the backmost window's box is a no-op.
+- painters: `intuition_set_paint(id, fn, ctx)` installs a per-window body
+  painter that receives the body rectangle instead of the static body text
+  (gadgets are still drawn after it), `intuition_redraw_window(id)` repaints
+  one window, and a NULL callback restores the static text.
+- `kernel/gfx/workbench.c` reads `wb.desk=1`: one `System:` volume object at
+  (16,240), `CRUGOS: wb icon ready ('System:', volume)` after the desktop,
+  shell and keys markers, and a double click inside `WB_DOUBLE_CLICK_NS`
+  (600000000 ns) opens a `System:` window at (560,60) 360x260 whose painter
+  lists the mounted ext4 root, one name per line, at most 10 lines clipped to
+  the body width, printing `CRUGOS: wb drawer 'System:' opened (N entries)`
+  (an empty or unmounted root prints `no volume`). `wb.desk=1` is a reporting
+  mode, so `wb.acts=` is honoured, and the self-test prints
+  `CRUGOS: wb desk selftest ok (N drawer(s))` before the usual `wb selftest
+  ok`. The Workbench body text is now `phase 6e`.
+- `make test-workbench-desk` boots `wb.enable=1 wb.wait=30 wb.desk=1
+  wb.acts=3`, clicks the `System:` object, opens its drawer and sends it back,
+  checking the six-step pixel sequence (idle frame white and inner panel dark,
+  selected frame amber, drawer title bar amber and body dark at the overlap
+  point, drawer title bar idle grey and the Shell title bar amber after the
+  depth press), exit status 33 and a clean `e2fsck`; `boot-check.py` gained
+  the `EXPECT_DESK` positional and its `ok` line reports `desk yes`.
+- `tests/host/test_intuition.c` gained desktop-object and depth-gadget
+  sections; `make test-host` reports 2957 checks.
+- docs: README, workbench, boot, build, versioning, gfx and iso describe the
+  objects, the drawer, the painter API, `wb.desk=1` and the gate.
+- All 40 gates pass at `v0.27.0`.
 
 ## Bootable media - hybrid UEFI ISO (done, `v0.23.1`)
 
@@ -719,7 +775,8 @@ change for memory management, storage, SMP or drivers.
   `audio.device`, the mixer and the USB Audio Class driver, phase 5D the
   pointer-driven cursor on the GOP framebuffer, phase 6A the intuition desktop
   and window manager on top of it, phase 6B its menus, gadgets and event queue,
-  phase 6C the shell window and phase 6D resize grips and keyboard navigation;
+  phase 6C the shell window, phase 6D resize grips and keyboard navigation and
+  phase 6E desktop objects and the depth gadget;
   phase 4A delivered the PS/2 console input step, phase
   4B the virtio-net/IPv4 slice, phase 4C the TCP/socket slice and phase 4D the
   DNS resolver).
@@ -727,14 +784,16 @@ change for memory management, storage, SMP or drivers.
   validation, AAAA/PTR/SRV, search domains, negative caching) on top of the
   phase 4B-4D stack, richer socket semantics (bind, options, non-blocking, more
   than four sockets); IPv6, fragmentation and reassembly.
-- Software framebuffer -> VirtIO-GPU -> vendor GPU drivers: with the phase 6D
-  resize grip and keyboard navigation in place, the next Workbench work is
-  reflowing a body (and relaying out its painter) when its window is resized,
-  sub-menus on top of the phase 6B menu bar, a gadget toolkit on top of its event
-  queue, Shift-Tab once the input layer carries modifier state, send-to-back in
-  the stacking order and richer shell semantics (quoting, a working directory) on
-  top of the shell, the phase 5D cursor, the phase 5B pointer stack and the phase
-  5C audio stack.
+- Software framebuffer -> VirtIO-GPU -> vendor GPU drivers: with the phase 6E
+  desktop objects and depth gadget in place, the next Workbench work is icon
+  dragging and renaming, a drawer that refreshes and scrolls while it stays
+  open, a send-to-front gadget, keyboard focus for the icon table and reflowing
+  a body (and relaying out its painter) when its window is resized, followed by
+  sub-menus on top of the phase 6B menu bar, a gadget toolkit on top of its
+  event queue and richer shell semantics (quoting, a working directory) on top
+  of the shell, the phase 5D cursor, the phase 5B pointer stack and the phase 5C
+  audio stack; application bundles (phase 7, specification section 35) are the
+  next layer above the desktop.
 - Workbench userspace, `.app` bundles, `.crpkg` packages, capability model.
 - POSIX-like layer: 64-bit UID/GID, ACLs, process groups, signals.
 

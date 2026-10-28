@@ -4,7 +4,9 @@
    to four windows, renders bottom to top with the menu bar and the open menu
    on top, raises and activates the window under a left click, drags a window
    by its title bar, opens and selects menus, runs gadgets, closes a window
-   from its close gadget and queues what it consumed as typed events.  All
+   from its close gadget and queues what it consumed as typed events.  Phase
+   6E adds desktop objects (icons drawn under the windows) and the depth gadget
+   that sends a window to the back.  All
    drawing goes through the framebuffer primitives, so the host tests can
    replace them and check the state machine without a framebuffer. */
 #include <crug/types.h>
@@ -20,6 +22,13 @@ struct gadget {
     i32 y;
     u32 w;
     u32 h;
+};
+
+struct icon {
+    const char *label;
+    i32 x;
+    i32 y;
+    u32 kind;
 };
 
 struct window {
@@ -40,6 +49,12 @@ struct window {
     void (*paint)(int id, i32 x, i32 y, u32 w, u32 h, void *ctx);
     void *paint_ctx;
 };
+
+static struct icon g_icons[INTUITION_MAX_ICONS];
+static u32 g_icon_count;
+static int g_icon_sel = -1;
+static u64 g_icon_clicks;
+static u64 g_depths;
 
 static struct window g_win[INTUITION_MAX_WINDOWS];
 static int g_order[INTUITION_MAX_WINDOWS]; /* bottom to top, -1 empty */
@@ -243,6 +258,46 @@ static int close_hit(const struct window *w, i32 px, i32 py)
     return px >= cx && px < cx + 12 && py >= cy && py < cy + 12;
 }
 
+/* The depth gadget (phase 6E): a 12x12 box four pixels left of the close
+   gadget.  Clicking it sends the window to the back of the stacking order. */
+static i32 depth_box_x(const struct window *w)
+{
+    return close_box_x(w) - 16;
+}
+
+static int depth_hit(const struct window *w, i32 px, i32 py)
+{
+    i32 cx = depth_box_x(w);
+    i32 cy = w->y + (i32)INTUITION_BORDER + 4;
+
+    return px >= cx && px < cx + (i32)INTUITION_DEPTH_SIZE && py >= cy &&
+           py < cy + (i32)INTUITION_DEPTH_SIZE;
+}
+
+/* Move one window to the bottom of the stack without touching the others.
+   Returns 1 when the stack changed and 0 when the window was already at the
+   bottom (or unknown), so a depth press on the backmost window is a no-op. */
+static int win_send_to_back(int id)
+{
+    u32 i;
+    u32 pos = g_order_count;
+
+    for (i = 0; i < g_order_count; i++) {
+        if (g_order[i] == id) {
+            pos = i;
+            break;
+        }
+    }
+    if (pos == g_order_count || pos == 0u) {
+        return 0;
+    }
+    for (i = pos; i > 0u; i--) {
+        g_order[i] = g_order[i - 1u];
+    }
+    g_order[0] = id;
+    return 1;
+}
+
 /* The resize grip: a 12x12 box in the inner bottom-right corner of every
    window.  Dragging it changes the window size, never its origin. */
 static void resize_rect(const struct window *w, i32 *gx, i32 *gy, u32 *gw,
@@ -309,6 +364,57 @@ static int gadget_hit(const struct window *w, i32 px, i32 py)
     return -1;
 }
 
+/* Desktop objects (phase 6E): a plain box with a darker inner rectangle and
+   the label under it.  A selected icon gets an amber frame and label. */
+static void icon_rect_of(int index, i32 *x, i32 *y, u32 *w, u32 *h)
+{
+    const struct icon *ic = &g_icons[index];
+
+    *x = ic->x;
+    *y = ic->y;
+    *w = INTUITION_ICON_WIDTH;
+    *h = INTUITION_ICON_HEIGHT;
+}
+
+static void draw_icon(u32 index)
+{
+    const struct icon *ic = &g_icons[index];
+    int selected = ((int)index == g_icon_sel);
+    u32 frame = selected ? INTUITION_ICON_SELECTED_BORDER_RGB
+                         : INTUITION_FRAME_RGB;
+    u32 label_rgb = selected ? INTUITION_ICON_SELECTED_BORDER_RGB
+                             : INTUITION_ICON_TEXT_RGB;
+
+    fb_fill_rect((u32)ic->x, (u32)ic->y, INTUITION_ICON_WIDTH,
+                 INTUITION_ICON_HEIGHT, INTUITION_ICON_RGB);
+    fb_frame_rect((u32)ic->x, (u32)ic->y, INTUITION_ICON_WIDTH,
+                  INTUITION_ICON_HEIGHT, frame);
+    fb_fill_rect((u32)ic->x + 8, (u32)ic->y + 8, INTUITION_ICON_WIDTH - 16u,
+                 INTUITION_ICON_HEIGHT - 16u, INTUITION_ICON_INNER_RGB);
+    if (ic->label) {
+        fb_draw_text((u32)ic->x,
+                     (u32)ic->y + INTUITION_ICON_HEIGHT +
+                         INTUITION_ICON_LABEL_GAP,
+                     ic->label, label_rgb, INTUITION_DESKTOP_RGB);
+    }
+}
+
+static int icon_hit(i32 px, i32 py)
+{
+    u32 i;
+
+    for (i = 0; i < g_icon_count; i++) {
+        const struct icon *ic = &g_icons[i];
+
+        if (px >= ic->x && py >= ic->y &&
+            px < ic->x + (i32)INTUITION_ICON_WIDTH &&
+            py < ic->y + (i32)INTUITION_ICON_HEIGHT) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
 static void win_draw_title(struct window *w)
 {
     int active = (w->id == g_active);
@@ -327,6 +433,13 @@ static void win_draw_title(struct window *w)
                  active ? INTUITION_WINDOW_RGB : INTUITION_DESKTOP_RGB);
     fb_frame_rect((u32)close_box_x(w), (u32)w->y + INTUITION_BORDER + 4u,
                   12u, 12u, INTUITION_TITLE_TEXT_RGB);
+    /* The depth gadget: a second small box with a filled centre. */
+    fb_fill_rect((u32)depth_box_x(w), (u32)w->y + INTUITION_BORDER + 4u, 12u,
+                 12u, active ? INTUITION_WINDOW_RGB : INTUITION_DESKTOP_RGB);
+    fb_frame_rect((u32)depth_box_x(w), (u32)w->y + INTUITION_BORDER + 4u,
+                  12u, 12u, INTUITION_TITLE_TEXT_RGB);
+    fb_fill_rect((u32)depth_box_x(w) + 4, (u32)w->y + INTUITION_BORDER + 8u,
+                 4u, 4u, INTUITION_TITLE_TEXT_RGB);
 }
 
 static void win_draw_gadgets(struct window *w)
@@ -596,6 +709,13 @@ void intuition_init(void)
     g_event_head = 0u;
     g_event_count = 0u;
     g_event_dropped = 0u;
+    g_icon_count = 0u;
+    g_icon_sel = -1;
+    g_icon_clicks = 0u;
+    g_depths = 0u;
+    for (i = 0; i < INTUITION_MAX_ICONS; i++) {
+        memset(&g_icons[i], 0, sizeof(g_icons[i]));
+    }
     if (fb_dimensions(&width, &height) == 0) {
         g_screen_w = width;
         g_screen_h = height;
@@ -756,6 +876,90 @@ int intuition_add_gadget(int id, i32 x, i32 y, u32 w, u32 h, const char *label)
     return (int)(win->gadget_count - 1u);
 }
 
+int intuition_add_icon(i32 x, i32 y, const char *label, u32 kind)
+{
+    struct icon *ic;
+
+    if (!g_screen_w || !g_screen_h || !label) {
+        return -1;
+    }
+    if (g_icon_count >= INTUITION_MAX_ICONS) {
+        return -1;
+    }
+    if (x < 0) {
+        x = 0;
+    }
+    if (y < 0) {
+        y = 0;
+    }
+    if ((u32)x + INTUITION_ICON_WIDTH > g_screen_w) {
+        x = (i32)g_screen_w - (i32)INTUITION_ICON_WIDTH;
+    }
+    if ((u32)y + INTUITION_ICON_HEIGHT > g_screen_h) {
+        y = (i32)g_screen_h - (i32)INTUITION_ICON_HEIGHT;
+    }
+    if (x < 0) {
+        x = 0;
+    }
+    if (y < 0) {
+        y = 0;
+    }
+    ic = &g_icons[g_icon_count];
+    ic->label = label;
+    ic->x = x;
+    ic->y = y;
+    ic->kind = kind;
+    g_icon_count++;
+    intuition_redraw();
+    return (int)(g_icon_count - 1u);
+}
+
+int intuition_icon_rect(int index, i32 *x, i32 *y, u32 *w, u32 *h)
+{
+    i32 ix;
+    i32 iy;
+    u32 iw;
+    u32 ih;
+
+    if (index < 0 || (u32)index >= g_icon_count) {
+        return -1;
+    }
+    icon_rect_of(index, &ix, &iy, &iw, &ih);
+    if (x) {
+        *x = ix;
+    }
+    if (y) {
+        *y = iy;
+    }
+    if (w) {
+        *w = iw;
+    }
+    if (h) {
+        *h = ih;
+    }
+    return 0;
+}
+
+int intuition_icon_selected(void)
+{
+    return g_icon_sel;
+}
+
+u32 intuition_icon_count(void)
+{
+    return g_icon_count;
+}
+
+u64 intuition_icon_clicks(void)
+{
+    return g_icon_clicks;
+}
+
+u64 intuition_depth_count(void)
+{
+    return g_depths;
+}
+
 void intuition_redraw(void)
 {
     u32 i;
@@ -764,6 +968,9 @@ void intuition_redraw(void)
         return;
     }
     fb_fill_rect(0, 0, g_screen_w, g_screen_h, INTUITION_DESKTOP_RGB);
+    for (i = 0; i < g_icon_count; i++) {
+        draw_icon(i);
+    }
     for (i = 0; i < g_order_count; i++) {
         struct window *w = win_find(g_order[i]);
 
@@ -773,6 +980,30 @@ void intuition_redraw(void)
     }
     menu_draw_bar();
     menu_draw_popup();
+}
+
+/* A press that missed every window: select a desktop object, or clear the
+   selection when the background itself was clicked. */
+static void icon_press(i32 px, i32 py)
+{
+    int index = icon_hit(px, py);
+
+    if (index < 0) {
+        if (g_icon_sel >= 0) {
+            g_icon_sel = -1;
+            intuition_redraw();
+        }
+        return;
+    }
+    g_icon_sel = index;
+    g_icon_clicks++;
+    g_actions++;
+    if (g_reporting) {
+        kprintf("CRUGOS: wb icon '%s' selected\n", g_icons[index].label);
+    }
+    event_push(INTUITION_EVENT_ICON, 0, index, 0u, g_icons[index].x,
+               g_icons[index].y);
+    intuition_redraw();
 }
 
 static void press(i32 px, i32 py)
@@ -804,10 +1035,36 @@ static void press(i32 px, i32 py)
     }
     id = win_hit(px, py);
     if (id < 0) {
+        icon_press(px, py);
         return;
     }
     w = win_find(id);
     if (!w) {
+        return;
+    }
+    if (depth_hit(w, px, py)) {
+        int top;
+
+        if (!win_send_to_back(id)) {
+            return;
+        }
+        if (g_active == id) {
+            g_active = g_order_count ? g_order[g_order_count - 1u] : -1;
+        }
+        top = g_active;
+        if (g_reporting) {
+            kprintf("CRUGOS: wb window %d sent to back\n", id);
+        }
+        event_push(INTUITION_EVENT_DEPTH, id, -1, 0u, w->x, w->y);
+        if (top > 0) {
+            struct window *tw = win_find(top);
+
+            event_push(INTUITION_EVENT_ACTIVATE, top, -1, 0u, tw ? tw->x : 0,
+                       tw ? tw->y : 0);
+        }
+        g_depths++;
+        g_actions++;
+        intuition_redraw();
         return;
     }
     prev = g_active;

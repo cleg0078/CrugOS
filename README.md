@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 6D window resizing and keyboard navigation (`v0.26.0`)
+## Status: phase 6E desktop objects and window depth (`v0.27.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -31,7 +31,11 @@ scrollback, a line editor with command history, and a command set that lists,
 reads and writes the mounted ext4 root -- on top of that desktop. Phase 6D
 makes every window resizable from a 12x12 corner grip and gives the keyboard
 a navigation role: Tab cycles the focus, the arrow keys move the active window
-and Enter opens its menu for the arrows to drive. Release `v0.23.1` made that
+and Enter opens its menu for the arrows to drive. Phase 6E puts desktop objects
+under the windows and a depth gadget in every title bar: a 64x48 icon is
+selected by a press and the `System:` volume opens a drawer on a double click,
+while the depth box sends its window to the bottom of the stacking order.
+Release `v0.23.1` made that
 tree bootable media: `make iso` writes a hybrid UEFI ISO
 that boots from a USB stick or a CD-ROM, with no disk image and no test
 tokens baked in.
@@ -517,6 +521,53 @@ Phase 6D makes the windows resizable and gives the keyboard work of its own.
   It requires a 33 exit status and expects `EXPECT_KEYS=yes` from
   `boot-check.py`; see [workbench.md](docs/workbench.md).
 
+Phase 6E adds desktop objects and the depth gadget.
+
+- `include/crug/intuition.h` + `kernel/gfx/intuition.c` gain a desktop object
+  table of eight 64x48 tiles (`INTUITION_MAX_ICONS`,
+  `INTUITION_ICON_WIDTH`/`HEIGHT`, `INTUITION_ICON_LABEL_GAP` 4), drawn on the
+  desktop background under every window with the label under the tile and the
+  kinds `INTUITION_ICON_VOLUME` (0), `_DRAWER` (1) and `_FILE` (2);
+  `intuition_add_icon(x, y, label, kind)` clamps the tile so all 64x48 pixels
+  stay on screen and fails without a framebuffer or a label;
+- a press inside a tile selects it -- amber frame
+  (`INTUITION_ICON_SELECTED_BORDER_RGB` `0x00FFB000`) and amber label -- queues
+  `INTUITION_EVENT_ICON` (type 7) with the index and the tile origin, counts one
+  action and prints `CRUGOS: wb icon '<label>' selected`. A press on the empty
+  desktop clears the selection and a window drawn over a tile wins the press;
+  the palette is `INTUITION_ICON_RGB` `0x00C0C0C0`, `INTUITION_ICON_INNER_RGB`
+  `0x00081018` and `INTUITION_ICON_TEXT_RGB` `0x00E0E0E0`;
+- the depth gadget is a 12x12 box (`INTUITION_DEPTH_SIZE`) four pixels left of
+  the close box in every title bar, so a title bar is now a drag area, a depth
+  box and a close box. A press sends that window to the bottom, makes the new
+  top window active (its title bar turns amber), queues
+  `INTUITION_EVENT_DEPTH` (type 8) followed by an `ACTIVATE` for the new top
+  window, counts one action and prints `CRUGOS: wb window N sent to back`. A
+  press on the depth box of the window already at the bottom is a no-op: no
+  event, no count, no redraw;
+- `intuition_set_paint(id, fn, ctx)` installs a painter for one window body,
+  called with the body rectangle instead of the static body text, and gadgets
+  are still drawn after it; `intuition_redraw_window(id)` repaints one window
+  after its content changed. The drawer uses both;
+- `kernel/gfx/workbench.c` reads `wb.desk=<0|1>`: with `wb.desk=1` it creates
+  one volume object labelled `System:` at (16,240) and prints
+  `CRUGOS: wb icon ready ('System:', volume)` after the desktop/shell/keys
+  markers. A double click on the object within `WB_DOUBLE_CLICK_NS`
+  (600000000 ns) opens a normal Intuition window titled `System:` at (560,60)
+  360x260 whose painter lists the root directory entries from the mounted ext4
+  root, one name per line, at most 10 lines, clipped to the body width, and
+  prints `CRUGOS: wb drawer 'System:' opened (N entries)`; an empty or unmounted
+  root prints `no volume`. `wb.desk=1` counts as a reporting mode, so
+  `wb.acts=N` is honoured; the boot self-test accepts window drags OR
+  menu/gadget/close/resize actions OR shell commands OR these desktop actions
+  and prints `CRUGOS: wb desk selftest ok (N drawer(s))` before the usual
+  `CRUGOS: wb selftest ok (N drag(s), M action(s))`;
+- `make test-workbench-desk` is the desktop gate: it builds the ESP and disk,
+  boots with `wb.enable=1 wb.wait=<wait> wb.desk=1 wb.acts=<n>`, and checks the
+  idle icon, the amber selection, the drawer with five root entries, its amber
+  title bar and dark body, and the depth gadget sending it back. See
+  [workbench.md](docs/workbench.md).
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -525,9 +576,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.26.0 (phase 6d) -- Amiga-inspired microkernel bring-up
+CrugOS 0.27.0 (phase 6e) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.26.0
+CRUGOS: version 0.27.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -575,7 +626,7 @@ CRUGOS: tcp http served (72 bytes)
 CRUGOS: net selftest ok
 CRUGOS: gfx ready (1024x768, cursor at 512,384)
 CRUGOS: selftest ok
-kernel : 0x0000000000100000 size=720 KiB
+kernel : 0x0000000000100000 size=224 KiB
 boot   : cpu=0 acpi_rsdp=0x1f77e000 fdt=0x0 initrd=0x0
 memory : 36 regions, usable 474080 KiB (462 MiB)
 pmm    : total=118520 free=118462 bitmap=131072 B
@@ -587,7 +638,7 @@ heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
 boot   : pmm=28552 us cpu=438 us vm=626 us traps=360 us timer=65357 us heap=60 us storage=94487 us sched=354 us syscall=122 us total=190359 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase 6d boot ok
+CRUGOS: phase 6e boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -787,6 +838,7 @@ make test-workbench    # drag a window on the software-rendered desktop
 make test-workbench-menu  # open menus, select items and click gadgets
 make test-workbench-shell  # type commands into the Workbench shell window
 make test-workbench-keys   # resize a window by its grip and drive it from the keyboard
+make test-workbench-desk   # select desktop objects and send a window to the back
 make iso         # build a bootable hybrid UEFI ISO (build/x86_64/crugos.iso)
 make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
@@ -816,13 +868,14 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `EXPECT_AVX2`, `EXPECT_RAID`, `EXPECT_NVME`, `EXPECT_REBUILD`, `EXPECT_AHCI`,
 `EXPECT_CRYPT`, `EXPECT_AES`, `EXPECT_NET`, `EXPECT_TCP`, `EXPECT_DNS`,
 `EXPECT_USB`, `EXPECT_MOUSE`, `EXPECT_AUDIO`, `EXPECT_GFX`, `EXPECT_WB`,
-`EXPECT_MENU`, `EXPECT_SHELL`, `EXPECT_KEYS`,
+`EXPECT_MENU`, `EXPECT_SHELL`, `EXPECT_KEYS`, `EXPECT_DESK`,
 `AUDIO_RUN_TIMEOUT_SEC`, `AUDIO_QEMU_EXTRA`, `GFX_WAIT`, `GFX_MOVES`,
 `GFX_RUN_TIMEOUT_SEC`, `GFX_QEMU_EXTRA`, `WB_WAIT`, `WB_DRAG`,
 `WB_RUN_TIMEOUT_SEC`, `WB_QEMU_EXTRA`, `WB_MENU_WAIT`, `WB_MENU_ACTS`,
 `WB_MENU_RUN_TIMEOUT_SEC`, `WB_SHELL_WAIT`, `WB_SHELL_CMDS`,
 `WB_SHELL_RUN_TIMEOUT_SEC`, `WB_KEYS_WAIT`, `WB_KEYS_ACTS`,
-`WB_KEYS_RUN_TIMEOUT_SEC`, `DEMO_DISPLAY`, `DEMO_HOLD_SEC`,
+`WB_KEYS_RUN_TIMEOUT_SEC`, `WB_DESK_WAIT`, `WB_DESK_ACTS`,
+`WB_DESK_RUN_TIMEOUT_SEC`, `DEMO_DISPLAY`, `DEMO_HOLD_SEC`,
 `DEMO_TIMEOUT_SEC`, `DEMO_CMDLINE`, `DEMO_MACHINE_EXTRA`, `DEMO_QEMU_EXTRA`,
 `ISO_IMAGE`, `ISO_STAGE`, `ISO_FAT_IMG`, `ISO_SIZE_MB`, `ISO_VOLID`,
 `ISO_CMDLINE`, `ISO_DATE`, `ISO_RUN_TIMEOUT_SEC`, `EXPECT_ISO`, `ISO_IMG`,
@@ -850,7 +903,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/input/` | `input.device`: set-1 scancode decoder, the console byte queue and the pointer state |
 | `kernel/audio/` | `audio.device` PCM ring, the per-channel mixer and the tone generator |
 | `kernel/net/` | `net.device`, Ethernet/ARP/IPv4/ICMP/UDP, TCP, the DHCP client and the DNS resolver |
-| `kernel/gfx/` | `gfx.device` (the pointer-driven framebuffer cursor) and `intuition.device` with the phase 6A desktop, its phase 6B menus, gadgets and event queue, and the phase 6C body painter the shell window uses, the phase 6D resize grips and keyboard navigation |
+| `kernel/gfx/` | `gfx.device` (the pointer-driven framebuffer cursor) and `intuition.device` with the phase 6A desktop, its phase 6B menus, gadgets and event queue, and the phase 6C body painter the shell window uses, the phase 6D resize grips and keyboard navigation, and the phase 6E desktop objects, depth gadget and drawer |
 | `kernel/shell/` | the Workbench shell: line editor, history, the command table and the `shell_io` binding to the mounted ext4 root |
 | `kernel/mm/` | physical allocator, W^X page tables, kernel heap |
 | `kernel/block/` | block-device registry, partitions, bounds checks, RAID1/RAID10, boot-time rebuild and the AES-256-XTS `crypt.device` |
@@ -933,14 +986,17 @@ desktop bring-up; phase 6B added strip menus with popup selection, body gadgets,
 the close gadget and the typed event queue; phase 6C put a live shell with
 console scrollback in the second window and wired the keyboard to it; phase 6D
 made the windows resizable from a corner grip and taught the keyboard Tab
-focus, 8-pixel arrow moves and a menu popup. Remaining phase 3B work is
+focus, 8-pixel arrow moves and a menu popup; phase 6E put desktop objects under
+the windows, added the depth gadget and painted a drawer from the root
+directory. Remaining phase 3B work is
 online RAID rebuild, hot spare, scrub and a write-intent bitmap, RAID below
 encryption, a redundant ESP, TPM/keyfile keyslots and USB storage; phase 4
 continues with framebuffer (GOP) console input and virtual terminals, plus a
 routing table and richer resolver features on top of the phase 4B-4D stack;
-the next step is the rest of Workbench userspace: reflowing a body when its
-window is resized, sub-menus, a gadget toolkit, send-to-back and Shift-Tab once
-the input layer carries modifier state, on top of the phase 6D desktop. Later
+the next step is the rest of Workbench userspace: dragging and renaming an
+icon, a drawer that refreshes and scrolls, a send-to-front gadget, keyboard
+focus for the icons and, in phase 7, application bundles (spec section 35), on
+top of the phase 6E desktop. Later
 phases cover USB storage, graphics, Workbench userspace, SMP/IOMMU and
 virtualisation. See
 [docs/roadmap.md](docs/roadmap.md) for the full sequence and the known

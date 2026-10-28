@@ -103,9 +103,9 @@ static void test_intuition_basics(void)
     CHECK(g_fill_calls > 0u);
     /* Each open and close repaints every window bottom to top: 1+2+3+4 on the
      * four opens, then 3 and 2 as the two windows close, so 15 window draws.
-     * Every draw frames the window, its close gadget (phase 6B) and its
-     * resize grip (phase 6D). */
-    CHECK(g_frame_calls == 45u);
+     * Every draw frames the window itself, its close box (phase 6B), its depth
+     * box (phase 6E) and its resize grip (phase 6D): four frames per draw. */
+    CHECK(g_frame_calls == 60u);
 }
 
 static void test_intuition_no_framebuffer(void)
@@ -520,8 +520,8 @@ static void test_intuition_close_gadget(void)
     CHECK(intuition_close_count() == 1u);
     CHECK(intuition_event_poll(&out) == 0);
 
-    /* A press just outside the box starts a title-bar drag instead. */
-    move_cursor(370, 112);
+    /* A press on the title bar left of the depth box starts a drag instead. */
+    move_cursor(250, 112);
     pointer(&ev, 0, 0, 0x01u, 0x01u);
     intuition_pointer_event(&ev);
     CHECK(intuition_close_count() == 1u);
@@ -729,6 +729,192 @@ static void test_intuition_event_queue(void)
     CHECK(intuition_event_poll(&out) == 0);
 }
 
+/* Desktop objects (phase 6E): icons sit on the background under every window.
+ * A press selects one, queues an ICON event and counts an action; a press on
+ * the empty desktop clears the selection without counting anything.  Window 1
+ * at (0, 220) and 300x300 covers an icon at (16, 240). */
+static void test_intuition_icons(void)
+{
+    struct input_pointer ev;
+    struct intuition_event out;
+    i32 x = 0;
+    i32 y = 0;
+    u32 w = 0;
+    u32 h = 0;
+    u32 i;
+
+    test_reset(1024, 768);
+    CHECK(intuition_icon_count() == 0u);
+    CHECK(intuition_icon_selected() == -1);
+    CHECK(intuition_icon_clicks() == 0u);
+    /* The tile is clamped so all 64x48 pixels stay on the screen. */
+    CHECK(intuition_add_icon(2000, 2000, "Edge", INTUITION_ICON_DRAWER) == 0);
+    CHECK(intuition_icon_rect(0, &x, &y, &w, &h) == 0);
+    CHECK(x == 960 && y == 720);
+    CHECK(w == INTUITION_ICON_WIDTH && h == INTUITION_ICON_HEIGHT);
+
+    test_reset(1024, 768);
+    CHECK(intuition_icon_count() == 0u);
+    CHECK(intuition_add_icon(16, 240, "System:", INTUITION_ICON_VOLUME) == 0);
+    CHECK(intuition_add_icon(16, 700, NULL, 0u) == -1);
+    CHECK(intuition_icon_rect(0, &x, &y, &w, &h) == 0);
+    CHECK(x == 16 && y == 240);
+    CHECK(intuition_icon_rect(1, &x, &y, &w, &h) == -1);
+    CHECK(intuition_icon_rect(-1, &x, &y, &w, &h) == -1);
+    for (i = 1; i < INTUITION_MAX_ICONS; i++) {
+        CHECK(intuition_add_icon(16 + (i32)i * 80, 400, "Icon",
+                                 INTUITION_ICON_FILE) == (int)i);
+    }
+    CHECK(intuition_icon_count() == INTUITION_MAX_ICONS);
+    CHECK(intuition_add_icon(500, 500, "Over", INTUITION_ICON_FILE) == -1);
+    /* Icons are part of the desktop: every redraw frames them too. */
+    CHECK(g_frame_calls > 0u);
+    CHECK(g_text_calls > 0u);
+
+    /* A press on the tile selects it, counts an action and queues an event. */
+    test_reset(1024, 768);
+    CHECK(intuition_add_icon(16, 240, "System:", INTUITION_ICON_VOLUME) == 0);
+    CHECK(intuition_event_count() == 0u);
+    move_cursor(48, 264);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_icon_selected() == 0);
+    CHECK(intuition_icon_clicks() == 1u);
+    CHECK(intuition_action_count() == 1u);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.type == INTUITION_EVENT_ICON);
+    CHECK(out.window == 0);
+    CHECK(out.index == 0);
+    CHECK(out.item == 0u);
+    CHECK(out.x == 16 && out.y == 240);
+    CHECK(intuition_event_poll(&out) == 0);
+    /* The release after the selecting press does nothing. */
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_icon_clicks() == 1u);
+    CHECK(intuition_icon_selected() == 0);
+    /* A press on the empty desktop clears the selection, queues nothing and
+     * leaves the click count alone. */
+    move_cursor(900, 700);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_icon_selected() == -1);
+    CHECK(intuition_icon_clicks() == 1u);
+    CHECK(intuition_action_count() == 1u);
+    CHECK(intuition_event_poll(&out) == 0);
+    /* Selecting it again counts a second click. */
+    move_cursor(48, 264);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_icon_selected() == 0);
+    CHECK(intuition_icon_clicks() == 2u);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(intuition_event_poll(&out) == 0);
+
+    /* A window drawn over an icon wins the press: the icon is not selected. */
+    test_reset(1024, 768);
+    CHECK(intuition_add_icon(16, 240, "System:", INTUITION_ICON_VOLUME) == 0);
+    CHECK(intuition_open(0, 220, 300, 300, "Cover", "body") == 1);
+    move_cursor(48, 264);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_active() == 1);
+    CHECK(intuition_icon_selected() == -1);
+    CHECK(intuition_icon_clicks() == 0u);
+    /* The cover window is already active, so the press queues nothing at all. */
+    CHECK(intuition_event_count() == 0u);
+
+    /* Without a framebuffer there is no desktop to put an icon on. */
+    test_reset(0, 0);
+    CHECK(intuition_add_icon(0, 0, "None", INTUITION_ICON_VOLUME) == -1);
+    CHECK(intuition_icon_count() == 0u);
+}
+
+/* The depth gadget (phase 6E) is a 12x12 box just left of the close box:
+ * a press sends its window to the bottom of the stack, activates the new top
+ * window and queues a DEPTH event followed by an ACTIVATE event.  Window 2 at
+ * (480, 300) and 320x200 puts its depth box centre at (770, 312); window 1 at
+ * (100, 100) and 300x300 puts its own at (370, 112). */
+static void test_intuition_depth(void)
+{
+    struct input_pointer ev;
+    struct intuition_event out;
+
+    test_reset(1024, 768);
+    CHECK(intuition_open(100, 100, 300, 300, "One", "body") == 1);
+    CHECK(intuition_open(480, 300, 320, 200, "Two", "body") == 2);
+    CHECK(intuition_active() == 2);
+    CHECK(intuition_depth_count() == 0u);
+
+    move_cursor(770, 312);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_depth_count() == 1u);
+    CHECK(intuition_action_count() == 1u);
+    CHECK(intuition_active() == 1);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.type == INTUITION_EVENT_DEPTH);
+    CHECK(out.window == 2);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.type == INTUITION_EVENT_ACTIVATE);
+    CHECK(out.window == 1);
+    CHECK(intuition_event_poll(&out) == 0);
+    /* Window 2 is at the bottom now, so a second depth press on it changes
+     * nothing and does not count or queue anything.  Window 1 does not cover
+     * window 2's title bar, so the press still lands on window 2. */
+    move_cursor(770, 312);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_depth_count() == 1u);
+    CHECK(intuition_action_count() == 1u);
+    CHECK(intuition_active() == 1);
+    CHECK(intuition_event_poll(&out) == 0);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_depth_count() == 1u);
+
+    /* Clicking window 2's title bar raises it above window 1 again. */
+    move_cursor(600, 312);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_active() == 2);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.type == INTUITION_EVENT_ACTIVATE);
+    CHECK(out.window == 2);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    /* The title press was a zero-travel drag: its release queues a DRAG. */
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.type == INTUITION_EVENT_DRAG);
+    CHECK(out.window == 2);
+    /* And its depth box sends it back down a second time. */
+    move_cursor(770, 312);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_depth_count() == 2u);
+    CHECK(intuition_action_count() == 2u);
+    CHECK(intuition_active() == 1);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.type == INTUITION_EVENT_DEPTH);
+    CHECK(out.window == 2);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.type == INTUITION_EVENT_ACTIVATE);
+    CHECK(out.window == 1);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+
+    /* Closing window 1 leaves window 2 alone at the top; its depth press is
+     * then a no-op because it is the only window left. */
+    CHECK(intuition_close(1) == 0);
+    CHECK(intuition_active() == 2);
+    move_cursor(770, 312);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_depth_count() == 2u);
+    CHECK(intuition_action_count() == 2u);
+    CHECK(intuition_active() == 2);
+}
+
 void test_intuition_functions(void)
 {
     printf("- intuition basics / clamping / limits\n");
@@ -755,4 +941,8 @@ void test_intuition_functions(void)
     test_intuition_keys();
     printf("- intuition event queue\n");
     test_intuition_event_queue();
+    printf("- intuition desktop icons\n");
+    test_intuition_icons();
+    printf("- intuition depth gadget / send to back\n");
+    test_intuition_depth();
 }

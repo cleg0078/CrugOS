@@ -30,6 +30,7 @@
 #   make test-workbench-menu  click menus and gadgets on the Workbench desktop
 #   make test-workbench-shell  type commands into the Workbench shell window
 #   make test-workbench-keys  resize a window and drive the desktop from the keyboard
+#   make test-workbench-desk  open a drawer from the desktop volume icon and send it back
 #   make crypt-disk  build the AES-256-XTS crypt test disk
 #   make test-crypt  boot from an encrypted root and verify the disk
 #   make test-crypt-recovery  unlock the encrypted root with the recovery keyslot
@@ -95,6 +96,7 @@ EXPECT_WB ?= no
 EXPECT_MENU ?= no
 EXPECT_SHELL ?= no
 EXPECT_KEYS ?= no
+EXPECT_DESK ?= no
 
 # QEMU / firmware options.
 MEMORY_MB ?= 512
@@ -136,6 +138,9 @@ WB_SHELL_RUN_TIMEOUT_SEC ?= 240
 WB_KEYS_WAIT ?= 30
 WB_KEYS_ACTS ?= 2
 WB_KEYS_RUN_TIMEOUT_SEC ?= 240
+WB_DESK_WAIT ?= 30
+WB_DESK_ACTS ?= 3
+WB_DESK_RUN_TIMEOUT_SEC ?= 240
 
 # Interactive demo (make demo): a real QEMU window with a USB keyboard and
 # mouse, the Workbench desktop and a hold so the window stays open.
@@ -272,6 +277,7 @@ HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
         test-crypt-keyboard test-crypt-keyboard-wrong crypt-run test-net test-tcp \
         test-net-dns test-usb-hotplug test-usb-mouse test-audio test-gfx \
         test-workbench test-workbench-menu test-workbench-shell test-workbench-keys \
+        test-workbench-desk \
         iso check-iso test-iso usb \
         crash-disk \
         check-disk size check-efi repro test-host preflight version options clean distclean help
@@ -621,6 +627,21 @@ test-workbench-keys: esp
 	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" no no no no no any no no no no no no no no no no "$(EXPECT_KEYS)"
 	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 
+# Desktop gate: the guest boots with wb.desk=1 and waits for actions; the driver
+# clicks the System: volume icon twice to open the drawer, then clicks the
+# drawer's depth gadget to send it to the back. Serial markers prove the icon,
+# the drawer and the depth event; screendumps prove the redraw.
+test-workbench-desk: EXPECT_DESK := yes
+test-workbench-desk: esp
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(PYTHON) scripts/run-workbench-desk.py --repo $(CURDIR) \
+		--disk $(abspath $(DISK_IMG)) --serial-log $(abspath $(SERIAL_LOG)) \
+		--exit-code $(abspath $(QEMU_EXIT)) --acts $(WB_DESK_ACTS) \
+		--wb-wait $(WB_DESK_WAIT) --run-timeout $(WB_DESK_RUN_TIMEOUT_SEC) \
+		--qemu-extra "$(WB_QEMU_EXTRA)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no $(EXPECT_DESK)
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
 test:
 	$(Q)rm -f $(DISK_IMG)
 	$(Q)$(MAKE) --no-print-directory run
@@ -843,6 +864,10 @@ options:
 	@printf '  %-16s %s\n' WB_KEYS_WAIT "$(WB_KEYS_WAIT) (seconds)"
 	@printf '  %-16s %s\n' WB_KEYS_ACTS "$(WB_KEYS_ACTS)"
 	@printf '  %-16s %s\n' WB_KEYS_RUN_TIMEOUT_SEC "$(WB_KEYS_RUN_TIMEOUT_SEC)"
+	@printf '  %-16s %s\n' EXPECT_DESK "$(EXPECT_DESK)"
+	@printf '  %-16s %s\n' WB_DESK_WAIT "$(WB_DESK_WAIT) (seconds)"
+	@printf '  %-16s %s\n' WB_DESK_ACTS "$(WB_DESK_ACTS)"
+	@printf '  %-16s %s\n' WB_DESK_RUN_TIMEOUT_SEC "$(WB_DESK_RUN_TIMEOUT_SEC)"
 	@printf '  %-16s %s\n' MEMORY_MB "$(MEMORY_MB)"
 	@printf '  %-16s %s\n' SMP "$(SMP)"
 	@printf '  %-16s %s\n' TIMEOUT_SEC "$(TIMEOUT_SEC)"

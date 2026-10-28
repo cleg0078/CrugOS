@@ -11,8 +11,10 @@ did. Phase 6C fills the second window with a live shell -- a scrollback text
 grid, a line editor with history and a command set over the mounted ext4 root.
 Phase 6D makes every window resizable from a corner grip and gives the
 keyboard a navigation role: Tab cycles the focus, the arrow keys move the
-active window and Enter opens its menu for the arrows to drive. There are no
-application tasks behind the desktop yet -- the kernel-side device
+active window and Enter opens its menu for the arrows to drive. Phase 6E adds
+desktop objects, which sit under the windows and select or open a drawer, and
+the depth gadget, which sends a window to the back of the stacking order. There
+are no application tasks behind the desktop yet -- the kernel-side device
 is what the Workbench userspace will sit on -- so the only residents are the
 bring-up module and its shell, which appear when the loader command line asks
 for them.
@@ -71,6 +73,11 @@ untouched.
 | `INTUITION_KEY_STEP` | 8 | pixels an arrow key moves the active window |
 | `INTUITION_MIN_WIDTH` | 120 | smallest window a caller can open |
 | `INTUITION_MIN_HEIGHT` | 80 | smallest window a caller can open |
+| `INTUITION_DEPTH_SIZE` | 12 | depth gadget side in pixels |
+| `INTUITION_MAX_ICONS` | 8 | desktop object slots |
+| `INTUITION_ICON_WIDTH` | 64 | icon tile width in pixels |
+| `INTUITION_ICON_HEIGHT` | 48 | icon tile height in pixels |
+| `INTUITION_ICON_LABEL_GAP` | 4 | pixels between a tile and its label |
 | `INTUITION_DESKTOP_RGB` | `0x00102030` | desktop background |
 | `INTUITION_WINDOW_RGB` | `0x00081018` | window body |
 | `INTUITION_FRAME_RGB` | `0x00ffffff` | one-pixel window frame |
@@ -85,6 +92,10 @@ untouched.
 | `INTUITION_GADGET_RGB` | `0x00a0a0a0` | gadget fill |
 | `INTUITION_GADGET_PRESSED_RGB` | `0x00606060` | gadget fill while held |
 | `INTUITION_GADGET_TEXT_RGB` | `0x00000000` | gadget label |
+| `INTUITION_ICON_RGB` | `0x00c0c0c0` | icon tile fill |
+| `INTUITION_ICON_INNER_RGB` | `0x00081018` | icon inner panel |
+| `INTUITION_ICON_TEXT_RGB` | `0x00e0e0e0` | icon label |
+| `INTUITION_ICON_SELECTED_BORDER_RGB` | `0x00ffb000` | frame of the selected icon |
 
 API:
 
@@ -113,6 +124,14 @@ API:
 | `u64 intuition_resize_count(void)` | completed resize-grip gestures |
 | `void intuition_key_event(u8 key)` | consume one decoded key byte |
 | `u32 intuition_window_count(void)` | open windows |
+| `int intuition_add_icon(i32 x, i32 y, const char *label, u32 kind)` | add a desktop object; returns its index or -1 |
+| `int intuition_icon_rect(int index, i32 *x, i32 *y, u32 *w, u32 *h)` | read an icon tile rectangle; 0 or -1 |
+| `int intuition_icon_selected(void)` | selected desktop object, or -1 |
+| `u32 intuition_icon_count(void)` | desktop objects added |
+| `u64 intuition_icon_clicks(void)` | presses on a desktop object |
+| `u64 intuition_depth_count(void)` | windows sent to the back |
+| `int intuition_set_paint(int id, void (*fn)(int id, i32 x, i32 y, u32 w, u32 h, void *ctx), void *ctx)` | install one body painter; a NULL callback restores the static body text |
+| `void intuition_redraw_window(int id)` | repaint one window after its content changed |
 
 ### Window anatomy
 
@@ -126,7 +145,8 @@ the host tests grows by the number of open windows on every open.
 
 A window is a 1-pixel white frame, a 20-pixel title bar at the border offset,
 a 12x12 close gadget at `x + w - 2 - 18`, `y + 2 + 4` on the right of the
-title bar (in phase 6B it closes the window), a 12x12 resize grip in the inner
+title bar (in phase 6B it closes the window), a 12x12 depth gadget four pixels
+left of it (phase 6E), a 12x12 resize grip in the inner
 bottom-right corner (phase 6D), and a body of 8x16 text on a 20-pixel line
 pitch. Body text lines are split at `\n` and truncated to 47 characters.
 
@@ -143,12 +163,14 @@ hit testing always uses the final cursor position:
 - `changes & 0x01` with `buttons & 0x01` (left press) is resolved in a fixed
   order, so the most specific target wins: a row of the open popup selects its
   item, a press on the menu bar opens (or switches) a strip, a press on a close
-  box closes that window, a press on the resize grip starts a size drag, a
-  press on a body gadget arms a click, and only then
+  box closes that window, a press on the depth box sends it to the back, a press
+  on the resize grip starts a size drag, a press on a body gadget arms a click,
+  and only then
   does `win_hit()` walk the stacking order top down for the first window that
   contains the point. On a window hit the window is raised, made active, and --
   when the press is on the title bar -- a drag starts with the grab offset
-  `(px - w->x, py - w->y)`. A press on the desktop raises and closes nothing.
+  `(px - w->x, py - w->y)`. A press that hits no window selects a desktop object
+  or, on the empty desktop, clears the selection.
   The release (`changes & 0x01` without the left button) completes a pending
   gadget click, so a press that leaves its gadget and releases elsewhere does
   not count.
@@ -169,6 +191,60 @@ hundred thousand pixels, which is cheap enough for a polled bring-up phase and
 keeps the renderer simple: no dirty rectangles, no clipping stacks, no
 save-under (the framebuffer primitives restore and recomposite the pointer
 sprite themselves).
+
+## Desktop objects
+
+Phase 6E adds desktop objects: a tile the size of `INTUITION_ICON_WIDTH` x
+`INTUITION_ICON_HEIGHT` (64x48) with one label line under it, drawn on the
+desktop background. Because the repaint walks the stacking order bottom to top,
+the icons are painted first and every window covers them, so a press inside a
+window never reaches a tile.
+
+| property | value |
+| --- | --- |
+| table | `INTUITION_MAX_ICONS` (8) objects |
+| tile | `INTUITION_ICON_WIDTH` x `INTUITION_ICON_HEIGHT` (64x48) |
+| label gap | `INTUITION_ICON_LABEL_GAP` (4) pixels under the tile |
+| tile fill | `INTUITION_ICON_RGB` (`0x00c0c0c0`) |
+| inner panel | `INTUITION_ICON_INNER_RGB` (`0x00081018`) |
+| label | `INTUITION_ICON_TEXT_RGB` (`0x00e0e0e0`) |
+| selected frame | `INTUITION_ICON_SELECTED_BORDER_RGB` (`0x00ffb000`) |
+| kinds | `INTUITION_ICON_VOLUME` (0), `INTUITION_ICON_DRAWER` (1), `INTUITION_ICON_FILE` (2) |
+
+`intuition_add_icon(x, y, label, kind)` stores one object and returns its
+index, or -1 when the table is full, the label is missing or no framebuffer is
+ready. The tile is clamped like a window, so all 64x48 pixels and the label stay
+on screen; `intuition_icon_rect()` reads a stored rectangle back.
+
+A left press inside a tile selects that object, so there is one selected icon
+at a time: its frame and its label turn
+`INTUITION_ICON_SELECTED_BORDER_RGB`, `intuition_icon_clicks()` and the
+action count grow by one, `INTUITION_EVENT_ICON` is queued with the object
+index and the tile origin, and a reporting boot prints
+`CRUGOS: wb icon '<label>' selected`. A press on the empty desktop clears the
+selection instead. `intuition_icon_selected()` returns the selected index or
+-1, and `intuition_icon_count()` the objects added.
+
+The device reports presses only, so a double click is a caller concept: the
+Workbench treats two presses on the same object inside `WB_DOUBLE_CLICK_NS`
+(600000000 ns) as a drawer open. With `wb.desk=1` it adds one volume object
+labelled `System:` at (16,240), prints
+`CRUGOS: wb icon ready ('System:', volume)` after the desktop, shell and keys
+markers, and opens a normal Intuition window titled `System:` at (560,60),
+360x260 whose painter lists the root directory entries of the mounted ext4
+root, one name per line, at most 10 lines, clipped to the body width, printing
+`CRUGOS: wb drawer 'System:' opened (N entries)`. An empty or unmounted root
+prints `no volume` instead.
+
+### Window body painters
+
+`intuition_set_paint(id, fn, ctx)` installs one painter per window. Once
+installed the callback receives the body rectangle in screen coordinates
+instead of the static body text, and the gadgets are still drawn after it, so a
+painter never has to know about them. `intuition_redraw_window(id)` repaints
+that one window after its content changed, and a NULL callback restores the
+static body text. There is a single painter slot, so a second call replaces the
+first. The shell window uses this from phase 6C and the drawer from phase 6E.
 
 ## Menus
 
@@ -218,17 +294,34 @@ window N closed (gadget)`, counts one close and one action, and queues
 the last window is gone. A press just left of the box is still a title-bar
 press and starts a drag.
 
+## The depth gadget
+
+Phase 6E adds a 12x12 `INTUITION_DEPTH_SIZE` box four pixels left of the close
+box in every title bar, so the bar now reads: drag area, depth box, close box.
+A press on it sends that window to the bottom of the stacking order. The new
+top window becomes active and its title bar turns amber,
+`INTUITION_EVENT_DEPTH` is queued for the window that went back followed by
+`INTUITION_EVENT_ACTIVATE` for the new top window, `intuition_depth_count()`
+and the action count grow by one, and a reporting boot prints
+`CRUGOS: wb window N sent to back`.
+
+This differs from a title-bar press, which raises the window, and from the close
+box, which removes it: the window stays open and keeps its size and content,
+only its place in the stack changes. Pressing the depth box of the window that
+is already at the bottom is a no-op -- no event, no count and no repaint --
+because the stacking order would not change.
+
 ## The event queue
 
 `struct intuition_event` is the typed report the desktop hands to its caller:
 
 | field | meaning |
 | --- | --- |
-| `type` | `INTUITION_EVENT_ACTIVATE`, `_DRAG`, `_MENU`, `_GADGET`, `_CLOSE` or `_RESIZE` (0 = none) |
+| `type` | `INTUITION_EVENT_ACTIVATE`, `_DRAG`, `_MENU`, `_GADGET`, `_CLOSE`, `_RESIZE`, `_ICON` or `_DEPTH` (0 = none) |
 | `window` | window id the event belongs to, 0 when it has none |
-| `index` | menu index or gadget index, -1 when unused |
+| `index` | menu index, gadget index or desktop object index, -1 when unused |
 | `item` | selected menu item index, 0 when unused |
-| `x`, `y` | window origin when the event was generated |
+| `x`, `y` | window origin, or icon tile origin on `_ICON`, when the event was generated |
 | `w`, `h` | new window size, set on `_RESIZE` and 0 otherwise |
 
 Activation and completed drags are queued as well, so a caller that drains the
@@ -239,7 +332,10 @@ plus `intuition_event_dropped()` accounts for every event the device produced.
 `intuition_event_poll()` returns 1 and copies the oldest event, or 0 when the
 queue is empty. `intuition_init()` resets the queue and both counters. A
 finished resize queues `INTUITION_EVENT_RESIZE` with the new `w` and `h`; the
-other five types leave both fields at 0.
+other seven types leave both fields at 0. A depth press queues
+`INTUITION_EVENT_DEPTH` for the window that went back and then an
+`INTUITION_EVENT_ACTIVATE` for the new top window; an icon press queues `_ICON`
+with the object index and its tile origin.
 
 ## The desktop bring-up
 
@@ -255,7 +351,7 @@ other five types leave both fields at 0.
 
    | id | rectangle | title | body |
    | --- | --- | --- | --- |
-   | 1 | (80, 90) 360x220 | `Workbench` | `CrugOS Workbench` / `phase 6d` / `software rendered` |
+   | 1 | (80, 90) 360x220 | `Workbench` | `CrugOS Workbench` / `phase 6e` / `software rendered` |
    | 2 | (480, 300) 320x200 | `Shell` | `4.OS` / `crugos>`, or the shell grid when `wb.shell=1` |
 
    Window 1 carries the `Workbench` (About/Info/Quit) and `Window`
@@ -300,12 +396,14 @@ tokens do. Values are decimal, capped, and ignored when malformed:
 | `wb.menu=1` | 0/1 | also wait for `wb.acts=` menu, gadget and close actions |
 | `wb.acts=N` | 0..8 | actions the self-test requires (also with `wb.keys=1`) |
 | `wb.keys=1` | 0/1 | hand decoded key bytes to `intuition_key_event()` (ignored when `wb.shell=1`) |
+| `wb.desk=1` | 0/1 | create the `System:` desktop object and count desktop actions (reporting mode) |
 | `wb.hold=S` | 0..3600 | seconds `wb_hold()` keeps the desktop on screen after the boot marker |
 
 `make test-workbench` boots with `wb.enable=1 wb.wait=30 wb.drag=1`,
 `make test-workbench-menu` with `wb.enable=1 wb.wait=30 wb.menu=1 wb.acts=4`,
-and `make test-workbench-keys` with `wb.enable=1 wb.wait=30 wb.keys=1
-wb.acts=2`. `make demo` boots
+`make test-workbench-keys` with `wb.enable=1 wb.wait=30 wb.keys=1
+wb.acts=2`, and `make test-workbench-desk` with `wb.enable=1 wb.wait=30
+wb.desk=1 wb.acts=3`. `make demo` boots
 `wb.enable=1 wb.wait=0 wb.hold=<seconds>` instead: `wb.wait=0` turns both
 self-tests into no-ops, so the interactive desktop needs neither a drag nor an
 action before the boot marker, and `wb.hold=` keeps the guest alive
@@ -330,7 +428,7 @@ CRUGOS: wb window 2 drag start (512, 312)
 CRUGOS: wb window 2 drag to (557, 337)
 CRUGOS: wb window 2 moved to (570, 350)
 CRUGOS: wb selftest ok (1 drag(s), 0 action(s))
-CRUGOS: phase 6d boot ok
+CRUGOS: phase 6e boot ok
 ```
 
 The menu gate is a second boot and adds the action lines:
@@ -348,7 +446,7 @@ CRUGOS: wb menu 'Workbench' open (window 1)
 CRUGOS: wb menu 'Workbench' selected ('Quit')
 CRUGOS: wb action 4 menu window 1 item 2
 CRUGOS: wb selftest ok (0 drag(s), 4 action(s))
-CRUGOS: phase 6d boot ok
+CRUGOS: phase 6e boot ok
 ```
 
 The shell gate is a third boot: it adds `CRUGOS: wb shell ready (window 2,
@@ -375,13 +473,37 @@ CRUGOS: wb menu 'Workbench' item 1 highlighted ('Info')
 CRUGOS: wb menu 'Workbench' selected ('Info')
 CRUGOS: wb action 2 menu window 1 item 1
 CRUGOS: wb selftest ok (0 drag(s), 2 action(s))
-CRUGOS: phase 6d boot ok
+CRUGOS: phase 6e boot ok
+```
+
+The desktop gate is a fifth boot: it selects the `System:` object, opens its
+drawer and sends the drawer to the back of the stacking order:
+
+```
+CRUGOS: wb desktop ready (1024x768, 2 window(s))
+CRUGOS: wb icon ready ('System:', volume)
+CRUGOS: wb icon 'System:' selected
+CRUGOS: wb icon 'System:' selected
+CRUGOS: wb drawer 'System:' opened (5 entries)
+CRUGOS: wb action 1 icon 0
+CRUGOS: wb action 2 icon 0
+CRUGOS: wb window 3 sent to back
+CRUGOS: wb action 3 depth window 3
+CRUGOS: wb desk selftest ok (1 drawer(s))
+CRUGOS: wb selftest ok (0 drag(s), 3 action(s))
+CRUGOS: phase 6e boot ok
 ```
 
 | marker | when |
 | --- | --- |
 | `CRUGOS: wb desktop ready (WxH, N window(s))` | the desktop took the screen |
 | `CRUGOS: wb keys ready (window N active)` | `wb.keys=1` installed keys mode |
+| `CRUGOS: wb icon ready ('<label>', kind)` | `wb.desk=1` created the desktop object |
+| `CRUGOS: wb icon '<label>' selected` | a press selected a desktop object |
+| `CRUGOS: wb drawer '<label>' opened (N entries)` | a double click opened the drawer |
+| `CRUGOS: wb drawer '<label>' no volume` | the drawer found no mounted root |
+| `CRUGOS: wb window N sent to back` | the depth gadget was pressed |
+| `CRUGOS: wb desk selftest ok (N drawer(s))` | the desktop self-test saw its drawers |
 | `CRUGOS: wb framebuffer absent` | `wb.enable=1` without a usable framebuffer |
 | `CRUGOS: wb window N opened (x, y, WxH)` | a window was opened (reporting on) |
 | `CRUGOS: wb window N active` | a left press hit window N |
@@ -398,7 +520,7 @@ CRUGOS: phase 6d boot ok
 | `CRUGOS: wb menu closed (escape)` | Escape closed a keyboard-opened popup |
 | `CRUGOS: wb gadget '<label>' clicked in window N` | a gadget click completed |
 | `CRUGOS: wb window N closed (gadget)` | the close gadget closed the window |
-| `CRUGOS: wb action K menu\|gadget\|close\|resize ...` | one event was drained from the queue |
+| `CRUGOS: wb action K menu\|gadget\|close\|resize\|icon\|depth ...` | one event was drained from the queue |
 | `CRUGOS: wb shell ready (window N, CxR text)` | `wb.shell=1` installed the shell painter |
 | `CRUGOS: sh run '<line>'` | a shell line was executed |
 | `CRUGOS: sh out <text>` | one output line of that command |
@@ -544,7 +666,7 @@ there is no keyboard text entry, only focus, movement and menu selection.
 ## Host tests
 
 `make test-host` links the real `kernel/gfx/intuition.c`,
-`kernel/lib/textgrid.c` and `kernel/shell/shell.c` and reports 2862 checks.
+`kernel/lib/textgrid.c` and `kernel/shell/shell.c` and reports 2957 checks.
 `tests/host/test_intuition.c` replaces the framebuffer primitives with counting
 stubs and the cursor accessors with a settable fake (`test_fb_fake_reset()` /
 `test_fb_cursor_set()` from `tests/host/test_gfx.c`), then checks:
@@ -577,6 +699,16 @@ stubs and the cursor accessors with a settable fake (`test_fb_fake_reset()` /
   window and queueing `ACTIVATE`), the four arrow bytes moving the active
   window by 8 pixels and clamping it to the screen, and Enter/Down/Up/Escape
   opening, highlighting, selecting and dismissing the menu popup.
+- desktop objects: the eight-icon table, tile clamping at every screen edge, the
+  three kinds, selection and clearing, the eight-icon limit, an add without a
+  framebuffer or a label failing with -1, a press covered by a window not
+  reaching the tile, and the queued `ICON` event with its index and tile origin.
+- the depth gadget: the 12x12 box four pixels left of the close box, a press
+  sending its window to the bottom, the queued `DEPTH` followed by `ACTIVATE`
+  for the new top window, and the no-op on the backmost window.
+- window painters: installing a painter, the body rectangle it receives, the
+  gadgets still drawn after it, `intuition_redraw_window()` repainting one
+  window, and a NULL painter restoring the static body text.
 - the event queue: a 16-event FIFO, the drop counter on overflow, the action
   count still growing past the queue depth, and the FIFO drain order.
 
@@ -627,7 +759,7 @@ anything else. The script then:
    `ok: workbench title-bar drag (N drag(s), window 2 at (x, y), exit 33)`.
 
 `make test-workbench` then runs `scripts/boot-check.py` with `EXPECT_WB=yes`
-(the phase 6d boot marker, the desktop marker, a `wb selftest ok`, at least one
+(the phase 6e boot marker, the desktop marker, a `wb selftest ok`, at least one
 `wb window N opened`, one `wb window N moved to`, and one `wb cursor at` with
 numeric coordinates) and `scripts/check-disk.py` for the ext4 root.
 
@@ -662,7 +794,7 @@ larger relative motion into several 8-bit HID reports and the guest drops some
 of them, so a single jump of 644 pixels landed 136 pixels short when the gate
 was first written.
 
-`boot-check.py` then runs with `EXPECT_MENU=yes`, which requires the phase 6d
+`boot-check.py` then runs with `EXPECT_MENU=yes`, which requires the phase 6e
 marker, the desktop marker, the menu open and selected markers, the gadget
 click marker, the close marker, at least one `wb action N ...` line and a
 `wb selftest ok (N drag(s), M action(s))` with at least one action, and
@@ -685,6 +817,8 @@ carries `0xE0E0E0` text pixels. The gate then requires
 and `boot-check.py` runs with `EXPECT_SHELL=yes` (the shell and desktop markers,
 a `sh run`, a `CRUGOS: sh out CrugOS ` line and at least one command in the
 `sh selftest ok`). It prints `ok: workbench shell commands (4 command(s), exit
+33)`.
+
 ### Resize and keyboard gate
 
 `make test-workbench-keys` runs `scripts/run-workbench-keys.py` on the same
@@ -706,7 +840,7 @@ wb.acts=$(WB_KEYS_ACTS)`:
    and Enter to select it, requiring the highlight marker, the selection marker
    and `wb action 2 menu window 1 item 1`.
 5. waits for exit status 33, then runs `scripts/boot-check.py` with
-   `EXPECT_KEYS=yes` (the phase 6d marker, the desktop and keys markers, the
+   `EXPECT_KEYS=yes` (the phase 6e marker, the desktop and keys markers, the
    resize and key-move markers, the menu markers and a two-action
    `wb selftest ok`) and `scripts/check-disk.py`, and prints
    `ok: workbench resize and keyboard navigation (exit 33)`.
@@ -717,6 +851,31 @@ relative motion into several 8-bit HID reports and the guest drops some of
 them, the same limit the menu gate works around. The driver also never clicks
 while the keyboard part runs, so a stray press cannot steal focus from window
 1.
+
+### Desktop gate
+
+`make test-workbench-desk` runs `scripts/run-workbench-desk.py` on the same
+machine (`usb=off,i8042=off`, an `xhci` controller) and adds a hotplugged
+`usb-mouse` to `wb.enable=1 wb.wait=$(WB_DESK_WAIT) wb.desk=1
+wb.acts=$(WB_DESK_ACTS)`:
+
+1. waits for `CRUGOS: wb icon ready ('System:', volume)`, then takes a
+   `screendump` and requires the idle tile frame `(255,255,255)` at the tile
+   origin (16,240) and the inner panel `(8,16,24)` at (48,264).
+2. clicks the object. Its frame and its label must turn amber, so a second
+   `screendump` reads `(255,176,0)` at (16,240).
+3. clicks the same point again inside `WB_DOUBLE_CLICK_NS`, which opens the
+   drawer: `CRUGOS: wb drawer 'System:' opened (5 entries)`.
+4. reads the overlap point (700,310): the drawer's title bar is amber there and
+   its body is dark, where the Shell window used to show through.
+5. clicks the drawer's depth box at (890,72), which sends the drawer to the
+   back: the drawer title bar turns idle grey `(128,128,128)` and the Shell
+   title bar behind it becomes amber at the same point.
+6. waits for exit status 33, then runs `scripts/boot-check.py` with
+   `EXPECT_DESK=yes` (the phase 6e marker, the desktop and icon markers, the
+   drawer marker, the icon and depth action lines, the desk self-test line and
+   a three-action `wb selftest ok`) and `scripts/check-disk.py`, and prints
+   `ok: workbench desktop objects and depth (exit 33)`.
 
 ## Interactive demo
 
@@ -737,11 +896,12 @@ guest prints `CRUGOS: wb hold finished`, exits with status 33 and leaves
   `make demo` pass it, a normal boot does not) and the demo windows are
   hardcoded. There are no application tasks, no Workbench userspace and no
   window content owned by another program yet.
-- Four windows, two menus of six items and four gadgets per window, one open
-  popup at a time. No sub-menus, no icons, no clipboard and no double-click
-  semantics; a menu selection, gadget click, close or resize queues an event,
-  but only the bring-up module drains that queue and no other program is
-  attached to it yet.
+- Four windows, two menus of six items, four gadgets and eight desktop objects,
+  one open popup at a time. No sub-menus and no clipboard; a menu selection,
+  gadget click, close, resize, icon press or depth press queues an event, but
+  only the bring-up module drains that queue and no other program is attached
+  to it yet. The device reports single presses only: the Workbench, not
+  intuition.device, decides what a double click means.
 - The resize grip is a fixed 12x12 box in every window and is not themeable. A
   window is resized from its bottom-right corner only; a drag that would push
   it past the screen is refused rather than clamped, so the size stops changing
@@ -750,8 +910,14 @@ guest prints `CRUGOS: wb hold finished`, exits with status 33 and leaves
 - Keyboard navigation has no Shift-Tab and no accelerators, because the input
   layer delivers one byte per key and carries no modifier state; the arrow keys
   move the active window in 8-pixel steps, there are no sub-menus to walk, and
-  outside shell mode there is no keyboard text entry. Stacking has no
-  send-to-back, so Tab can only cycle forward.
+  outside shell mode there is no keyboard text entry. There is no send-to-front
+  gadget -- the depth gadget only sends a window back -- and Tab cycles the
+  stacking order forward, so the backmost window comes round again.
+- Desktop objects are selected, not moved or renamed: there is no icon drag, no
+  keyboard focus for the icon table and no way to relabel an object after
+  `intuition_add_icon()`. The drawer lists at most 10 root names, does not
+  scroll and does not refresh while it stays open. There is one painter slot
+  per window, so a second `intuition_set_paint()` replaces the first.
 - The shell has no quoting, no globs and no redirection: arguments are split on
   spaces and the extra ones fold into the last argument, `write` creates a
   regular `0644` file but never a directory, `cat` reads at most 4 KiB and

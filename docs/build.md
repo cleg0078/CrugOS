@@ -1,6 +1,6 @@
 # Building CrugOS
 
-This document describes the phase 6D build system: how the kernel, the UEFI
+This document describes the phase 6E build system: how the kernel, the UEFI
 loader, the host crypto tool, the test disk images and the bootable hybrid ISO
 are built, which invariants the link must preserve, and how to diagnose the
 failure modes that are specific to this toolchain.
@@ -39,6 +39,7 @@ make test-workbench    # drag a window on the software-rendered desktop
 make test-workbench-menu  # open menus, select items and click gadgets
 make test-workbench-shell  # type commands into the Workbench shell window
 make test-workbench-keys   # resize a window by its grip and drive it from the keyboard
+make test-workbench-desk   # select desktop objects and send a window to the back
 make iso         # build a bootable hybrid UEFI ISO (build/<arch>/crugos.iso)
 make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
@@ -149,6 +150,10 @@ options` prints the complete resolved set (including paths derived from
 | `WB_KEYS_WAIT` | `30` | seconds the resize/keyboard gate boots with `wb.wait=` so the mouse and keyboard can be hotplugged late |
 | `WB_KEYS_ACTS` | `2` | actions (one resize, one menu selection) the gate performs and verifies |
 | `WB_KEYS_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for `make test-workbench-keys` |
+| `EXPECT_DESK` | `no` | `yes` requires the `wb icon` / `wb drawer` / `wb desk selftest ok` markers written by `make test-workbench-desk` |
+| `WB_DESK_WAIT` | `30` | seconds the desktop gate boots with `wb.wait=` so the mouse can be hotplugged late |
+| `WB_DESK_ACTS` | `3` | actions (two icon presses, one depth press) the gate performs and verifies |
+| `WB_DESK_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for `make test-workbench-desk` |
 | `DEMO_DISPLAY` | `gtk` | QEMU display `make demo` opens (any `-display` value, for example `sdl` or `none`) |
 | `DEMO_HOLD_SEC` | `600` | seconds `make demo` keeps the desktop on screen before the guest exits by itself |
 | `DEMO_TIMEOUT_SEC` | `900` | wall-clock budget for the whole `make demo` boot |
@@ -522,6 +527,22 @@ and select `Info`. It requires exit status 33, the resize and keyboard markers
 split into steps of at most 100 pixels and follows the cursor position the guest
 reports, and the driver never clicks while the keyboard part runs.
 
+`make test-workbench-desk` proves the phase 6E desktop objects and depth gadget
+on the same machine setup, with
+[scripts/run-workbench-desk.py](../scripts/run-workbench-desk.py) in place of
+the keys driver. It boots with
+`wb.enable=1 wb.wait=$(WB_DESK_WAIT) wb.desk=1 wb.acts=$(WB_DESK_ACTS)`, waits
+for `CRUGOS: wb icon ready ('System:', volume)` and reads two pixels of the idle
+tile: frame `(255,255,255)` at (16,240) and inner panel `(8,16,24)` at
+(48,264). A click on the object must turn the frame amber `(255,176,0)`, a
+second click inside `WB_DOUBLE_CLICK_NS` must open the drawer with 5 root
+entries, and a `screendump` must show the drawer's amber title bar and dark body
+at the overlap point (700,310). Clicking the drawer's depth box at (890,72)
+sends it to the back, so the drawer title bar turns idle grey `(128,128,128)`
+and the Shell title bar behind it becomes amber. The gate requires exit status
+33, the `desk` markers (`EXPECT_DESK=yes`) and a clean `e2fsck`; it prints
+`ok: workbench desktop objects and depth (exit 33)`.
+
 ## Interactive demo
 
 `make demo` is not a gate but a way to watch the system: it boots
@@ -530,13 +551,13 @@ already plugged in) into a real `DEMO_DISPLAY` window (GTK by default) instead
 of the headless gates. The command line carries
 `wb.enable=1 wb.wait=0 wb.hold=$(DEMO_HOLD_SEC)`:
 
-- `wb.enable=1` hands the framebuffer to the phase 6D desktop and opens the two
+- `wb.enable=1` hands the framebuffer to the phase 6E desktop and opens the two
   demo windows; adding `wb.shell=1` through `DEMO_CMDLINE` gives window 2 the
   shell, while `wb.keys=1` lets Tab and the arrow keys drive the desktop.
 - `wb.wait=0` turns the desktop self-test into a no-op, so the demo does not
   require a title-bar drag before the gate marker; the interactive desktop is
   the point, not the self-test.
-- `wb.hold=<seconds>` keeps the guest alive after `CRUGOS: phase 6d boot ok`
+- `wb.hold=<seconds>` keeps the guest alive after `CRUGOS: phase 6e boot ok`
   (`wb_hold()`), polling input once per timer tick, so the window stays on
   screen until the deadline or until you close it.
 
