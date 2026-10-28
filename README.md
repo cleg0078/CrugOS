@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 5B USB mouse (`v0.20.0`)
+## Status: phase 5C USB audio (`v0.21.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -19,8 +19,9 @@ phase 4B adds a small IPv4 stack over a virtio-net NIC, phase 4C extends it
 with TCP, an HTTP exchange in both directions and six socket syscalls, phase 4D
 adds a caching DNS stub resolver with a TCP fallback and a name syscall, phase
 5A adds an xHCI host controller with a USB HID boot keyboard that can be plugged
-into the running guest, and phase 5B adds a USB HID boot mouse whose reports
-become pointer events:
+into the running guest, phase 5B adds a USB HID boot mouse whose reports become
+pointer events, and phase 5C adds a USB Audio Class path with a PCM ring and a
+per-channel mixer:
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -359,6 +360,34 @@ Phase 5B adds a pointer next to that keyboard:
   the `usb mouse` markers, a clean `e2fsck` and exit 33. See
   [usb.md](docs/usb.md).
 
+Phase 5C adds sound: a PCM ring, a mixer and a USB audio function.
+
+- `kernel/audio/audio.c` is `audio.device`: a 16384-frame (341 ms) ring of
+  interleaved 16-bit stereo. `audio_write()` appends and counts what did not
+  fit, `audio_read()` pops, runs the frames through the mixer and zero-fills the
+  rest of the buffer, so the hardware always gets a complete packet. Playback
+  and capture totals are fed back by the driver, and `audio_tone()` generates a
+  test tone from a 360-entry Q15 sine table;
+- `kernel/audio/mixer.c` keeps a volume and a mute flag per channel. Volume is
+  in 1/256 dB from `AUDIO_VOLUME_MIN` (-30 dB) to 0 dB and becomes a Q15 gain
+  through a 31-entry table, rounded to the nearest whole dB, with mute winning;
+- `drivers/usb/usb_audio.c` is attached by the xHCI driver when interface 0 of
+  the configuration has class `0x01`. It parses UAC1 and UAC2 descriptors
+  (feature unit, streaming interface, format type I, endpoint), selects
+  alternate setting 1, sets the sampling frequency and the hardware volume, and
+  treats a refused request as non-fatal;
+- the xHCI driver gained a small isochronous API (`usb_control()`,
+  `usb_isoc_open()`/`submit()`/`buf()`/`done()`/`errors()`/`close()`) with the
+  endpoint interval encoded in microframes and `TRB_SIA` set, without which the
+  packets never leave frame 0;
+- the playback path keeps 32 packets (32 ms) in flight, fills each one from
+  `audio_read()` and only counts successful completions when refilling, so a
+  ring underrun cannot wrap the window and stall the stream;
+- `audio.rate=`, `audio.volume=` and `audio.seconds=` bound the boot check, and
+  `make test-audio` boots with `qemu-xhci` plus `usb-audio` on an
+  `-audiodev none` backend, then requires the audio markers, a clean `e2fsck`
+  and exit 33. See [audio.md](docs/audio.md).
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -367,9 +396,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.20.0 (phase 5b) -- Amiga-inspired microkernel bring-up
+CrugOS 0.21.0 (phase 5c) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.20.0
+CRUGOS: version 0.21.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -382,6 +411,7 @@ CRUGOS: timer ready
 CRUGOS: heap ready
 CRUGOS: input ready (serial + keyboard)
 CRUGOS: usb controller absent
+CRUGOS: audio device absent
 virtio : net eth0 mac 52:54:00:12:34:56
 CRUGOS: net ready (1 device(s))
 virtio : blk vda, 32768 sectors, io=0x6000
@@ -415,7 +445,7 @@ CRUGOS: tcp socket syscall ok
 CRUGOS: tcp http served (72 bytes)
 CRUGOS: net selftest ok
 CRUGOS: selftest ok
-kernel : 0x0000000000100000 size=640 KiB
+kernel : 0x0000000000100000 size=712 KiB
 boot   : cpu=0 acpi_rsdp=0x1f77e000 fdt=0x0 initrd=0x0
 memory : 36 regions, usable 474080 KiB (462 MiB)
 pmm    : total=118520 free=118462 bitmap=131072 B
@@ -427,7 +457,7 @@ heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
 boot   : pmm=28552 us cpu=438 us vm=626 us traps=360 us timer=65357 us heap=60 us storage=94487 us sched=354 us syscall=122 us total=190359 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase 5b boot ok
+CRUGOS: phase 5c boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -482,6 +512,29 @@ CRUGOS: usb mouse button 0x01
 CRUGOS: usb selftest ok (0 key(s), 2 pointer event(s))
 ```
 
+The audio gate (`make test-audio`) boots the same `qemu-xhci` machine with a
+`usb-audio` function and an `-audiodev none` backend, so no host sound server is
+involved, and streams half a second of a 440 Hz tone through the mixer:
+
+```
+CRUGOS: usb device 46f4:0002 on port 5 (speed 1)
+CRUGOS: usb audio attached (uac1, 2 ch, 16-bit, 48000 Hz, iface 1 alt 1)
+CRUGOS: audio device ready (usb uac1, 2 ch, 16-bit, 48000 Hz)
+CRUGOS: audio volume unsupported
+CRUGOS: audio volume (ch0 -2560/256 dB, ch1 -2560/256 dB, mute 0)
+CRUGOS: audio stream started (48000 Hz, 2 ch)
+CRUGOS: audio streamed 24144 frame(s) in 498 ms
+CRUGOS: audio capture unavailable (no input endpoint)
+CRUGOS: audio selftest ok
+```
+
+`CRUGOS: audio volume unsupported` and a failing sampling-frequency request are
+expected from QEMU's `usb-audio`: its volume handler never accepts a channel
+selector, and it only understands class interface *out* requests. The software
+mixer is the source of truth, so both are non-fatal. Capture is parsed and
+streamed by the driver too, but this QEMU build only exposes playback, which is
+why the gate accepts the "capture unavailable" marker.
+
 With no xHCI function in the default machine the driver prints
 `CRUGOS: usb controller absent` (as in the excerpt above) and the PS/2 keyboard
 stays in charge; the USB gates are the only ones that install the controller and
@@ -521,8 +574,9 @@ make test-tcp    # TCP client/server plus an HTTP exchange against a host peer
 make test-net-dns  # resolve a name against a host DNS server over TCP
 make test-usb-hotplug  # hotplug a USB keyboard into xHCI and type at it
 make test-usb-mouse    # hotplug a USB mouse into xHCI and move the pointer
+make test-audio        # stream PCM to a USB Audio Class device through the mixer
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
-make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS)
+make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring)
 make check-disk  # e2fsck + persisted-file checks on the latest test disk
 make disk        # generate the GPT/ext4 test disk
 make raid-disks  # generate the two RAID1 member disks
@@ -545,7 +599,8 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `QEMU_DISPLAY`, `QEMU_EXTRA`, `OVMF_CODE`, `OVMF_VARS`, `REQUIRE_AVX2`,
 `EXPECT_AVX2`, `EXPECT_RAID`, `EXPECT_NVME`, `EXPECT_REBUILD`, `EXPECT_AHCI`,
 `EXPECT_CRYPT`, `EXPECT_AES`, `EXPECT_NET`, `EXPECT_TCP`, `EXPECT_DNS`,
-`EXPECT_USB`, `EXPECT_MOUSE`, `NET_MODE`, `NET_HOSTFWD`, `TCP_SERVE_SEC`,
+`EXPECT_USB`, `EXPECT_MOUSE`, `EXPECT_AUDIO`, `AUDIO_RUN_TIMEOUT_SEC`,
+`AUDIO_QEMU_EXTRA`, `NET_MODE`, `NET_HOSTFWD`, `TCP_SERVE_SEC`,
 `TCP_RUN_TIMEOUT_SEC`, `DNS_NAME`, `DNS_ADDRESS`, `DNS_TTL`,
 `DNS_RUN_TIMEOUT_SEC`, `USB_WAIT`, `USB_KEYS`, `USB_RUN_TIMEOUT_SEC`,
 `MOUSE_MOVES`, `MOUSE_WAIT`, `MOUSE_RUN_TIMEOUT_SEC`, `MACHINE_EXTRA`,
@@ -565,18 +620,19 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/arch/x86_64/` | boot code, linker script, port I/O, serial, i8042 keyboard, framebuffer, CPU/IDT/APIC/timer, context switch |
 | `kernel/core/` | kernel entry, console, printf, panic, self-tests, scheduler, handles, MsgPort, syscall dispatcher, boot report |
 | `kernel/lib/` | freestanding string, formatting, bitmap and console line-editor routines |
-| `kernel/input/` | `input.device`: set-1 scancode decoder and the console byte queue |
+| `kernel/input/` | `input.device`: set-1 scancode decoder, the console byte queue and the pointer state |
+| `kernel/audio/` | `audio.device` PCM ring, the per-channel mixer and the tone generator |
 | `kernel/net/` | `net.device`, Ethernet/ARP/IPv4/ICMP/UDP, TCP, the DHCP client and the DNS resolver |
 | `kernel/mm/` | physical allocator, W^X page tables, kernel heap |
 | `kernel/block/` | block-device registry, partitions, bounds checks, RAID1/RAID10, boot-time rebuild and the AES-256-XTS `crypt.device` |
 | `kernel/fs/` | GPT, writable checksummed ext4, checksummed JBD2 journal and the storage boot policy (including the console passphrase prompt) |
 | `kernel/crypto/` | AES, XTS, AES-NI, BLAKE2b and Argon2id (shared with the host tools) |
-| `drivers/` | PCI, legacy virtio-blk, NVMe and AHCI/SATA block device drivers, legacy virtio-net, and the xHCI controller with its USB HID keyboard and mouse decoders |
+| `drivers/` | PCI, legacy virtio-blk, NVMe and AHCI/SATA block device drivers, legacy virtio-net, and the xHCI controller with its USB HID keyboard, mouse and Audio Class decoders |
 | `scripts/` | QEMU runner, disk/RAID1/RAID10/crypt image builders, boot/PE/disk/RAID/journal/crypt checks, the serial and keyboard prompt drivers, tamper helper, size and reproducibility gates |
 | `tests/host/` | host unit tests for freestanding code |
 | `tools/` | host-side development tools (`gen-font.py`, `mkcrypt.c`, `gen-crc32c.py`) |
 | `docs/` | [build](docs/build.md), [boot](docs/boot.md), [storage](docs/storage.md), [checksums](docs/checksums.md), [crypto](docs/crypto.md), [input](docs/input.md), [network](docs/network.md),
-[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [USB/xHCI](docs/usb.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
+[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [USB/xHCI](docs/usb.md), [audio](docs/audio.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
 
 ## Versioning
 
@@ -637,14 +693,16 @@ resolver with a UDP query, a TCP fallback, CNAME chains, a TTL cache and the
 a polled xHCI host controller and a USB boot keyboard that feeds the same input
 queue and can be hotplugged into the running guest; phase 5B widened that
 driver to a device table of boot keyboards and mice and gave `input.device` a
-pointer state driven by a boot-mouse decoder. Remaining phase 3B work is
+pointer state driven by a boot-mouse decoder; phase 5C added `audio.device`, a
+per-channel mixer and a USB Audio Class driver that streams isochronous packets
+from a PCM ring, gated with a hermetic QEMU audio function. Remaining phase 3B work is
 online RAID rebuild, hot spare, scrub and a write-intent bitmap, RAID below
 encryption, a redundant ESP, TPM/keyfile keyslots and USB storage; phase 4
 continues with framebuffer (GOP) console input and virtual terminals, plus a
 routing table and richer resolver features on top of the phase 4B-4D stack;
-phase 5C adds UAC2 audio with a mixer and a pointer-driven graphics consumer.
+the next phase adds a pointer-driven graphics consumer on top of that stack.
 Later phases cover
-USB storage/audio/graphics, Workbench userspace, SMP/IOMMU and virtualisation. See
+USB storage, graphics, Workbench userspace, SMP/IOMMU and virtualisation. See
 [docs/roadmap.md](docs/roadmap.md) for the full sequence and the known
 specification gaps (Crug syntax, cross-architecture compilers and the OVMF
 minimum RAM floor).

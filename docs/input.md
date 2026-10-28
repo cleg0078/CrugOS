@@ -258,9 +258,10 @@ console for the prompt.
 - US layout only, one keyboard, no remapping.
 - Extended keys are decoded as modifiers only; arrow keys and editing keys are
   not delivered yet.
-- No framebuffer/GOP input and no VT switching; USB audio is phase 5C, and the
-  phase 5B mouse has no cursor or acceleration until a graphics stack consumes
-  its pointer events.
+- No framebuffer/GOP input and no VT switching; the phase 5B mouse has no cursor
+  or acceleration until a graphics stack consumes its pointer events, and phase
+  5C audio consumes the PCM ring rather than the pointer (see
+  [audio.md](audio.md)).
 - USB input is polled from the console read path only: no interrupt handler, no
   key repeat, boot-protocol devices on the first xHCI controller only, at most
   four of them, and no hubs, media keys or extra mouse buttons.

@@ -1,6 +1,6 @@
 # Building CrugOS
 
-This document describes the phase 5B build system: how the kernel, the UEFI
+This document describes the phase 5C build system: how the kernel, the UEFI
 loader, the host crypto tool and the test disk images are built, which
 invariants the link must preserve, and how to diagnose the failure modes that
 are specific to this toolchain.
@@ -31,6 +31,7 @@ make test-tcp    # TCP client/server and an HTTP exchange, both directions
 make test-net-dns  # resolve a name against a host DNS server over TCP
 make test-usb-hotplug  # hotplug a USB keyboard into xHCI and type at it
 make test-usb-mouse    # hotplug a USB mouse into xHCI and move the pointer
+make test-audio        # stream PCM to a USB Audio Class device through the mixer
 make test-raid   # boot a two-member RAID1 root and check both members
 make test-raid10 # boot a four-member RAID10 root and check every member
 make test-nvme   # boot from an NVMe namespace and check the image
@@ -53,7 +54,7 @@ make test-crypt-keyboard  # type the passphrase on the PS/2 keyboard and boot
 make test-crypt-keyboard-wrong  # three wrong keyboard passphrases must lock the volume
 make crypt-run   # boot the encrypted disk in a QEMU window for real typing
 make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
-make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/USB HID keyboard and mouse descriptors and reports/pointer state/IPv4/TCP/UDP checksums/DHCP parsing/DNS
+make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/USB HID keyboard and mouse descriptors and reports/pointer state/IPv4/TCP/UDP checksums/DHCP parsing/DNS/audio mixer, tone and PCM ring
 make disk        # build the GPT/ext4 test disk at build/<arch>/disk.img
 make raid-disks  # build the two GPT/ext4 RAID1 member disks
 make raid10-disks  # build the four GPT/ext4 RAID10 member disks
@@ -112,6 +113,9 @@ options` prints the complete resolved set (including paths derived from
 | `MOUSE_MOVES` | `2` | pointer reports `make test-usb-mouse` injects (one establishes the button baseline) |
 | `MOUSE_WAIT` | `20` | seconds the mouse gate boots with `usb.mouse=` so the mouse can be hotplugged late |
 | `MOUSE_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for `make test-usb-mouse` |
+| `EXPECT_AUDIO` | `no` | `yes` requires the `CRUGOS: audio ...` markers written by `make test-audio` |
+| `AUDIO_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for `make test-audio` |
+| `AUDIO_QEMU_EXTRA` | `-device qemu-xhci,id=xhci -device usb-audio,audiodev=audio0 -audiodev none,id=audio0` | QEMU arguments that add the USB audio function on a hermetic backend |
 | `CRASH_IMG` | `$(BUILD)/crash.img` | crash-gate image (journal commit, no checkpoint) |
 | `CRASH_REPLAY_IMG` | `$(BUILD)/crash-replay.img` | copy the kernel replays on the second crash-gate boot |
 | `CC` | `crugc` | compiler for kernel and loader objects |
@@ -375,6 +379,20 @@ found there. The gate requires exit status 33, `CRUGOS: usb selftest ok`, the
 mouse markers (`EXPECT_MOUSE=yes`) and a clean `e2fsck`; the driver prints
 `ok: usb hotplug mouse (N move(s), 1 button(s), port hotplug, exit 33)`.
 See [usb.md](usb.md).
+
+`make test-audio` proves the phase 5C audio path with the same machine setup plus
+`AUDIO_QEMU_EXTRA`, which adds `-device qemu-xhci`, `-device usb-audio` and an
+`-audiodev none,id=audio0` backend, so the gate needs no host sound server and is
+hermetic. The boot carries no extra token: the driver attaches when the
+enumerated configuration has an interface of class `0x01`, selects alternate
+setting 1, keeps 32 isochronous packets in flight and fills them from the PCM
+ring; `audio_selftest()` streams `audio.seconds=` (0.5 s) of a 440 Hz tone and
+requires real pacing. The gate demands exit status 33,
+`CRUGOS: audio selftest ok`, a `audio streamed N frame(s) in M ms` line, the
+`audio` markers (`EXPECT_AUDIO=yes`), either captured frames or the
+`CRUGOS: audio capture unavailable (no input endpoint)` marker (this QEMU build
+exposes playback only) and a clean `e2fsck`; the boot-check prints
+`ok: boot markers found, version 0.21.0 ... audio yes ...`.
 
 The supported ext4 subset, write path, checksum layout, journal format and
 failure modes are documented in [storage.md](storage.md) and

@@ -22,7 +22,8 @@ HTTP exchange in both directions and six socket syscalls; phase 4D adds a
 caching DNS stub resolver with a UDP query, a TCP fallback and a name syscall;
 phase 5A adds a polled xHCI host controller, a USB HID boot keyboard and a
 hotplug gate; phase 5B adds a USB HID boot mouse, a four-device table on that
-controller and a pointer device.
+controller and a pointer device; phase 5C adds `audio.device`, a per-channel
+mixer and a USB Audio Class driver with an isochronous xHCI path.
 Every later phase keeps the same BootInfo contract, so the loader does not
 change for memory management, storage, SMP or drivers.
 
@@ -421,6 +422,44 @@ change for memory management, storage, SMP or drivers.
   covers the mouse decode matrix and the pointer state (1168 checks).
 - All 32 gates pass at `v0.20.0`.
 
+## Phase 5C - USB audio and the mixer (done)
+
+- The xHCI driver grew a small isochronous API: `usb_control()` for the class
+  requests, and `usb_isoc_open()`/`usb_isoc_submit()`/`usb_isoc_buf()`/
+  `usb_isoc_buf_pa()`/`usb_isoc_packets()`/`usb_isoc_done()`/`usb_isoc_errors()`/
+  `usb_isoc_close()` for the stream. Normal TRBs carry `TRB_SIA`, without which
+  QEMU schedules every packet in frame 0 of a 16384-frame window and the stream
+  never runs; the endpoint context interval is encoded in microframes, so a
+  full-speed `bInterval` of 1 becomes 3 (= 8 microframes = 1 ms).
+- `drivers/usb/usb_audio.c` is attached by `xhci_enumerate()` when interface 0
+  of the configuration has class `0x01` and is detached on unplug. It parses
+  UAC1 and UAC2 descriptors (AC header, input terminal, feature unit, output
+  terminal, streaming interface, format type I, endpoint), selects alternate
+  setting 1, sets the sampling frequency and the hardware volume/mute, and
+  keeps 32 packets of 48 frames in flight. Refilling counts only successful
+  completions: counting ring-underrun events too wrapped the in-flight window
+  and stalled the stream after exactly 32 packets.
+- `audio.device` (`kernel/audio/audio.c`) is a 16384-frame 16-bit stereo ring.
+  `audio_write()` appends, `audio_read()` pops through the mixer and zero-fills
+  the rest of the packet, played/captured totals come back from the driver, and
+  `audio_tone()` generates a 440 Hz test tone from a 360-entry Q15 sine table.
+- `kernel/audio/mixer.c` holds a per-channel volume in 1/256 dB (from -30 dB to
+  0 dB) and a mute flag, converts the attenuation with `(attenuation + 128) /
+  256` to a whole dB and looks it up in a 31-entry Q15 table; mute wins and
+  unity gain skips the multiply entirely.
+- `audio.rate=`, `audio.volume=` and `audio.seconds=` bound the boot check, and
+  `audio_selftest()` streams half a second of the tone and requires real pacing
+  (`audio streamed N frame(s) in M ms`), then reports captured frames or the
+  `audio capture unavailable (no input endpoint)` marker.
+- `make test-audio` boots the audio gate (`usb=off,i8042=off`, `qemu-xhci`,
+  `usb-audio` and an `-audiodev none` backend, so no host sound server), and
+  requires the `audio` markers, a clean `e2fsck` and exit 33. QEMU's
+  `usb-audio` volume handler never accepts a channel selector and only handles
+  class interface *out* requests, so the volume and rate requests stall there;
+  both are non-fatal and the software mixer stays authoritative.
+  `make test-host` covers the UAC1 descriptor, the mixer table, the tone and the
+  PCM ring (2372 checks).
+- All 33 gates pass at `v0.21.0`.
 ## Phase 3B - remaining storage work
 
 - Journal wrapping, revoke records and orphan-file recovery.
@@ -437,16 +476,20 @@ change for memory management, storage, SMP or drivers.
 
 ## Phase 4 - devices and userspace
 
-- USB HID devices beyond the boot keyboard and mouse (phase 5A delivered the
-  xHCI controller and the keyboard, phase 5B the mouse: phase 5C adds UAC2 audio
-  and an audio mixer; phase 4A delivered the PS/2 console input step, phase 4B
-  the virtio-net/IPv4 slice, phase 4C the TCP/socket slice and phase 4D the DNS
-  resolver).
+- USB HID devices beyond the boot keyboard, mouse and audio function (phase 5A
+  delivered the xHCI controller and the keyboard, phase 5B the mouse, phase 5C
+  `audio.device`, the mixer and the USB Audio Class driver; the next step is a
+  pointer-driven graphics consumer that renders a cursor from the pointer state
+  on the GOP framebuffer; phase 4A delivered the PS/2 console input step, phase
+  4B the virtio-net/IPv4 slice, phase 4C the TCP/socket slice and phase 4D the
+  DNS resolver).
 - A routing table and richer resolver features (multiple servers, DNSSEC
   validation, AAAA/PTR/SRV, search domains, negative caching) on top of the
   phase 4B-4D stack, richer socket semantics (bind, options, non-blocking, more
   than four sockets); IPv6, fragmentation and reassembly.
-- Software framebuffer -> VirtIO-GPU -> vendor GPU drivers.
+- Software framebuffer -> VirtIO-GPU -> vendor GPU drivers, starting with the
+  pointer-driven cursor and console scrollback on top of the phase 5C audio and
+  phase 5B pointer stacks.
 - Workbench userspace, `.app` bundles, `.crpkg` packages, capability model.
 - POSIX-like layer: 64-bit UID/GID, ACLs, process groups, signals.
 

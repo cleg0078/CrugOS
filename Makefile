@@ -19,6 +19,7 @@
 #   make test-net-dns  boot the DNS resolver against a host DNS server over TCP
 #   make test-usb-hotplug  hotplug a USB keyboard into xHCI and type at it
 #   make test-usb-mouse    hotplug a USB mouse into xHCI and move the pointer
+#   make test-audio  stream PCM to a USB Audio Class device through the mixer
 #   make crypt-disk  build the AES-256-XTS crypt test disk
 #   make test-crypt  boot from an encrypted root and verify the disk
 #   make test-crypt-recovery  unlock the encrypted root with the recovery keyslot
@@ -78,6 +79,7 @@ EXPECT_NET ?= no
 EXPECT_DNS ?= no
 EXPECT_USB ?= no
 EXPECT_MOUSE ?= no
+EXPECT_AUDIO ?= no
 
 # QEMU / firmware options.
 MEMORY_MB ?= 512
@@ -100,6 +102,8 @@ USB_RUN_TIMEOUT_SEC ?= 240
 MOUSE_MOVES ?= 2
 MOUSE_WAIT ?= 20
 MOUSE_RUN_TIMEOUT_SEC ?= 240
+AUDIO_RUN_TIMEOUT_SEC ?= 240
+AUDIO_QEMU_EXTRA ?= -device qemu-xhci,id=xhci -device usb-audio,audiodev=audio0 -audiodev none,id=audio0
 NET_MODE ?=
 NET_HOSTFWD ?=
 OVMF_CODE ?= /usr/share/OVMF/OVMF_CODE_4M.fd
@@ -184,7 +188,8 @@ KERNEL_SOURCES := $(wildcard kernel/arch/$(ARCH)/*.c) $(wildcard kernel/arch/$(A
                   $(wildcard kernel/core/*.c) $(wildcard kernel/lib/*.c) \
                   $(wildcard kernel/mm/*.c) $(wildcard kernel/block/*.c) \
                   $(wildcard kernel/fs/*.c) $(wildcard kernel/input/*.c) \
-                  $(wildcard kernel/net/*.c) $(wildcard drivers/*/*.c) \
+                  $(wildcard kernel/net/*.c) $(wildcard kernel/audio/*.c) \
+                  $(wildcard drivers/*/*.c) \
                   $(wildcard kernel/crypto/*.c) $(wildcard kernel/crypto/*.S)
 KERNEL_OBJECTS := $(patsubst %,$(OBJ)/%.o,$(basename $(KERNEL_SOURCES)))
 KERNEL_DEPS := $(KERNEL_OBJECTS:.o=.d)
@@ -203,7 +208,7 @@ HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
         test-crypt test-crypt-recovery test-crypt-wrongkey test-crypt-tamper test-crypt-ni \
         test-crypt-prompt test-crypt-prompt-wrong test-crypt-prompt-timeout \
         test-crypt-keyboard test-crypt-keyboard-wrong crypt-run test-net test-tcp \
-        test-net-dns test-usb-hotplug test-usb-mouse \
+        test-net-dns test-usb-hotplug test-usb-mouse test-audio \
         crash-disk \
         check-disk size check-efi repro test-host preflight version options clean distclean help
 
@@ -396,6 +401,18 @@ test-usb-mouse: esp
 	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" no no no no no any no no no no yes
 	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 
+# Audio gate: an xHCI controller with a USB Audio Class device plugged straight
+# into it at machine start (audio is not hotpluggable in the driver).  The
+# boot self-test streams half a second of a 440 Hz tone through the mixer and
+# counts the isochronous completions the controller reports.
+test-audio: esp
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(MAKE) --no-print-directory run DISK_IMG=$(DISK_IMG) CRYPT_PASS= \
+		NET_MODE=none SERIAL_TCP= TIMEOUT_SEC=$(AUDIO_RUN_TIMEOUT_SEC) \
+		QEMU_EXTRA="$(AUDIO_QEMU_EXTRA)" MACHINE_EXTRA="usb=off,i8042=off"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" no no no no no any no no no no no yes
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
 test:
 	$(Q)rm -f $(DISK_IMG)
 	$(Q)$(MAKE) --no-print-directory run
@@ -579,6 +596,7 @@ options:
 	@printf '  %-16s %s\n' EXPECT_DNS "$(EXPECT_DNS)"
 	@printf '  %-16s %s\n' EXPECT_USB "$(EXPECT_USB)"
 	@printf '  %-16s %s\n' EXPECT_MOUSE "$(EXPECT_MOUSE)"
+	@printf '  %-16s %s\n' EXPECT_AUDIO "$(EXPECT_AUDIO)"
 	@printf '  %-16s %s\n' NET_MODE "$(NET_MODE)"
 	@printf '  %-16s %s\n' NET_HOSTFWD "$(NET_HOSTFWD)"
 	@printf '  %-16s %s\n' TCP_SERVE_SEC "$(TCP_SERVE_SEC)"
@@ -593,6 +611,8 @@ options:
 	@printf '  %-16s %s\n' MOUSE_MOVES "$(MOUSE_MOVES)"
 	@printf '  %-16s %s\n' MOUSE_WAIT "$(MOUSE_WAIT) (seconds)"
 	@printf '  %-16s %s\n' MOUSE_RUN_TIMEOUT_SEC "$(MOUSE_RUN_TIMEOUT_SEC)"
+	@printf '  %-16s %s\n' AUDIO_RUN_TIMEOUT_SEC "$(AUDIO_RUN_TIMEOUT_SEC)"
+	@printf '  %-16s %s\n' AUDIO_QEMU_EXTRA "$(AUDIO_QEMU_EXTRA)"
 	@printf '  %-16s %s\n' MEMORY_MB "$(MEMORY_MB)"
 	@printf '  %-16s %s\n' SMP "$(SMP)"
 	@printf '  %-16s %s\n' TIMEOUT_SEC "$(TIMEOUT_SEC)"

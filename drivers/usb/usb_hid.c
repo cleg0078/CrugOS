@@ -115,6 +115,29 @@ int usb_hid_parse_config(const u8 *buf, u32 len, struct usb_hid_endpoint *out)
     return -1;
 }
 
+u32 usb_config_interface_class(const u8 *buf, u32 len, u32 index)
+{
+    u32 off = 0;
+    u32 seen = 0;
+
+    if (!buf || len < 9)
+        return 0xffu;
+    while (off + 2u <= len) {
+        u32 blen = buf[off];
+        u32 type = buf[off + 1u];
+
+        if (blen < 2u || off + blen > len)
+            break;
+        if (type == HID_DESCRIPTOR_INTERFACE && blen >= 9u) {
+            if (seen == index)
+                return (u32)buf[off + 5u];
+            seen++;
+        }
+        off += blen;
+    }
+    return 0xffu;
+}
+
 static int usage_was_down(u8 usage)
 {
     u32 i;

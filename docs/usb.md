@@ -337,11 +337,11 @@ path was absent.
   HID report descriptor, so a keyboard or mouse without the boot report layout
   is rejected. Media keys, extra buttons and other HID collections are ignored.
 - At most four devices on the first xHCI controller; no hubs. The TRB/context
-  code is shared with the rest of the controller, but only the boot keyboard
-  and boot mouse paths are exercised.
+  code is shared with the rest of the controller, and phase 5C exercises the
+  isochronous path with a USB Audio Class function (see [audio.md](audio.md)).
 - The mouse delivers relative motion and button edges only: there is no cursor,
-  no acceleration and no integration with a graphics stack yet (phase 5C and
-  the Workbench phases add those).
+  no acceleration and no integration with a graphics stack yet (the next phase
+  and the Workbench phases add those).
 - When firmware left the BAR unassigned the driver picks a window below
   `0xffc00000`; it does not relocate other devices.
 - No port power switching beyond preserving `PP`, no wake-on-connect, no

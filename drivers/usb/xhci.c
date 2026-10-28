@@ -66,6 +66,7 @@
 #define TRB_IOC         (1u << 5)
 #define TRB_IDT         (1u << 6)
 #define TRB_DIR_IN      (1u << 16)
+#define TRB_SIA         (1u << 31) /* isochronous TRB: schedule as soon as possible */
 #define TRB_TYPE(p)     ((u32)(p) << 10)
 #define TRB_LINK_TOGGLE (1u << 1)
 
@@ -88,7 +89,9 @@
 #define TRB_GET_SLOT(c) ((u32)((c) >> 24) & 0xffu)
 #define TRB_GET_EP(c)   ((u32)((c) >> 16) & 0x1fu)
 
+#define CTX_EP_ISOCH_OUT 1u
 #define CTX_EP_CTRL      4u
+#define CTX_EP_ISOCH_IN  5u
 #define CTX_EP_INTERRUPT 7u
 #define COMP_SUCCESS     1u
 #define COMP_SHORT       13u
@@ -138,6 +141,25 @@ struct xhci_dev {
     u64 reports;     /* completed interrupt transfers */
     u64 ctx_pa;      /* device context (the dcbaa entry) */
     struct xhci_ring ring;
+    /* Phase 5C: one isochronous OUT and one isochronous IN endpoint for a
+       non-HID device (the USB audio class driver), each with its own ring and
+       contiguous packet pool. Completions are counted in submission order. */
+    u32 out_dci;
+    u32 in_dci;
+    u32 out_addr;
+    u32 in_addr;
+    u32 out_packet;
+    u32 in_packet;
+    u8 *out_buf;
+    u64 out_buf_pa;
+    u8 *in_buf;
+    u64 in_buf_pa;
+    struct xhci_ring out_ring;
+    struct xhci_ring in_ring;
+    u64 out_done;
+    u64 out_err;
+    u64 in_done;
+    u64 in_err;
 };
 
 struct xhci_hc {
@@ -192,19 +214,6 @@ static u8 *xhci_report_buf(u32 index)
     return g_reports[index];
 }
 
-static struct xhci_dev *xhci_dev_find(u32 slot, u32 dci)
-{
-    u32 i;
-
-    for (i = 0; i < XHCI_MAX_DEVICES; i++) {
-        struct xhci_dev *d = &g_hc.dev[i];
-
-        if (d->used && d->slot == slot && d->dci == dci)
-            return d;
-    }
-    return 0;
-}
-
 static struct xhci_dev *xhci_dev_on_port(u32 port)
 {
     u32 i;
@@ -226,6 +235,19 @@ static struct xhci_dev *xhci_dev_of_kind(u32 kind)
         struct xhci_dev *d = &g_hc.dev[i];
 
         if (d->used && d->kind == kind)
+            return d;
+    }
+    return 0;
+}
+
+static struct xhci_dev *xhci_dev_by_slot(u32 slot)
+{
+    u32 i;
+
+    for (i = 0; i < XHCI_MAX_DEVICES; i++) {
+        struct xhci_dev *d = &g_hc.dev[i];
+
+        if (d->used && d->slot == slot)
             return d;
     }
     return 0;
@@ -643,6 +665,239 @@ static int xhci_arm_device(struct xhci_dev *d)
     return 0;
 }
 
+/* --- Phase 5C: generic control transfers and isochronous endpoints ------- */
+
+/* Per-direction view of the isochronous endpoint fields of one device. */
+struct xhci_isoc {
+    u32 *dci;
+    u32 *addr;
+    u32 *packet;
+    u8 **buf;
+    u64 *buf_pa;
+    u64 *done;
+    u64 *err;
+    struct xhci_ring *ring;
+};
+
+static struct xhci_isoc xhci_isoc_of(struct xhci_dev *d, u8 ep_addr)
+{
+    struct xhci_isoc s;
+
+    if (ep_addr & 0x80u) {
+        s.dci = &d->in_dci;
+        s.addr = &d->in_addr;
+        s.packet = &d->in_packet;
+        s.buf = &d->in_buf;
+        s.buf_pa = &d->in_buf_pa;
+        s.done = &d->in_done;
+        s.err = &d->in_err;
+        s.ring = &d->in_ring;
+    } else {
+        s.dci = &d->out_dci;
+        s.addr = &d->out_addr;
+        s.packet = &d->out_packet;
+        s.buf = &d->out_buf;
+        s.buf_pa = &d->out_buf_pa;
+        s.done = &d->out_done;
+        s.err = &d->out_err;
+        s.ring = &d->out_ring;
+    }
+    return s;
+}
+
+int usb_control(u32 slot, u8 request_type, u8 request, u16 value, u16 index,
+                void *data, u16 len)
+{
+    u8 setup[XHCI_SETUP_BYTES];
+
+    setup[0] = request_type;
+    setup[1] = request;
+    setup[2] = (u8)(value & 0xffu);
+    setup[3] = (u8)(value >> 8);
+    setup[4] = (u8)(index & 0xffu);
+    setup[5] = (u8)(index >> 8);
+    setup[6] = (u8)(len & 0xffu);
+    setup[7] = (u8)(len >> 8);
+    return xhci_control(slot, setup, data, (u32)len,
+                        (request_type & 0x80u) ? 1 : 0);
+}
+
+/* The EP context interval field counts microframes as a power of two. A
+   full-speed (or low-speed) isochronous endpoint reports its interval in
+   frames, and one frame is eight microframes, so it needs two extra bits. */
+static u32 xhci_isoc_interval(u32 speed, u8 interval)
+{
+    u32 value;
+
+    if (speed == 1u || speed == 2u)
+        value = (u32)interval + 2u;
+    else
+        value = interval ? (u32)interval - 1u : 1u;
+    if (value == 0u)
+        value = 1u;
+    if (value > 16u)
+        value = 16u;
+    return value;
+}
+
+int usb_isoc_open(u32 slot, u8 ep_addr, u16 max_packet, u8 interval)
+{
+    struct xhci_dev *d = xhci_dev_by_slot(slot);
+    struct xhci_isoc s;
+    u32 ep_num = (u32)ep_addr & 0x0fu;
+    u32 dci;
+    u32 entries;
+    u32 type;
+    u32 pages;
+    u32 bytes;
+    u32 comp = 0;
+    u64 pa;
+
+    if (!d || ep_num == 0 || max_packet == 0 || max_packet > USB_ISOC_PACKET_MAX)
+        return -1;
+    if ((ep_addr & 0x70u) != 0)
+        return -1;
+    s = xhci_isoc_of(d, ep_addr);
+    if (*s.dci)
+        return -1;
+    dci = ep_num * 2u + ((ep_addr & 0x80u) ? 1u : 0u);
+    if (dci > 31u)
+        return -1;
+    if (ring_init(s.ring) != 0)
+        return -1;
+    bytes = (u32)max_packet * USB_ISOC_PACKETS;
+    pages = (bytes + CRUG_PAGE_SIZE - 1u) / CRUG_PAGE_SIZE;
+    pa = pmm_alloc_pages_aligned(pages, 1);
+    if (!pa)
+        return -1;
+    *s.buf = (u8 *)(uintptr)pa;
+    *s.buf_pa = pa;
+    memset(*s.buf, 0, (usize)pages * CRUG_PAGE_SIZE);
+
+    /* SET_INTERFACE already selected the alternate setting, so the endpoint is
+       configured once here and then kept for the life of the stream. */
+    entries = dci > d->dci ? dci : d->dci;
+    input_ctx_reset();
+    ctx_w32(g_hc.in_ctx, 0x04, 0x1u | (1u << dci));
+    slot_ctx_fill(in_slot_ctx(), d->speed, d->port, entries);
+    type = (ep_addr & 0x80u) ? CTX_EP_ISOCH_IN : CTX_EP_ISOCH_OUT;
+    ep_ctx_fill(in_ep_ctx(dci), type, max_packet,
+                xhci_isoc_interval(d->speed, interval), s.ring->pa,
+                max_packet);
+    if (xhci_command(g_hc.in_ctx_pa, TRB_CONFIGURE_ENDPOINT, slot, &comp, 0) != 0)
+        return -1;
+    if (comp != COMP_SUCCESS) {
+        kprintf("CRUGOS: usb isoc configure failed (%u)\n", (unsigned)comp);
+        return -1;
+    }
+    *s.addr = ep_addr;
+    *s.packet = max_packet;
+    *s.done = 0;
+    *s.err = 0;
+    *s.dci = dci;
+    return 0;
+}
+
+int usb_isoc_submit(u32 slot, u8 ep_addr, u32 index, u32 len)
+{
+    struct xhci_dev *d = xhci_dev_by_slot(slot);
+    struct xhci_isoc s;
+    xhci_trb *t;
+    u32 i = 0;
+    u32 dir;
+
+    if (!d)
+        return -1;
+    s = xhci_isoc_of(d, ep_addr);
+    if (!*s.dci || index >= USB_ISOC_PACKETS || len > *s.packet)
+        return -1;
+    if (ring_reserve(s.ring, 1) != 0)
+        return -1;
+    dir = (ep_addr & 0x80u) ? TRB_DIR_IN : 0u;
+    t = ring_next(s.ring, &i);
+    trb_set(t, *s.buf_pa + (u64)index * (u64)*s.packet, len,
+            TRB_TYPE(TRB_NORMAL) | TRB_IOC | TRB_SIA | dir | s.ring->cycle);
+    xhci_doorbell(slot, *s.dci);
+    return 0;
+}
+
+void *usb_isoc_buf(u32 slot, u8 ep_addr, u32 index)
+{
+    struct xhci_dev *d = xhci_dev_by_slot(slot);
+    struct xhci_isoc s;
+
+    if (!d || index >= USB_ISOC_PACKETS)
+        return 0;
+    s = xhci_isoc_of(d, ep_addr);
+    if (!*s.buf)
+        return 0;
+    return *s.buf + (usize)index * (usize)*s.packet;
+}
+
+u64 usb_isoc_buf_pa(u32 slot, u8 ep_addr, u32 index)
+{
+    struct xhci_dev *d = xhci_dev_by_slot(slot);
+    struct xhci_isoc s;
+
+    if (!d || index >= USB_ISOC_PACKETS)
+        return 0;
+    s = xhci_isoc_of(d, ep_addr);
+    if (!*s.buf_pa)
+        return 0;
+    return *s.buf_pa + (u64)index * (u64)*s.packet;
+}
+
+u32 usb_isoc_packets(u32 slot, u8 ep_addr)
+{
+    struct xhci_dev *d = xhci_dev_by_slot(slot);
+    struct xhci_isoc s;
+
+    if (!d)
+        return 0;
+    s = xhci_isoc_of(d, ep_addr);
+    return *s.dci ? USB_ISOC_PACKETS : 0;
+}
+
+u64 usb_isoc_done(u32 slot, u8 ep_addr)
+{
+    struct xhci_dev *d = xhci_dev_by_slot(slot);
+    struct xhci_isoc s;
+
+    if (!d)
+        return 0;
+    s = xhci_isoc_of(d, ep_addr);
+    return *s.done;
+}
+
+u64 usb_isoc_errors(u32 slot, u8 ep_addr)
+{
+    struct xhci_dev *d = xhci_dev_by_slot(slot);
+    struct xhci_isoc s;
+
+    if (!d)
+        return 0;
+    s = xhci_isoc_of(d, ep_addr);
+    return *s.err;
+}
+
+int usb_isoc_close(u32 slot, u8 ep_addr)
+{
+    struct xhci_dev *d = xhci_dev_by_slot(slot);
+    struct xhci_isoc s;
+
+    if (!d)
+        return -1;
+    s = xhci_isoc_of(d, ep_addr);
+    if (!*s.dci)
+        return -1;
+    *s.dci = 0;
+    *s.addr = 0;
+    *s.packet = 0;
+    *s.done = 0;
+    *s.err = 0;
+    return 0;
+}
+
 static int xhci_enumerate(u32 port, u32 speed)
 {
     struct usb_hid_endpoint ep;
@@ -723,8 +978,30 @@ static int xhci_enumerate(u32 port, u32 speed)
         return -1;
 
     if (usb_hid_parse_config(g_ctl, read_len, &ep) != 0) {
-        kprintf("CRUGOS: usb device is not a boot keyboard or mouse\n");
-        return -1;
+        u32 iface_class = usb_config_interface_class(g_ctl, read_len, 0);
+        u32 kind = iface_class == USB_CLASS_AUDIO ? USB_KIND_AUDIO
+                                                  : USB_KIND_OTHER;
+
+        if (xhci_set_configuration(slot) != 0)
+            return -1;
+        d->slot = slot;
+        d->speed = speed;
+        d->port = port;
+        d->kind = kind;
+        d->ep_addr = 0;
+        d->dci = 0;
+        d->reports = 0;
+        d->report_len = 0;
+        d->used = 1;
+        if (kind == USB_KIND_AUDIO) {
+            /* The audio driver parses this configuration and then owns the
+               isochronous endpoints through the usb_isoc_* API. */
+            usb_audio_attach(slot, port, speed, g_ctl, read_len);
+        } else {
+            kprintf("CRUGOS: usb device class %u on port %u (unsupported)\n",
+                    (unsigned)iface_class, (unsigned)port);
+        }
+        return 0;
     }
     if (ep.in == 0 || ep.ep_num == 0 || ep.max_packet == 0) {
         kprintf("CRUGOS: usb hid endpoint is invalid\n");
@@ -776,13 +1053,26 @@ static void xhci_scan_ports(void)
         struct xhci_dev *d = xhci_dev_on_port(port);
 
         if (d && !connected) {
-            int was_keyboard = d->kind == USB_HID_KIND_KEYBOARD;
+            u32 kind = d->kind;
 
+            if (kind == USB_KIND_AUDIO)
+                usb_audio_detach(d->slot);
             d->used = 0;
             d->report_len = 0;
             d->reports = 0;
-            usb_hid_reset();
-            kprintf("CRUGOS: usb %s gone\n", was_keyboard ? "keyboard" : "mouse");
+            d->dci = 0;
+            d->out_dci = 0;
+            d->in_dci = 0;
+            if (kind == USB_HID_KIND_KEYBOARD) {
+                usb_hid_reset();
+                kprintf("CRUGOS: usb keyboard gone\n");
+            } else if (kind == USB_HID_KIND_MOUSE) {
+                kprintf("CRUGOS: usb mouse gone\n");
+            } else if (kind == USB_KIND_AUDIO) {
+                kprintf("CRUGOS: usb audio gone\n");
+            } else {
+                kprintf("CRUGOS: usb device gone\n");
+            }
         }
         if (v & PORT_RW1C)
             port_clear_changes(port);
@@ -836,9 +1126,27 @@ void usb_poll(void)
             u32 slot = TRB_GET_SLOT(ev.control);
             u32 dci = TRB_GET_EP(ev.control);
             u32 comp = TRB_GET_COMP(ev.status);
-            struct xhci_dev *d = xhci_dev_find(slot, dci);
+            struct xhci_dev *d = xhci_dev_by_slot(slot);
 
             if (!d)
+                continue;
+            /* Isochronous completions belong to the class driver, which refills
+               the packets from usb_audio_poll() below. */
+            if (dci != 0 && dci == d->out_dci) {
+                if (comp == COMP_SUCCESS || comp == COMP_SHORT)
+                    d->out_done++;
+                else
+                    d->out_err++;
+                continue;
+            }
+            if (dci != 0 && dci == d->in_dci) {
+                if (comp == COMP_SUCCESS || comp == COMP_SHORT)
+                    d->in_done++;
+                else
+                    d->in_err++;
+                continue;
+            }
+            if (d->dci == 0 || dci != d->dci)
                 continue;
             d->reports++;
             if (comp == COMP_SUCCESS || comp == COMP_SHORT) {
@@ -870,6 +1178,7 @@ void usb_poll(void)
             (void)xhci_arm_device(d);
         }
     }
+    usb_audio_poll();
 }
 
 int usb_present(void)
