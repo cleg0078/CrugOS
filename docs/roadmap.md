@@ -1,6 +1,6 @@
 # Roadmap
 
-The specification defines 38 phases/gates. Phase 0 established the smallest
+The specification defines 39 phases/gates. Phase 0 established the smallest
 end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
 phase 1 makes the kernel own physical memory, page tables, exceptions and
 timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
@@ -29,7 +29,9 @@ console; phase 6A adds `intuition.device`, a software window manager of four
 stacked, draggable windows, and the two-window Workbench desktop; phase 6B adds
 menu bars with popups, body gadgets, a close gadget and a typed event queue;
 phase 6C adds a live shell window with a scrollback text grid, a line editor and
-a command set over the mounted ext4 root. Release
+a command set over the mounted ext4 root; phase 6D makes every window resizable
+from a corner grip and lets Tab, the arrow keys and Enter drive focus, window
+movement and the menu popups. Release
 `v0.23.1` adds packaging rather than a spec phase: `make iso` produces a hybrid
 UEFI ISO that boots from a USB stick or a CD-ROM, with the kernel's
 `storage=none` token so an image with no root filesystem still passes the boot
@@ -612,7 +614,61 @@ change for memory management, storage, SMP or drivers.
 - `tests/host/test_textgrid.c` and `tests/host/test_shell.c` cover the wrap, the
   ring, the cursor cell and the whole command table against a fake `shell_io`.
   `make test-host` reports 2792 checks.
-- All 38 gates pass at `v0.25.0`.
+- All 38 gates passed at `v0.25.0`.
+
+## Phase 6D - resizing and keyboard navigation (done)
+
+- `include/crug/intuition.h` + `kernel/gfx/intuition.c`: every window carries a
+  12x12 resize grip (`INTUITION_RESIZE_SIZE`) in its inner bottom-right corner
+  at `(x + w - INTUITION_BORDER - 12 - 2, y + h - INTUITION_BORDER - 12 - 2)`;
+  a press arms a size drag instead of a body press, and every motion recomputes
+  the size from the size at press plus the pointer delta.
+- clamping: the width and height are floored at `INTUITION_MIN_WIDTH` /
+  `INTUITION_MIN_HEIGHT` (120x80), and a motion that would push the right or
+  bottom edge past the framebuffer is refused -- the size simply does not
+  change -- so a window can never be dragged larger than the screen. A release
+  without motion still counts a resize.
+- the release prints `CRUGOS: wb window %d resized to %ux%u`, increments
+  `intuition_resize_count()`, counts one action and queues
+  `INTUITION_EVENT_RESIZE` (type 6); `struct intuition_event` gained `u32 w`
+  and `u32 h` for the new size, left at 0 by the five earlier event types.
+- `intuition_key_event(u8)` gives the desktop a keyboard of its own: Tab cycles
+  the focus through the stacking order (raising the next window, activating it
+  and queueing `INTUITION_EVENT_ACTIVATE`), the four arrow bytes move the active
+  window by `INTUITION_KEY_STEP` (8) pixels and clamp it to the screen, Enter
+  opens the active window's first screen-top menu as a popup with item 0
+  highlighted, Down/Up move that highlight (stopping at the ends), Enter selects
+  it through the normal menu path and Escape closes the popup without a
+  selection.
+- `include/crug/input.h` gained `INPUT_KEY_UP` `0x90`, `INPUT_KEY_DOWN`
+  `0x91`, `INPUT_KEY_LEFT` `0x92` and `INPUT_KEY_RIGHT` `0x93`; the PS/2
+  set-1 decoder maps E0 make codes `0x48`/`0x50`/`0x4B`/`0x4D` to them and
+  ignores E0 break codes and E0 modifier releases, while the HID decoder maps
+  usage page 0x07 usages `0x52` UpArrow, `0x51` DownArrow, `0x4F` RightArrow
+  and `0x50` LeftArrow -- Right `0x4F` comes before Left `0x50`.
+- `kernel/gfx/workbench.c` reads `wb.keys=1`: `wb_key_pump()` forwards Tab,
+  Enter, Escape and the four arrow bytes to `intuition_key_event()` and prints
+  `CRUGOS: wb keys ready (window 2 active)` after the desktop-ready line, while
+  `wb.shell=1` keeps the keyboard for the shell. `wb.acts=` now counts resizes
+  as well, and `wb_drain_events()` prints
+  `CRUGOS: wb action %u resize window %d (%ux%u)`.
+- `make test-workbench-keys` boots `wb.enable=1 wb.wait=30 wb.keys=1
+  wb.acts=2`, hotplugs a `usb-mouse` and drags window 2's grip from (790,490)
+  to (730,430) so it shrinks from 320x200 to 260x140, checks a `screendump` for
+  desktop background where the old corner was at (798,498), then hotplugs a
+  `usb-kbd` and sends Tab, Right twice, Enter, Down and Enter to focus window 1,
+  move it to (96,90) and select `Info` from its `Workbench` menu, requiring
+  exit status 33 and `CRUGOS: wb selftest ok (2 action(s))`.
+- `tests/host/test_input.c` and `tests/host/test_usb.c` pin the PS/2 arrow
+  bytes and the HID arrow usages, and `tests/host/test_intuition.c` gained
+  `intuition resize grip` and `intuition keyboard focus / keys / menu popup`
+  sections; `make test-host` reports 2862 checks.
+- limits: no Shift-Tab (the input layer delivers one byte per key and carries no
+  modifier state), no sub-menus, no keyboard text entry outside the 6C shell,
+  12x12 grips that are not themeable, body text re-laid out from the top-left
+  rather than reflowed, and no send-to-back in the stacking order.
+- All 39 gates pass at `v0.26.0`.
+
 ## Bootable media - hybrid UEFI ISO (done, `v0.23.1`)
 
 - `kernel/fs/storage.c` gained the `storage=none` command-line token: every
@@ -662,21 +718,23 @@ change for memory management, storage, SMP or drivers.
   delivered the xHCI controller and the keyboard, phase 5B the mouse, phase 5C
   `audio.device`, the mixer and the USB Audio Class driver, phase 5D the
   pointer-driven cursor on the GOP framebuffer, phase 6A the intuition desktop
-  and window manager on top of it, phase 6B its menus, gadgets and event queue
-  and phase 6C the shell window; phase 4A delivered the PS/2
-  console input step, phase
+  and window manager on top of it, phase 6B its menus, gadgets and event queue,
+  phase 6C the shell window and phase 6D resize grips and keyboard navigation;
+  phase 4A delivered the PS/2 console input step, phase
   4B the virtio-net/IPv4 slice, phase 4C the TCP/socket slice and phase 4D the
   DNS resolver).
 - A routing table and richer resolver features (multiple servers, DNSSEC
   validation, AAAA/PTR/SRV, search domains, negative caching) on top of the
   phase 4B-4D stack, richer socket semantics (bind, options, non-blocking, more
   than four sockets); IPv6, fragmentation and reassembly.
-- Software framebuffer -> VirtIO-GPU -> vendor GPU drivers: with the phase 6C
-  shell window and scrollback in place, keyboard navigation and sub-menus on top
-  of the phase 6B menu bar, window resizing, a gadget toolkit on top of its event
-  queue and richer shell semantics (quoting, a working directory) on top of the
-  shell, the phase 5D cursor, the phase 5B pointer stack and the phase 5C audio
-  stack.
+- Software framebuffer -> VirtIO-GPU -> vendor GPU drivers: with the phase 6D
+  resize grip and keyboard navigation in place, the next Workbench work is
+  reflowing a body (and relaying out its painter) when its window is resized,
+  sub-menus on top of the phase 6B menu bar, a gadget toolkit on top of its event
+  queue, Shift-Tab once the input layer carries modifier state, send-to-back in
+  the stacking order and richer shell semantics (quoting, a working directory) on
+  top of the shell, the phase 5D cursor, the phase 5B pointer stack and the phase
+  5C audio stack.
 - Workbench userspace, `.app` bundles, `.crpkg` packages, capability model.
 - POSIX-like layer: 64-bit UID/GID, ACLs, process groups, signals.
 

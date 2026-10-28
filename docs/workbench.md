@@ -9,7 +9,10 @@ popup menus, labelled gadgets inside a window body, a close gadget at the right
 end of every title bar, and a typed event queue that reports what the user
 did. Phase 6C fills the second window with a live shell -- a scrollback text
 grid, a line editor with history and a command set over the mounted ext4 root.
-There are no application tasks behind the desktop yet -- the kernel-side device
+Phase 6D makes every window resizable from a corner grip and gives the
+keyboard a navigation role: Tab cycles the focus, the arrow keys move the
+active window and Enter opens its menu for the arrows to drive. There are no
+application tasks behind the desktop yet -- the kernel-side device
 is what the Workbench userspace will sit on -- so the only residents are the
 bring-up module and its shell, which appear when the loader command line asks
 for them.
@@ -64,6 +67,8 @@ untouched.
 | `INTUITION_MENU_ITEM_WIDTH` | 150 | popup width in pixels |
 | `INTUITION_TITLE_HEIGHT` | 20 | title bar height in pixels |
 | `INTUITION_BORDER` | 2 | border drawn between frame and content |
+| `INTUITION_RESIZE_SIZE` | 12 | resize grip side in pixels |
+| `INTUITION_KEY_STEP` | 8 | pixels an arrow key moves the active window |
 | `INTUITION_MIN_WIDTH` | 120 | smallest window a caller can open |
 | `INTUITION_MIN_HEIGHT` | 80 | smallest window a caller can open |
 | `INTUITION_DESKTOP_RGB` | `0x00102030` | desktop background |
@@ -105,6 +110,8 @@ API:
 | `int intuition_active(void)` | active window id or -1 |
 | `void intuition_set_reporting(int on)` | enable or silence the gate markers |
 | `u64 intuition_drag_count(void)` | completed title-bar drags |
+| `u64 intuition_resize_count(void)` | completed resize-grip gestures |
+| `void intuition_key_event(u8 key)` | consume one decoded key byte |
 | `u32 intuition_window_count(void)` | open windows |
 
 ### Window anatomy
@@ -119,8 +126,9 @@ the host tests grows by the number of open windows on every open.
 
 A window is a 1-pixel white frame, a 20-pixel title bar at the border offset,
 a 12x12 close gadget at `x + w - 2 - 18`, `y + 2 + 4` on the right of the
-title bar (in phase 6B it closes the window) and a body of 8x16 text on a
-20-pixel line pitch. Body text lines are split at `\n` and truncated to 47 characters.
+title bar (in phase 6B it closes the window), a 12x12 resize grip in the inner
+bottom-right corner (phase 6D), and a body of 8x16 text on a 20-pixel line
+pitch. Body text lines are split at `\n` and truncated to 47 characters.
 
 `intuition_close()` unlinks the window from the stacking order, clears the drag
 state if it was being dragged, and hands activation to the new top window, or
@@ -135,7 +143,8 @@ hit testing always uses the final cursor position:
 - `changes & 0x01` with `buttons & 0x01` (left press) is resolved in a fixed
   order, so the most specific target wins: a row of the open popup selects its
   item, a press on the menu bar opens (or switches) a strip, a press on a close
-  box closes that window, a press on a body gadget arms a click, and only then
+  box closes that window, a press on the resize grip starts a size drag, a
+  press on a body gadget arms a click, and only then
   does `win_hit()` walk the stacking order top down for the first window that
   contains the point. On a window hit the window is raised, made active, and --
   when the press is on the title bar -- a drag starts with the grab offset
@@ -145,9 +154,13 @@ hit testing always uses the final cursor position:
   not count.
 - `changes & 0x01` without the left button (release): if a drag is running the
   window is already where the last motion put it, so the release prints
-  `moved to (x, y)` and counts one drag.
+  `moved to (x, y)` and counts one drag; if a resize is running the release
+  prints `resized to WxH`, queues `RESIZE` and counts one action.
 - motion while a drag is running: the new origin is the cursor minus the grab
   offset, clamped into the screen; the desktop is repainted.
+- motion while a resize is running: the new size is the size at press plus the
+  pointer delta, floored at 120x80 and refused when it would exceed the screen;
+  the desktop is repainted when the size actually changed.
 - anything else (motion without a drag, button changes that are not the left
   button) leaves the window state alone.
 
@@ -211,11 +224,12 @@ press and starts a drag.
 
 | field | meaning |
 | --- | --- |
-| `type` | `INTUITION_EVENT_ACTIVATE`, `_DRAG`, `_MENU`, `_GADGET` or `_CLOSE` (0 = none) |
+| `type` | `INTUITION_EVENT_ACTIVATE`, `_DRAG`, `_MENU`, `_GADGET`, `_CLOSE` or `_RESIZE` (0 = none) |
 | `window` | window id the event belongs to, 0 when it has none |
 | `index` | menu index or gadget index, -1 when unused |
 | `item` | selected menu item index, 0 when unused |
 | `x`, `y` | window origin when the event was generated |
+| `w`, `h` | new window size, set on `_RESIZE` and 0 otherwise |
 
 Activation and completed drags are queued as well, so a caller that drains the
 queue sees the whole story of a click and not only the actions the kernel
@@ -223,7 +237,9 @@ already handled. The queue holds `INTUITION_EVENT_QUEUE` (16) events; when it
 is full the newest event is dropped and counted, so `intuition_event_count()`
 plus `intuition_event_dropped()` accounts for every event the device produced.
 `intuition_event_poll()` returns 1 and copies the oldest event, or 0 when the
-queue is empty. `intuition_init()` resets the queue and both counters.
+queue is empty. `intuition_init()` resets the queue and both counters. A
+finished resize queues `INTUITION_EVENT_RESIZE` with the new `w` and `h`; the
+other five types leave both fields at 0.
 
 ## The desktop bring-up
 
@@ -239,7 +255,7 @@ queue is empty. `intuition_init()` resets the queue and both counters.
 
    | id | rectangle | title | body |
    | --- | --- | --- | --- |
-   | 1 | (80, 90) 360x220 | `Workbench` | `CrugOS Workbench` / `phase 6c` / `software rendered` |
+   | 1 | (80, 90) 360x220 | `Workbench` | `CrugOS Workbench` / `phase 6d` / `software rendered` |
    | 2 | (480, 300) 320x200 | `Shell` | `4.OS` / `crugos>`, or the shell grid when `wb.shell=1` |
 
    Window 1 carries the `Workbench` (About/Info/Quit) and `Window`
@@ -282,12 +298,14 @@ tokens do. Values are decimal, capped, and ignored when malformed:
 | `wb.wait=S` | 0..120 | seconds the self-test waits for the drags |
 | `wb.drag=N` | 0..4 | drags the self-test requires (also enables the markers) |
 | `wb.menu=1` | 0/1 | also wait for `wb.acts=` menu, gadget and close actions |
-| `wb.acts=N` | 0..8 | actions the self-test requires (default 1 with `wb.menu=1`) |
+| `wb.acts=N` | 0..8 | actions the self-test requires (also with `wb.keys=1`) |
+| `wb.keys=1` | 0/1 | hand decoded key bytes to `intuition_key_event()` (ignored when `wb.shell=1`) |
 | `wb.hold=S` | 0..3600 | seconds `wb_hold()` keeps the desktop on screen after the boot marker |
 
-`make test-workbench` boots with `wb.enable=1 wb.wait=30 wb.drag=1`, and
-`make test-workbench-menu` boots with
-`wb.enable=1 wb.wait=30 wb.menu=1 wb.acts=4`. `make demo` boots
+`make test-workbench` boots with `wb.enable=1 wb.wait=30 wb.drag=1`,
+`make test-workbench-menu` with `wb.enable=1 wb.wait=30 wb.menu=1 wb.acts=4`,
+and `make test-workbench-keys` with `wb.enable=1 wb.wait=30 wb.keys=1
+wb.acts=2`. `make demo` boots
 `wb.enable=1 wb.wait=0 wb.hold=<seconds>` instead: `wb.wait=0` turns both
 self-tests into no-ops, so the interactive desktop needs neither a drag nor an
 action before the boot marker, and `wb.hold=` keeps the guest alive
@@ -312,7 +330,7 @@ CRUGOS: wb window 2 drag start (512, 312)
 CRUGOS: wb window 2 drag to (557, 337)
 CRUGOS: wb window 2 moved to (570, 350)
 CRUGOS: wb selftest ok (1 drag(s), 0 action(s))
-CRUGOS: phase 6c boot ok
+CRUGOS: phase 6d boot ok
 ```
 
 The menu gate is a second boot and adds the action lines:
@@ -330,7 +348,7 @@ CRUGOS: wb menu 'Workbench' open (window 1)
 CRUGOS: wb menu 'Workbench' selected ('Quit')
 CRUGOS: wb action 4 menu window 1 item 2
 CRUGOS: wb selftest ok (0 drag(s), 4 action(s))
-CRUGOS: phase 6c boot ok
+CRUGOS: phase 6d boot ok
 ```
 
 The shell gate is a third boot: it adds `CRUGOS: wb shell ready (window 2,
@@ -339,21 +357,48 @@ The shell gate is a third boot: it adds `CRUGOS: wb shell ready (window 2,
 `CRUGOS: wb selftest ok (0 drag(s), 0 action(s))` and
 `CRUGOS: sh selftest ok (4 command(s))` before the phase marker.
 
+The keys gate is a fourth boot: it resizes window 2 by its grip and then drives
+the desktop from the keyboard, so the log carries the resize, focus, key-move
+and menu-highlight lines:
+
+```
+CRUGOS: wb desktop ready (1024x768, 2 window(s))
+CRUGOS: wb keys ready (window 2 active)
+CRUGOS: wb window 2 resize start (790, 490)
+CRUGOS: wb window 2 resized to 260x140
+CRUGOS: wb action 1 resize window 2 (260x140)
+CRUGOS: wb window 1 focused (Tab)
+CRUGOS: wb window 1 key move to (88, 90)
+CRUGOS: wb window 1 key move to (96, 90)
+CRUGOS: wb menu 'Workbench' item 0 highlighted ('About')
+CRUGOS: wb menu 'Workbench' item 1 highlighted ('Info')
+CRUGOS: wb menu 'Workbench' selected ('Info')
+CRUGOS: wb action 2 menu window 1 item 1
+CRUGOS: wb selftest ok (0 drag(s), 2 action(s))
+CRUGOS: phase 6d boot ok
+```
+
 | marker | when |
 | --- | --- |
 | `CRUGOS: wb desktop ready (WxH, N window(s))` | the desktop took the screen |
+| `CRUGOS: wb keys ready (window N active)` | `wb.keys=1` installed keys mode |
 | `CRUGOS: wb framebuffer absent` | `wb.enable=1` without a usable framebuffer |
 | `CRUGOS: wb window N opened (x, y, WxH)` | a window was opened (reporting on) |
 | `CRUGOS: wb window N active` | a left press hit window N |
+| `CRUGOS: wb window N focused (Tab)` | Tab raised and activated window N |
+| `CRUGOS: wb window N key move to (x, y)` | an arrow key moved the active window |
 | `CRUGOS: wb window N drag start (x, y)` | the press landed on the title bar |
 | `CRUGOS: wb window N drag to (x, y)` | a motion moved the dragged window |
 | `CRUGOS: wb window N moved to (x, y)` | the button was released after a drag |
+| `CRUGOS: wb window N resize start (x, y)` | the press landed on the resize grip |
+| `CRUGOS: wb window N resized to WxH` | the resize grip was released |
 | `CRUGOS: wb menu '<title>' open (window N)` | a strip was opened from the bar |
 | `CRUGOS: wb menu '<title>' item N highlighted ('<item>')` | the hovered popup row changed |
 | `CRUGOS: wb menu '<title>' selected ('<item>')` | a popup row was chosen |
+| `CRUGOS: wb menu closed (escape)` | Escape closed a keyboard-opened popup |
 | `CRUGOS: wb gadget '<label>' clicked in window N` | a gadget click completed |
 | `CRUGOS: wb window N closed (gadget)` | the close gadget closed the window |
-| `CRUGOS: wb action K menu\|gadget\|close ...` | one event was drained from the queue |
+| `CRUGOS: wb action K menu\|gadget\|close\|resize ...` | one event was drained from the queue |
 | `CRUGOS: wb shell ready (window N, CxR text)` | `wb.shell=1` installed the shell painter |
 | `CRUGOS: sh run '<line>'` | a shell line was executed |
 | `CRUGOS: sh out <text>` | one output line of that command |
@@ -392,8 +437,9 @@ cursor story, there is no blinking and no separate sprite.
 cursor, `\n`/`\r` executes, `0x08`/`0x7f` backspaces, `Ctrl-U` (`0x15`) erases
 the line, `Ctrl-C` (`0x03`) cancels it and prints `^C`, and `Ctrl-P` (`0x10`) /
 `Ctrl-N` (`0x0e`) walk the eight-entry history (the draft line comes back after
-the newest entry). Arrow keys are not decoded yet, which is why the history
-uses the classic Emacs control keys. `shell_feed()` returns 0 while editing,
+the newest entry). The shell does not use the arrow keys -- phase 6D decodes
+them for the desktop, not for the line editor -- which is why the history uses
+the classic Emacs control keys. `shell_feed()` returns 0 while editing,
 1 when a line executed and 2 when the line was cancelled; `shell_run()` returns
 0 for a known command, 1 for an unknown one and -1 for an empty line.
 
@@ -418,10 +464,87 @@ byte from `input_try_getc()` goes to the shell, each executed line prints
 the window is repainted after each keystroke. `wb_hold()` pumps the same loop,
 so the interactive demo has a working shell as well.
 
+## Resizing windows
+
+Every window carries a 12x12 resize grip, `INTUITION_RESIZE_SIZE` pixels
+square, in its inner bottom-right corner at
+`(x + w - INTUITION_BORDER - 12 - 2, y + h - INTUITION_BORDER - 12 - 2)`. The
+grip is drawn after the body, so a body painter cannot hide it, and every
+window gets one.
+
+A press inside the grip arms a size drag instead of a body press. Every motion
+while it is held computes the new size from the size at press plus the pointer
+delta: the width and height are floored at `INTUITION_MIN_WIDTH` /
+`INTUITION_MIN_HEIGHT` (120x80), and a motion that would push the right or
+bottom edge past the framebuffer is refused outright -- the size simply does
+not change -- rather than clamped, so a window can never be dragged larger
+than the screen that holds it. The origin never moves. The release prints
+`CRUGOS: wb window %d resized to %ux%u`, increments
+`intuition_resize_count()`, counts one action and queues an
+`INTUITION_EVENT_RESIZE` whose `w` and `h` fields carry the final size. A
+press and release on the grip with no motion in between still counts a resize,
+so a click on the grip is never a silent no-op.
+
+`struct intuition_event` gained `u32 w` and `u32 h` for this; the five
+earlier types leave both fields at 0, so a caller can tell a resize from the
+rest without reading a second field. The size is the window's outer size, the
+same one `intuition_window_rect()` reports.
+
+The body is repainted at the new size. The shell's text grid follows (it shows
+`min((h - 6) / 20, 8)` rows), but static body text is re-laid out from the
+top-left only: there is no reflow, no font scaling and no content that moves
+itself inside the body.
+
+## Keyboard navigation
+
+`intuition_key_event(u8)` gives the desktop a keyboard of its own. The bytes
+come from `input.device` like every other key: `wb_key_pump()` in
+`kernel/gfx/workbench.c` drains whatever `input_try_getc()` has queued and
+forwards Tab, Enter, Escape and the four `INPUT_KEY_*` arrow bytes while
+`wb.keys=1` is set. If `wb.shell=1` is also given, shell mode wins: the shell
+owns the keyboard, and keys mode leaves every byte to `wb_shell_pump()`.
+
+Tab cycles the focus through the stacking order. The next window is raised,
+made active, an `INTUITION_EVENT_ACTIVATE` is queued and the log carries
+`CRUGOS: wb window %d focused (Tab)`. The four arrow bytes move the active
+window by `INTUITION_KEY_STEP` (8) pixels and clamp it to the screen, one step
+per byte: `CRUGOS: wb window %d key move to (%d, %d)`.
+
+Enter opens the active window's first screen-top menu as a popup with item 0
+highlighted, exactly the popup the pointer opens on that strip. While it is
+open, Down and Up move the highlight (stopping at the last and first item) and
+the log carries `CRUGOS: wb menu '<title>' item N highlighted ('<item>')`;
+Enter selects the highlighted item through the normal selection path, so it
+counts one action and queues `INTUITION_EVENT_MENU` exactly like a click; and
+Escape closes the popup without selecting anything and prints
+`CRUGOS: wb menu closed (escape)`. Menu keys only apply while a popup is open
+and arrow moves only apply while no popup is open, so one byte has one meaning
+at a time.
+
+The bytes come from two decoders that do not share an order:
+
+| key | PS/2 set-1 E0 make | USB HID usage page 0x07 | `input.device` byte |
+| --- | --- | --- | --- |
+| Up | `0x48` | `0x52` UpArrow | `INPUT_KEY_UP` `0x90` |
+| Down | `0x50` | `0x51` DownArrow | `INPUT_KEY_DOWN` `0x91` |
+| Left | `0x4B` | `0x50` LeftArrow | `INPUT_KEY_LEFT` `0x92` |
+| Right | `0x4D` | `0x4F` RightArrow | `INPUT_KEY_RIGHT` `0x93` |
+
+HID puts RightArrow at `0x4F` and LeftArrow at `0x50`, while PS/2 has Left at
+`0x4B` and Right at `0x4D`. The PS/2 decoder pushes a byte for an E0 make code
+and ignores E0 break codes and E0 modifier releases; the HID decoder maps the
+four usages in `drivers/usb/usb_hid.c`. Both feed the same `input.device` queue
+the console and the shell read.
+
+Limits: there is no Shift-Tab, because the input layer delivers one byte per
+key and carries no modifier state; there are no sub-menus to walk; the menu
+keys only drive the first menu of the active window; and outside shell mode
+there is no keyboard text entry, only focus, movement and menu selection.
+
 ## Host tests
 
 `make test-host` links the real `kernel/gfx/intuition.c`,
-`kernel/lib/textgrid.c` and `kernel/shell/shell.c` and reports 2792 checks.
+`kernel/lib/textgrid.c` and `kernel/shell/shell.c` and reports 2862 checks.
 `tests/host/test_intuition.c` replaces the framebuffer primitives with counting
 stubs and the cursor accessors with a settable fake (`test_fb_fake_reset()` /
 `test_fb_cursor_set()` from `tests/host/test_gfx.c`), then checks:
@@ -446,6 +569,14 @@ stubs and the cursor accessors with a settable fake (`test_fb_fake_reset()` /
 - the close gadget: closing a window, the queued `CLOSE` event, activation
   falling to the next window, the last window leaving `intuition_active()` at
   -1, and a press just outside the box starting a drag.
+- resize grips: the inner bottom-right rectangle, a press on it resizing the
+  window, the 120x80 floor, a motion past the screen leaving the size alone,
+  the queued `RESIZE` event with its `w`/`h`, and a press-release with no
+  motion still counting.
+- the keyboard: Tab cycling the focus through the stacking order (raising the
+  window and queueing `ACTIVATE`), the four arrow bytes moving the active
+  window by 8 pixels and clamping it to the screen, and Enter/Down/Up/Escape
+  opening, highlighting, selecting and dismissing the menu popup.
 - the event queue: a 16-event FIFO, the drop counter on overflow, the action
   count still growing past the queue depth, and the FIFO drain order.
 
@@ -496,7 +627,7 @@ anything else. The script then:
    `ok: workbench title-bar drag (N drag(s), window 2 at (x, y), exit 33)`.
 
 `make test-workbench` then runs `scripts/boot-check.py` with `EXPECT_WB=yes`
-(the phase 6c boot marker, the desktop marker, a `wb selftest ok`, at least one
+(the phase 6d boot marker, the desktop marker, a `wb selftest ok`, at least one
 `wb window N opened`, one `wb window N moved to`, and one `wb cursor at` with
 numeric coordinates) and `scripts/check-disk.py` for the ext4 root.
 
@@ -531,7 +662,7 @@ larger relative motion into several 8-bit HID reports and the guest drops some
 of them, so a single jump of 644 pixels landed 136 pixels short when the gate
 was first written.
 
-`boot-check.py` then runs with `EXPECT_MENU=yes`, which requires the phase 6c
+`boot-check.py` then runs with `EXPECT_MENU=yes`, which requires the phase 6d
 marker, the desktop marker, the menu open and selected markers, the gadget
 click marker, the close marker, at least one `wb action N ...` line and a
 `wb selftest ok (N drag(s), M action(s))` with at least one action, and
@@ -554,7 +685,38 @@ carries `0xE0E0E0` text pixels. The gate then requires
 and `boot-check.py` runs with `EXPECT_SHELL=yes` (the shell and desktop markers,
 a `sh run`, a `CRUGOS: sh out CrugOS ` line and at least one command in the
 `sh selftest ok`). It prints `ok: workbench shell commands (4 command(s), exit
-33)`.
+### Resize and keyboard gate
+
+`make test-workbench-keys` runs `scripts/run-workbench-keys.py` on the same
+machine (`usb=off,i8042=off`, an `xhci` controller) and does both halves in one
+boot, with `wb.enable=1 wb.wait=$(WB_KEYS_WAIT) wb.keys=1
+wb.acts=$(WB_KEYS_ACTS)`:
+
+1. hotplugs a `usb-mouse`, waits for `CRUGOS: wb desktop ready` and drags
+   window 2's grip from (790,490) to (730,430). The window shrinks from 320x200
+   to 260x140: the log must show `wb window 2 resized to 260x140` and
+   `wb action 1 resize window 2 (260x140)`, and a `screendump` must find the
+   desktop background `(16,32,48)` at (798,498), where the old bottom-right
+   corner used to be.
+2. hotplugs a `usb-kbd` and sends Tab, so window 1 becomes the active window
+   (`CRUGOS: wb window 1 focused (Tab)`).
+3. sends Right twice. Window 1 moves from (80,90) to (96,90), 8 pixels per key,
+   and the gate checks the two `key move to` markers.
+4. sends Enter to open window 1's `Workbench` menu, Down to highlight `Info`
+   and Enter to select it, requiring the highlight marker, the selection marker
+   and `wb action 2 menu window 1 item 1`.
+5. waits for exit status 33, then runs `scripts/boot-check.py` with
+   `EXPECT_KEYS=yes` (the phase 6d marker, the desktop and keys markers, the
+   resize and key-move markers, the menu markers and a two-action
+   `wb selftest ok`) and `scripts/check-disk.py`, and prints
+   `ok: workbench resize and keyboard navigation (exit 33)`.
+
+Every pointer move is split into steps of at most 100 pixels and follows the
+position the guest reports in `CRUGOS: wb cursor at`: QEMU turns a larger
+relative motion into several 8-bit HID reports and the guest drops some of
+them, the same limit the menu gate works around. The driver also never clicks
+while the keyboard part runs, so a stray press cannot steal focus from window
+1.
 
 ## Interactive demo
 
@@ -576,10 +738,20 @@ guest prints `CRUGOS: wb hold finished`, exits with status 33 and leaves
   hardcoded. There are no application tasks, no Workbench userspace and no
   window content owned by another program yet.
 - Four windows, two menus of six items and four gadgets per window, one open
-  popup at a time. No window resize, no sub-menus, no keyboard navigation of
-  the menu bar, no icons, no clipboard and no double-click semantics; a menu
-  selection or gadget click queues an event, but only the bring-up module
-  drains that queue and no other program is attached to it yet.
+  popup at a time. No sub-menus, no icons, no clipboard and no double-click
+  semantics; a menu selection, gadget click, close or resize queues an event,
+  but only the bring-up module drains that queue and no other program is
+  attached to it yet.
+- The resize grip is a fixed 12x12 box in every window and is not themeable. A
+  window is resized from its bottom-right corner only; a drag that would push
+  it past the screen is refused rather than clamped, so the size stops changing
+  at the edge. The shell text grid repaints at the new body size, but the
+  static body text is re-laid out from the top-left only: there is no reflow.
+- Keyboard navigation has no Shift-Tab and no accelerators, because the input
+  layer delivers one byte per key and carries no modifier state; the arrow keys
+  move the active window in 8-pixel steps, there are no sub-menus to walk, and
+  outside shell mode there is no keyboard text entry. Stacking has no
+  send-to-back, so Tab can only cycle forward.
 - The shell has no quoting, no globs and no redirection: arguments are split on
   spaces and the extra ones fold into the last argument, `write` creates a
   regular `0644` file but never a directory, `cat` reads at most 4 KiB and
@@ -596,8 +768,8 @@ guest prints `CRUGOS: wb hold finished`, exits with status 33 and leaves
   window scrolls, over 96 lines of 37 usable columns, and it has a single
   window: `wb.shell=1` binds the keyboard to window 2 and keeps the serial
   console for diagnostics.
-- Outside shell mode the keyboard still reaches the serial console, so there
-  is no keyboard accelerator for the menu bar; shell mode routes every byte to
-  window 2 regardless of which window is active.
+- Outside keys and shell mode the keyboard still reaches the serial console;
+  with `wb.keys=1` it drives the desktop instead, and shell mode routes every
+  byte to window 2 regardless of which window is active.
 - No clipping stack: `fb_fill_rect()` and `fb_draw_text()` clip to the screen,
   so a window cannot draw outside itself into another window's area.

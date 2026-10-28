@@ -23,6 +23,10 @@
 #define INTUITION_MENU_BAR_HEIGHT 18u
 #define INTUITION_MENU_ITEM_HEIGHT 18u
 #define INTUITION_MENU_ITEM_WIDTH 150u
+/* Phase 6D: the resize grip in the inner bottom-right corner of a window,
+   and how far one arrow key moves the active window. */
+#define INTUITION_RESIZE_SIZE 12u
+#define INTUITION_KEY_STEP 8u
 
 /* Workbench palette, 0x00RRGGBB. */
 #define INTUITION_DESKTOP_RGB 0x00102030u
@@ -56,6 +60,7 @@ struct intuition_menu {
 #define INTUITION_EVENT_MENU 3u     /* a menu item was selected */
 #define INTUITION_EVENT_GADGET 4u   /* a body gadget was clicked */
 #define INTUITION_EVENT_CLOSE 5u    /* the close gadget was clicked */
+#define INTUITION_EVENT_RESIZE 6u   /* a resize-grip drag finished */
 
 struct intuition_event {
     u32 type;
@@ -64,6 +69,8 @@ struct intuition_event {
     u32 item;   /* selected menu item index, 0 when unused */
     i32 x;      /* window origin when the event was generated */
     i32 y;
+    u32 w;      /* new window size, resize events only */
+    u32 h;
 };
 
 void intuition_init(void);
@@ -93,12 +100,18 @@ void intuition_redraw_window(int id);
 /* Consume one pointer report: menus, gadgets, close gadget, activation and
    title-bar dragging. */
 void intuition_pointer_event(const struct input_pointer *event);
+/* Consume one decoded key: Tab cycles the window focus, the arrow keys move
+   the active window by INTUITION_KEY_STEP pixels, and Enter/Escape/Down/Up
+   drive the menu popup (phase 6D). */
+void intuition_key_event(u8 key);
 /* Pop one queued event; returns 1 when an event was copied to out. */
 int intuition_event_poll(struct intuition_event *out);
 int intuition_window_rect(int id, i32 *x, i32 *y, u32 *w, u32 *h);
 int intuition_active(void);
 void intuition_set_reporting(int on);
 u64 intuition_drag_count(void);
+/* Resize-grip drags that changed a window size. */
+u64 intuition_resize_count(void);
 u32 intuition_window_count(void);
 u32 intuition_event_count(void);
 u32 intuition_event_dropped(void);

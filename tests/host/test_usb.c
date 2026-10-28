@@ -1,5 +1,6 @@
 /* Host tests for the USB HID boot keyboard helpers (drivers/usb/usb_hid.c). */
 #include <crug/types.h>
+#include <crug/input.h>
 #include <crug/usb.h>
 #include <stdio.h>
 #include <string.h>
@@ -253,6 +254,18 @@ void test_usb_functions(void)
     CHECK(decode_report(0x02, 0x04, 0) == 0);      /* still held */
     CHECK(decode_report(0, 0, 0) == 0);
     CHECK(decode_report(0x02, 0x04, 0) == 'A');    /* shift, caps off */
+
+    /* Phase 6D navigation keys: HID usage page 0x07 orders RightArrow (0x4F)
+       before LeftArrow (0x50); they map to the INPUT_KEY_* bytes. */
+    usb_hid_reset();
+    CHECK(decode_report(0, 0x52, 0) == INPUT_KEY_UP);
+    CHECK(decode_report(0, 0, 0) == 0);
+    CHECK(decode_report(0, 0x51, 0) == INPUT_KEY_DOWN);
+    CHECK(decode_report(0, 0, 0) == 0);
+    CHECK(decode_report(0, 0x4f, 0) == INPUT_KEY_RIGHT);
+    CHECK(decode_report(0, 0, 0) == 0);
+    CHECK(decode_report(0, 0x50, 0) == INPUT_KEY_LEFT);
+    CHECK(decode_report(0, 0, 0) == 0);
 
     /* Modifier usages in the key array are ignored, and a report with two new
        keys reports the first one only. */

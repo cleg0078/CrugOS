@@ -2,6 +2,7 @@
    decoding. */
 #include <crug/types.h>
 #include <crug/usb.h>
+#include <crug/input.h>
 #include <crug/string.h>
 
 #define HID_USAGE_SLOTS 6u
@@ -28,6 +29,11 @@
 #define HID_USAGE_PUNCT_MIN   0x2du
 #define HID_USAGE_PUNCT_MAX   0x38u
 #define HID_USAGE_CAPS        0x39u
+/* HID usage page 0x07 orders RightArrow (0x4F) before LeftArrow (0x50). */
+#define HID_USAGE_RIGHT       0x4fu
+#define HID_USAGE_LEFT        0x50u
+#define HID_USAGE_DOWN        0x51u
+#define HID_USAGE_UP          0x52u
 #define HID_USAGE_MODIFIER_MIN 0xe0u
 #define HID_USAGE_MODIFIER_MAX 0xe7u
 
@@ -181,6 +187,18 @@ static int hid_map_usage(u8 usage)
             break;
         case HID_USAGE_SPACE:
             code = ' ';
+            break;
+        case HID_USAGE_UP:
+            code = (u8)INPUT_KEY_UP;
+            break;
+        case HID_USAGE_DOWN:
+            code = (u8)INPUT_KEY_DOWN;
+            break;
+        case HID_USAGE_LEFT:
+            code = (u8)INPUT_KEY_LEFT;
+            break;
+        case HID_USAGE_RIGHT:
+            code = (u8)INPUT_KEY_RIGHT;
             break;
         default:
             return 0;

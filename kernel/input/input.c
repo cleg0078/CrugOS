@@ -246,10 +246,30 @@ void input_scancode(u8 scan)
 
     if (g_extended) {
         g_extended = 0;
-        if (code == 0x1D || code == 0x38)
+        if (code == 0x1D || code == 0x38) {
             input_modifier(code, pressed);
-        /* E0 arrows/Home/End/Insert/Delete are not mapped yet; they will
-           become ANSI sequences once a terminal consumer exists. */
+            return;
+        }
+        if (!pressed)
+            return; /* the arrow break codes carry no information */
+        /* E0 arrows become INPUT_KEY_* codes (phase 6D); Home/End/Insert/Delete
+           stay unmapped until a terminal consumer needs them. */
+        switch (code) {
+        case 0x48:
+            input_push((u8)INPUT_KEY_UP);
+            break;
+        case 0x50:
+            input_push((u8)INPUT_KEY_DOWN);
+            break;
+        case 0x4B:
+            input_push((u8)INPUT_KEY_LEFT);
+            break;
+        case 0x4D:
+            input_push((u8)INPUT_KEY_RIGHT);
+            break;
+        default:
+            break;
+        }
         return;
     }
 

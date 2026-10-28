@@ -43,8 +43,9 @@ read the non-secret `net.tcp=` / `net.serve=` / `net.dns=` /
 `usb.wait=` / `usb.keys=`, phase 5B adds `usb.mouse=` / `usb.moves=`, phase
 5C adds `audio.rate=` / `audio.volume=` / `audio.seconds=`, phase 5D adds
 `gfx.wait=` / `gfx.moves=`, phase 6A adds `wb.enable=` / `wb.wait=` /
-`wb.drag=` / `wb.hold=`, phase 6B adds `wb.menu=` / `wb.acts=`, and phase 6C
-adds `wb.shell=1` / `wb.sh=` for the shell window. A boot
+`wb.drag=` / `wb.hold=`, phase 6B adds `wb.menu=` / `wb.acts=`, phase 6C
+adds `wb.shell=1` / `wb.sh=` for the shell window, and phase 6D adds
+`wb.keys=1` for keyboard navigation of the desktop. A boot
 medium that ships no block device (the hybrid
 ISO) passes `storage=none`, which is the one token that changes the storage
 contract instead of adding work to it. The
@@ -126,11 +127,12 @@ post-snapshot allocations cannot push it over capacity.
    `CRUGOS: gfx framebuffer absent` or
    `CRUGOS: gfx ready (1024x768, cursor at 512,384)`. `wb_cmdline` then reads
    `wb.enable=`, `wb.wait=<seconds>`, `wb.drag=<n>`, `wb.menu=<0|1>`,
-   `wb.acts=<n>` and `wb.hold=<seconds>`, and `wb_init` builds the
-   desktop only when the token was supplied: it takes the framebuffer away from
-   the text console and prints `CRUGOS: wb desktop ready (1024x768, 2
-   window(s))`. Without the token the framebuffer console keeps its text mode
-   and no Workbench line appears.
+   `wb.acts=<n>`, `wb.hold=<seconds>` and `wb.keys=<0|1>`, and `wb_init`
+   builds the desktop only when the token was supplied: it takes the
+   framebuffer away from the text console and prints `CRUGOS: wb desktop ready
+   (1024x768, 2 window(s))`, followed by `CRUGOS: wb keys ready (window 2
+   active)` when `wb.keys=1` asked for keyboard navigation. Without the token
+   the framebuffer console keeps its text mode and no Workbench line appears.
 9. `net_init`: reset `net.device` and `tcp_init`, then probe legacy virtio-net
    PCI functions (up to four `eth0`..`eth3`) and register them, bind the DHCP
    client to UDP port 68 and read the `net.tcp=<port>` / `net.serve=<seconds>`
@@ -204,12 +206,13 @@ post-snapshot allocations cannot push it over capacity.
     otherwise; then the graphics check, which shows the cursor and waits for
     `gfx.moves=` pointer reports within `gfx.wait=` seconds when those tokens
     were supplied and is silent otherwise; then the Workbench check, which shows
-    the desktop and waits for `wb.drag=` title-bar drags and, with `wb.menu=1`,
-    for `wb.acts=` menu, gadget and close actions within `wb.wait=` seconds when
-    `wb.enable=` enabled it; with `wb.shell=1` it also waits for `wb.sh=` typed
-    shell commands. The whole check is silent unless `wb.enable=` enabled it.
+    the desktop and waits for `wb.drag=` title-bar drags and, with `wb.menu=1`
+    or `wb.keys=1`, for `wb.acts=` menu, gadget, close and resize actions within
+    `wb.wait=` seconds when `wb.enable=` enabled it; with `wb.shell=1` it also
+    waits for `wb.sh=` typed shell commands. The whole check is silent unless
+    `wb.enable=` enabled it.
 14. `report_boot`, `storage_lock` (wipes the passphrase, the volume keys and
-    the bounce buffer), `CRUGOS: phase 6c boot ok`, then `wb_hold` (only when
+    the bounce buffer), `CRUGOS: phase 6d boot ok`, then `wb_hold` (only when
     `wb.hold=` was given: the guest stays alive with the desktop on screen until
     the deadline), `arch_exit_qemu(0x10)`.
 
@@ -374,6 +377,7 @@ CRUGOS: usb controller absent             # or: usb controller ready (xhci, 8 po
 CRUGOS: audio device absent               # or: audio device ready (usb uac1, 2 ch, 16-bit, 48000 Hz)
 CRUGOS: gfx ready (1024x768, cursor at 512,384)
 CRUGOS: wb desktop ready (1024x768, 2 window(s))  # only with wb.enable=1
+CRUGOS: wb keys ready (window 2 active)    # only with wb.keys=1
 CRUGOS: usb keyboard ready (endpoint 0x81, 8 byte reports)  # USB keyboard attached
 CRUGOS: usb key 'a'                       # one per decoded key while usb.wait= is set
 CRUGOS: usb mouse ready (endpoint 0x81, 4 byte reports)     # USB mouse attached
@@ -431,16 +435,24 @@ CRUGOS: gfx selftest ok (3 move(s), buttons 0x00)
 CRUGOS: wb window 2 drag start (512, 312)   # only with wb.enable=1
 CRUGOS: wb window 2 drag to (570, 350)
 CRUGOS: wb window 2 moved to (570, 350)
+CRUGOS: wb window 2 resize start (790, 490) # only with a press on the grip
+CRUGOS: wb window 2 resized to 260x140
+CRUGOS: wb action 1 resize window 2 (260x140)
+CRUGOS: wb window 1 focused (Tab)           # only with wb.keys=1
+CRUGOS: wb window 1 key move to (96, 90)
+CRUGOS: wb menu 'Workbench' open (window 1)  # Enter with wb.keys=1
+CRUGOS: wb menu 'Workbench' item 1 highlighted ('Info')
 CRUGOS: wb menu 'Shell' open (window 2)     # only with wb.menu=1
 CRUGOS: wb menu 'Shell' selected ('New')
+CRUGOS: wb menu closed (escape)
 CRUGOS: wb action 1 menu window 2 item 0
 CRUGOS: wb shell ready (window 2, 37x8 text)  # only with wb.shell=1
 CRUGOS: sh run 'ver'
-CRUGOS: sh out CrugOS 0.25.0 (phase 6c), x86_64
+CRUGOS: sh out CrugOS 0.26.0 (phase 6d), x86_64
 CRUGOS: wb selftest ok (1 drag(s), 1 action(s))
 CRUGOS: sh selftest ok (1 command(s))
 CRUGOS: selftest ok
-CRUGOS: phase 6c boot ok
+CRUGOS: phase 6d boot ok
 ```
 
 The `virtio : net eth0 mac ...` line, the lease, the ARP resolution, the echo
@@ -507,13 +519,13 @@ replaced by the skip marker, and the USB device the firmware booted from shows
 up in the USB lines as an unsupported mass-storage function:
 
 ```
-CRUGOS: version 0.25.0
+CRUGOS: version 0.26.0
 CRUGOS: usb controller ready (xhci, 8 port(s))
 CRUGOS: usb device 46f4:0001 on port 1 (speed 4)
 CRUGOS: usb device class 8 on port 1 (unsupported)
 CRUGOS: storage skipped (storage=none)
 CRUGOS: selftest ok
-CRUGOS: phase 6c boot ok
+CRUGOS: phase 6d boot ok
 ```
 
 `kernel/core/report.c` prints the machine description between them: kernel

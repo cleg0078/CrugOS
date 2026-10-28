@@ -15,6 +15,13 @@ void input_scancode(u8 scan);
 /* Queue a character decoded elsewhere, e.g. by the USB HID keyboard. */
 void input_char(u8 c);
 
+/* Extended keys: decoded by the PS/2 E0 prefix and the USB HID usages, and
+   pushed through the same byte queue as the ASCII characters (phase 6D). */
+#define INPUT_KEY_UP 0x90u
+#define INPUT_KEY_DOWN 0x91u
+#define INPUT_KEY_LEFT 0x92u
+#define INPUT_KEY_RIGHT 0x93u
+
 /* Pointer device: relative motion and buttons from a HID mouse. Motion is
    accumulated between reads; a read consumes the accumulated deltas and the
    pending button-change mask. */

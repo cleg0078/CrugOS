@@ -103,8 +103,9 @@ static void test_intuition_basics(void)
     CHECK(g_fill_calls > 0u);
     /* Each open and close repaints every window bottom to top: 1+2+3+4 on the
      * four opens, then 3 and 2 as the two windows close, so 15 window draws.
-     * Every draw frames the window and its close gadget (phase 6B). */
-    CHECK(g_frame_calls == 30u);
+     * Every draw frames the window, its close gadget (phase 6B) and its
+     * resize grip (phase 6D). */
+    CHECK(g_frame_calls == 45u);
 }
 
 static void test_intuition_no_framebuffer(void)
@@ -539,6 +540,163 @@ static void test_intuition_close_gadget(void)
     CHECK(intuition_action_count() == 2u);
 }
 
+/* The resize grip lives in the inner bottom-right corner of every window:
+ * a 12x12 box at (x + w - BORDER - 12 - 2, y + h - BORDER - 12 - 2).
+ * Dragging it grows or shrinks the window within the 120x80 minimum and the
+ * screen bounds; the release queues a RESIZE event with the new size. */
+static void test_intuition_resize(void)
+{
+    struct input_pointer ev;
+    struct intuition_event out;
+    i32 x = 0;
+    i32 y = 0;
+    u32 w = 0;
+    u32 h = 0;
+
+    test_reset(1024, 768);
+    CHECK(intuition_open(100, 100, 300, 300, "One", "body") == 1);
+    CHECK(intuition_resize_count() == 0u);
+    /* The grip of the 300x300 window starts at (384, 384). */
+    move_cursor(390, 390);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    /* Dragging the grip by (30, 30) grows the window to 330x330. */
+    move_cursor(420, 420);
+    pointer(&ev, 30, 30, 0x01u, 0x00u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_window_rect(1, &x, &y, &w, &h) == 0);
+    CHECK(x == 100 && y == 100 && w == 330 && h == 330);
+    /* Motion that would push the window past the screen edge is refused,
+       leaving the size untouched. */
+    move_cursor(1023, 767);
+    pointer(&ev, 603, 347, 0x01u, 0x00u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_window_rect(1, &x, &y, &w, &h) == 0);
+    CHECK(w == 330 && h == 330);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_resize_count() == 1u);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.type == INTUITION_EVENT_RESIZE);
+    CHECK(out.window == 1);
+    CHECK(out.w == 330 && out.h == 330);
+    CHECK(out.x == 100 && out.y == 100);
+    /* Shrinking below the 120x80 minimum clamps to it. */
+    move_cursor(418, 418); /* grip of the 330x330 window at (414, 414) */
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    move_cursor(0, 0);
+    pointer(&ev, -418, -418, 0x01u, 0x00u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_window_rect(1, &x, &y, &w, &h) == 0);
+    CHECK(w == INTUITION_MIN_WIDTH && h == INTUITION_MIN_HEIGHT);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_resize_count() == 2u);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.type == INTUITION_EVENT_RESIZE);
+    CHECK(out.w == INTUITION_MIN_WIDTH && out.h == INTUITION_MIN_HEIGHT);
+    /* A press on the grip counts as a resize even when nothing moves. */
+    move_cursor(208, 168); /* grip of the 120x80 window */
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_resize_count() == 3u);
+    CHECK(intuition_action_count() == 3u);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.type == INTUITION_EVENT_RESIZE);
+    /* A body press that is not on the grip never resizes or drags. */
+    move_cursor(150, 150);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    move_cursor(400, 400);
+    pointer(&ev, 250, 250, 0x01u, 0x00u);
+    intuition_pointer_event(&ev);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_resize_count() == 3u);
+    CHECK(intuition_drag_count() == 0u);
+}
+
+/* Phase 6D keyboard navigation: Tab cycles the focus (and raises the window),
+ * the arrow keys move the active window by INTUITION_KEY_STEP pixels, and
+ * Enter/Escape/Down/Up drive the menu popup of the active window. */
+static void test_intuition_keys(void)
+{
+    static const struct intuition_menu menus[1] = {
+        {"Workbench", 3u, {"About", "Info", "Quit"}},
+    };
+    struct intuition_event out;
+    i32 x = 0;
+    i32 y = 0;
+    u32 w = 0;
+    u32 h = 0;
+    u32 i;
+
+    test_reset(1024, 768);
+    CHECK(intuition_open(100, 100, 300, 300, "One", "body") == 1);
+    CHECK(intuition_open(500, 100, 300, 300, "Two", "body") == 2);
+    CHECK(intuition_set_menus(1, menus, 1u) == 0);
+    CHECK(intuition_set_menus(2, menus, 1u) == 0);
+    CHECK(intuition_active() == 2);
+    /* Tab cycles from window 2 to window 1 and raises it. */
+    intuition_key_event('\t');
+    CHECK(intuition_active() == 1);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.type == INTUITION_EVENT_ACTIVATE);
+    CHECK(out.window == 1);
+    /* The arrow keys move the active window by 8 px per press. */
+    intuition_key_event(INPUT_KEY_RIGHT);
+    intuition_key_event(INPUT_KEY_RIGHT);
+    intuition_key_event(INPUT_KEY_DOWN);
+    CHECK(intuition_window_rect(1, &x, &y, &w, &h) == 0);
+    CHECK(x == 116 && y == 108);
+    intuition_key_event(INPUT_KEY_LEFT);
+    intuition_key_event(INPUT_KEY_UP);
+    CHECK(intuition_window_rect(1, &x, &y, &w, &h) == 0);
+    CHECK(x == 108 && y == 100);
+    /* The keys stop at the screen edges. */
+    for (i = 0; i < 40; i++) {
+        intuition_key_event(INPUT_KEY_LEFT);
+        intuition_key_event(INPUT_KEY_UP);
+    }
+    CHECK(intuition_window_rect(1, &x, &y, &w, &h) == 0);
+    CHECK(x == 0 && y == 0);
+    /* Enter opens the first menu with item 0 highlighted; Down and Up move
+       the highlight and Enter selects the highlighted item. */
+    CHECK(intuition_menu_open() == -1);
+    intuition_key_event('\n');
+    CHECK(intuition_menu_open() == 0);
+    CHECK(intuition_menu_hover() == 0);
+    intuition_key_event(INPUT_KEY_DOWN);
+    CHECK(intuition_menu_hover() == 1);
+    intuition_key_event(INPUT_KEY_UP);
+    CHECK(intuition_menu_hover() == 0);
+    intuition_key_event('\n');
+    CHECK(intuition_menu_open() == -1);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.type == INTUITION_EVENT_MENU);
+    CHECK(out.window == 1);
+    CHECK(out.index == 0);
+    CHECK(out.item == 0);
+    /* Escape closes an open menu without queueing an event. */
+    intuition_key_event('\r');
+    CHECK(intuition_menu_open() == 0);
+    intuition_key_event(0x1b);
+    CHECK(intuition_menu_open() == -1);
+    CHECK(intuition_event_count() == 0u);
+    /* Closing every window leaves the keyboard with nothing to focus, and
+       the keys are ignored entirely without a framebuffer. */
+    CHECK(intuition_close(1) == 0);
+    CHECK(intuition_close(2) == 0);
+    intuition_key_event('\t');
+    intuition_key_event(INPUT_KEY_RIGHT);
+    CHECK(intuition_active() == -1);
+    test_reset(0, 0);
+    intuition_key_event('\t');
+    CHECK(intuition_active() == -1);
+}
 /* The queue is a 16-entry FIFO: actions keep counting after it fills, the
  * extra events are dropped and reported, and polling drains in order. */
 static void test_intuition_event_queue(void)
@@ -591,6 +749,10 @@ void test_intuition_functions(void)
     test_intuition_gadgets();
     printf("- intuition close gadget\n");
     test_intuition_close_gadget();
+    printf("- intuition resize grip\n");
+    test_intuition_resize();
+    printf("- intuition keyboard focus / keys / menu popup\n");
+    test_intuition_keys();
     printf("- intuition event queue\n");
     test_intuition_event_queue();
 }

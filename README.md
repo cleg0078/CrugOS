@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 6C the Workbench shell (`v0.25.0`)
+## Status: phase 6D window resizing and keyboard navigation (`v0.26.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -28,8 +28,11 @@ the Intuition interaction model: a shared menu bar with popup menus, gadgets
 inside a window body, the close gadget and a typed event queue. Phase 6C
 turns the second window into a live shell -- a console text grid with
 scrollback, a line editor with command history, and a command set that lists,
-reads and writes the mounted ext4 root -- on top of that desktop. Release
-`v0.23.1` made that tree bootable media: `make iso` writes a hybrid UEFI ISO
+reads and writes the mounted ext4 root -- on top of that desktop. Phase 6D
+makes every window resizable from a 12x12 corner grip and gives the keyboard
+a navigation role: Tab cycles the focus, the arrow keys move the active window
+and Enter opens its menu for the arrows to drive. Release `v0.23.1` made that
+tree bootable media: `make iso` writes a hybrid UEFI ISO
 that boots from a USB stick or a CD-ROM, with no disk image and no test
 tokens baked in.
 
@@ -477,6 +480,43 @@ Phase 6A starts the Workbench: a small software window manager in the kernel.
   screen and both input devices are live until the hold expires (Ctrl+Alt+G
   releases the pointer). See [build.md](docs/build.md).
 
+Phase 6D makes the windows resizable and gives the keyboard work of its own.
+
+- every window carries a 12x12 `INTUITION_RESIZE_SIZE` grip in its inner
+  bottom-right corner, at `(x + w - INTUITION_BORDER - 12 - 2, y + h -
+  INTUITION_BORDER - 12 - 2)`; dragging it resizes the window live, clamped to
+  the 120x80 minimum (`INTUITION_MIN_WIDTH`/`INTUITION_MIN_HEIGHT`) and to the
+  screen, and a motion that would leave the screen is refused instead of
+  clamped, so the size simply does not change. The release prints
+  `CRUGOS: wb window %d resized to %ux%u`, increments
+  `intuition_resize_count()`, counts one action and queues an
+  `INTUITION_EVENT_RESIZE` (type 6) whose `struct intuition_event` carries the
+  new `u32 w` / `u32 h`; a press and release without motion still counts;
+- `intuition_key_event(u8)` consumes decoded key bytes: Tab cycles the focus
+  through the stacking order, raising the window, activating it, queueing an
+  `ACTIVATE` event and printing `CRUGOS: wb window %d focused (Tab)`; the four
+  arrows move the active window by `INTUITION_KEY_STEP` (8) pixels, clamped to
+  the screen; Enter opens the active window's first screen-top menu as a popup
+  with item 0 highlighted, Down/Up move the highlight, Enter selects the
+  highlighted item and Escape closes the popup;
+- `include/crug/input.h` gains `INPUT_KEY_UP` 0x90, `INPUT_KEY_DOWN` 0x91,
+  `INPUT_KEY_LEFT` 0x92 and `INPUT_KEY_RIGHT` 0x93; the PS/2 set-1 decoder
+  pushes them for the E0 make codes 0x48/0x50/0x4B/0x4D and ignores E0 break
+  codes and E0 modifier releases, and the USB HID decoder maps usage page 0x07
+  usages 0x52/0x51/0x4F/0x50 (UpArrow, DownArrow, RightArrow, LeftArrow);
+- `wb.keys=1` installs a keys mode that prints
+  `CRUGOS: wb keys ready (window %d active)` after the desktop ready line
+  (`wb.shell=1` wins if both are given, because the shell owns the keyboard);
+  `wb.acts=` now counts resizes too, and `wb_drain_events()` prints
+  `CRUGOS: wb action N resize window W (WxH)` for a `RESIZE` event;
+- `make test-workbench-keys` plays the two halves in one boot: it hotplugs a
+  `usb-mouse` and drags the Shell window's grip from (790,490) to (730,430), so
+  the window shrinks from 320x200 to 260x140 and the old corner becomes desktop
+  again, then hotplugs a `usb-kbd` and sends Tab, Right, Right, Enter, Down and
+  Enter to focus window 1, move it to (96,90) and select the `Info` menu item.
+  It requires a 33 exit status and expects `EXPECT_KEYS=yes` from
+  `boot-check.py`; see [workbench.md](docs/workbench.md).
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -485,9 +525,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.25.0 (phase 6c) -- Amiga-inspired microkernel bring-up
+CrugOS 0.26.0 (phase 6d) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.25.0
+CRUGOS: version 0.26.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -547,7 +587,7 @@ heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
 boot   : pmm=28552 us cpu=438 us vm=626 us traps=360 us timer=65357 us heap=60 us storage=94487 us sched=354 us syscall=122 us total=190359 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase 6c boot ok
+CRUGOS: phase 6d boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -746,12 +786,13 @@ make test-gfx          # move a hotplugged USB mouse and verify the framebuffer 
 make test-workbench    # drag a window on the software-rendered desktop
 make test-workbench-menu  # open menus, select items and click gadgets
 make test-workbench-shell  # type commands into the Workbench shell window
+make test-workbench-keys   # resize a window by its grip and drive it from the keyboard
 make iso         # build a bootable hybrid UEFI ISO (build/x86_64/crugos.iso)
 make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
 make usb         # write the ISO to a USB block device (USB_DEV=/dev/sdX)
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
-make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows/menus/gadgets, the text grid and the shell)
+make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows/menus/gadgets, resize grips, keyboard focus and keys, the text grid and the shell)
 make check-disk  # e2fsck + persisted-file checks on the latest test disk
 make disk        # generate the GPT/ext4 test disk
 make raid-disks  # generate the two RAID1 member disks
@@ -775,12 +816,13 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `EXPECT_AVX2`, `EXPECT_RAID`, `EXPECT_NVME`, `EXPECT_REBUILD`, `EXPECT_AHCI`,
 `EXPECT_CRYPT`, `EXPECT_AES`, `EXPECT_NET`, `EXPECT_TCP`, `EXPECT_DNS`,
 `EXPECT_USB`, `EXPECT_MOUSE`, `EXPECT_AUDIO`, `EXPECT_GFX`, `EXPECT_WB`,
-`EXPECT_MENU`, `EXPECT_SHELL`,
+`EXPECT_MENU`, `EXPECT_SHELL`, `EXPECT_KEYS`,
 `AUDIO_RUN_TIMEOUT_SEC`, `AUDIO_QEMU_EXTRA`, `GFX_WAIT`, `GFX_MOVES`,
 `GFX_RUN_TIMEOUT_SEC`, `GFX_QEMU_EXTRA`, `WB_WAIT`, `WB_DRAG`,
 `WB_RUN_TIMEOUT_SEC`, `WB_QEMU_EXTRA`, `WB_MENU_WAIT`, `WB_MENU_ACTS`,
 `WB_MENU_RUN_TIMEOUT_SEC`, `WB_SHELL_WAIT`, `WB_SHELL_CMDS`,
-`WB_SHELL_RUN_TIMEOUT_SEC`, `DEMO_DISPLAY`, `DEMO_HOLD_SEC`,
+`WB_SHELL_RUN_TIMEOUT_SEC`, `WB_KEYS_WAIT`, `WB_KEYS_ACTS`,
+`WB_KEYS_RUN_TIMEOUT_SEC`, `DEMO_DISPLAY`, `DEMO_HOLD_SEC`,
 `DEMO_TIMEOUT_SEC`, `DEMO_CMDLINE`, `DEMO_MACHINE_EXTRA`, `DEMO_QEMU_EXTRA`,
 `ISO_IMAGE`, `ISO_STAGE`, `ISO_FAT_IMG`, `ISO_SIZE_MB`, `ISO_VOLID`,
 `ISO_CMDLINE`, `ISO_DATE`, `ISO_RUN_TIMEOUT_SEC`, `EXPECT_ISO`, `ISO_IMG`,
@@ -808,7 +850,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/input/` | `input.device`: set-1 scancode decoder, the console byte queue and the pointer state |
 | `kernel/audio/` | `audio.device` PCM ring, the per-channel mixer and the tone generator |
 | `kernel/net/` | `net.device`, Ethernet/ARP/IPv4/ICMP/UDP, TCP, the DHCP client and the DNS resolver |
-| `kernel/gfx/` | `gfx.device` (the pointer-driven framebuffer cursor) and `intuition.device` with the phase 6A desktop, its phase 6B menus, gadgets and event queue, and the phase 6C body painter the shell window uses |
+| `kernel/gfx/` | `gfx.device` (the pointer-driven framebuffer cursor) and `intuition.device` with the phase 6A desktop, its phase 6B menus, gadgets and event queue, and the phase 6C body painter the shell window uses, the phase 6D resize grips and keyboard navigation |
 | `kernel/shell/` | the Workbench shell: line editor, history, the command table and the `shell_io` binding to the mounted ext4 root |
 | `kernel/mm/` | physical allocator, W^X page tables, kernel heap |
 | `kernel/block/` | block-device registry, partitions, bounds checks, RAID1/RAID10, boot-time rebuild and the AES-256-XTS `crypt.device` |
@@ -889,14 +931,16 @@ coordinates; phase 6A added `intuition.device`, a software window manager of
 four stacked, draggable windows on that framebuffer, and the gated two-window
 desktop bring-up; phase 6B added strip menus with popup selection, body gadgets,
 the close gadget and the typed event queue; phase 6C put a live shell with
-console scrollback in the second window and wired the keyboard to it. Remaining
-phase 3B work is
+console scrollback in the second window and wired the keyboard to it; phase 6D
+made the windows resizable from a corner grip and taught the keyboard Tab
+focus, 8-pixel arrow moves and a menu popup. Remaining phase 3B work is
 online RAID rebuild, hot spare, scrub and a write-intent bitmap, RAID below
 encryption, a redundant ESP, TPM/keyfile keyslots and USB storage; phase 4
 continues with framebuffer (GOP) console input and virtual terminals, plus a
 routing table and richer resolver features on top of the phase 4B-4D stack;
-the next step is the rest of Workbench userspace: window resizing, a gadget
-toolkit, keyboard navigation and sub-menus on top of the phase 6C shell. Later
+the next step is the rest of Workbench userspace: reflowing a body when its
+window is resized, sub-menus, a gadget toolkit, send-to-back and Shift-Tab once
+the input layer carries modifier state, on top of the phase 6D desktop. Later
 phases cover USB storage, graphics, Workbench userspace, SMP/IOMMU and
 virtualisation. See
 [docs/roadmap.md](docs/roadmap.md) for the full sequence and the known

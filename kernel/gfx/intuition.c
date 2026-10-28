@@ -48,6 +48,13 @@ static int g_active;      /* window id or -1 */
 static int g_drag;        /* window id being dragged or -1 */
 static i32 g_drag_dx;
 static i32 g_drag_dy;
+/* Phase 6D: the resize-grip drag, with the size the window had at press. */
+static int g_resize;      /* window id being resized or -1 */
+static i32 g_resize_px;
+static i32 g_resize_py;
+static u32 g_resize_w;
+static u32 g_resize_h;
+static u64 g_resizes;
 static int g_reporting;
 static u64 g_drags;
 static u32 g_screen_w;
@@ -84,7 +91,24 @@ static void event_push(u32 type, int window, int index, u32 item, i32 x,
     e->item = item;
     e->x = x;
     e->y = y;
+    e->w = 0u;
+    e->h = 0u;
     g_event_count++;
+}
+
+/* Resize events are the only ones that carry a window size: push the event,
+   then patch the record that was just queued. */
+static void event_push_resize(int id, i32 x, i32 y, u32 w, u32 h)
+{
+    u32 idx;
+
+    event_push(INTUITION_EVENT_RESIZE, id, -1, 0u, x, y);
+    if (g_event_count == 0u) {
+        return;
+    }
+    idx = (g_event_head + g_event_count - 1u) % INTUITION_EVENT_QUEUE;
+    g_events[idx].w = w;
+    g_events[idx].h = h;
 }
 
 static struct window *win_find(int id)
@@ -219,6 +243,34 @@ static int close_hit(const struct window *w, i32 px, i32 py)
     return px >= cx && px < cx + 12 && py >= cy && py < cy + 12;
 }
 
+/* The resize grip: a 12x12 box in the inner bottom-right corner of every
+   window.  Dragging it changes the window size, never its origin. */
+static void resize_rect(const struct window *w, i32 *gx, i32 *gy, u32 *gw,
+                        u32 *gh)
+{
+    *gx = w->x + (i32)w->w - (i32)INTUITION_BORDER -
+          (i32)INTUITION_RESIZE_SIZE - 2;
+    *gy = w->y + (i32)w->h - (i32)INTUITION_BORDER -
+          (i32)INTUITION_RESIZE_SIZE - 2;
+    *gw = INTUITION_RESIZE_SIZE;
+    *gh = INTUITION_RESIZE_SIZE;
+}
+
+static int resize_hit(const struct window *w, i32 px, i32 py)
+{
+    i32 gx;
+    i32 gy;
+    u32 gw;
+    u32 gh;
+
+    if (!w) {
+        return 0;
+    }
+    resize_rect(w, &gx, &gy, &gw, &gh);
+    return px >= gx && px < gx + (i32)gw && py >= gy &&
+           py < gy + (i32)gh;
+}
+
 static void gadget_rect(const struct window *w, int index, i32 *gx, i32 *gy,
                         u32 *gw, u32 *gh)
 {
@@ -303,6 +355,22 @@ static void win_draw_gadgets(struct window *w)
     }
 }
 
+/* Draw the resize grip after the body so the painter cannot hide it. */
+static void win_draw_resize(struct window *w)
+{
+    i32 gx;
+    i32 gy;
+    u32 gw;
+    u32 gh;
+
+    if (w->w < INTUITION_MIN_WIDTH || w->h < INTUITION_MIN_HEIGHT) {
+        return;
+    }
+    resize_rect(w, &gx, &gy, &gw, &gh);
+    fb_frame_rect((u32)gx, (u32)gy, gw, gh, INTUITION_FRAME_RGB);
+    fb_fill_rect((u32)(gx + 6), (u32)(gy + 6), 3u, 3u, INTUITION_FRAME_RGB);
+}
+
 static void win_draw_body(struct window *w)
 {
     u32 bx = (u32)w->x + INTUITION_BORDER;
@@ -344,6 +412,7 @@ static void win_draw(struct window *w)
     fb_frame_rect((u32)w->x, (u32)w->y, w->w, w->h, INTUITION_FRAME_RGB);
     win_draw_title(w);
     win_draw_body(w);
+    win_draw_resize(w);
 }
 
 static void menu_draw_bar(void)
@@ -505,6 +574,12 @@ void intuition_init(void)
     g_drag = -1;
     g_drag_dx = 0;
     g_drag_dy = 0;
+    g_resize = -1;
+    g_resize_px = 0;
+    g_resize_py = 0;
+    g_resize_w = 0u;
+    g_resize_h = 0u;
+    g_resizes = 0u;
     g_reporting = 0;
     g_drags = 0;
     g_screen_w = 0;
@@ -751,6 +826,19 @@ static void press(i32 px, i32 py)
         intuition_close(id);
         return;
     }
+    if (resize_hit(w, px, py)) {
+        g_resize = id;
+        g_resize_px = px;
+        g_resize_py = py;
+        g_resize_w = w->w;
+        g_resize_h = w->h;
+        if (g_reporting) {
+            kprintf("CRUGOS: wb window %d resize start (%d, %d)\n", id,
+                    (int)px, (int)py);
+        }
+        intuition_redraw();
+        return;
+    }
     gi = gadget_hit(w, px, py);
     if (gi >= 0) {
         g_gadget_win = id;
@@ -779,6 +867,23 @@ static void press(i32 px, i32 py)
 
 static void release(i32 px, i32 py)
 {
+    if (g_resize > 0) {
+        struct window *w = win_find(g_resize);
+        int id = g_resize;
+
+        g_resize = -1;
+        if (w) {
+            if (g_reporting) {
+                kprintf("CRUGOS: wb window %d resized to %ux%u\n", id,
+                        (unsigned)w->w, (unsigned)w->h);
+            }
+            event_push_resize(id, w->x, w->y, w->w, w->h);
+            g_resizes++;
+            g_actions++;
+        }
+        intuition_redraw();
+        return;
+    }
     if (g_gadget_win > 0) {
         struct window *w = win_find(g_gadget_win);
         int gi = g_gadget;
@@ -827,6 +932,37 @@ static void motion(i32 px, i32 py, i32 dx, i32 dy)
                 kprintf("CRUGOS: wb menu '%s' item %d highlighted ('%s')\n",
                         m->title, row, m->items[row]);
             }
+            intuition_redraw();
+        }
+        return;
+    }
+    if (g_resize > 0) {
+        struct window *w = win_find(g_resize);
+        i32 nw;
+        i32 nh;
+        i32 max_w;
+        i32 max_h;
+
+        if (!w) {
+            g_resize = -1;
+            return;
+        }
+        nw = (i32)g_resize_w + (px - g_resize_px);
+        nh = (i32)g_resize_h + (py - g_resize_py);
+        max_w = (i32)g_screen_w - w->x;
+        max_h = (i32)g_screen_h - w->y;
+        if (nw < (i32)INTUITION_MIN_WIDTH) {
+            nw = (i32)INTUITION_MIN_WIDTH;
+        }
+        if (nh < (i32)INTUITION_MIN_HEIGHT) {
+            nh = (i32)INTUITION_MIN_HEIGHT;
+        }
+        if (nw > max_w || nh > max_h) {
+            return;
+        }
+        if ((u32)nw != w->w || (u32)nh != w->h) {
+            w->w = (u32)nw;
+            w->h = (u32)nh;
             intuition_redraw();
         }
         return;
@@ -1009,4 +1145,135 @@ int intuition_menu_open(void)
 int intuition_menu_hover(void)
 {
     return g_menu_hover;
+}
+
+/* Phase 6D keyboard navigation.  Tab cycles the focus through the stacking
+   order (raising the window it lands on), the arrow keys move the active
+   window by INTUITION_KEY_STEP pixels, and while a popup is open the arrows
+   highlight items, Enter selects and Escape dismisses.  The desktop does not
+   consume any other key: input.device has no modifier delivery yet, so
+   Shift-Tab and Alt shortcuts wait for a later phase. */
+void intuition_key_event(u8 key)
+{
+    struct window *w;
+    u32 i;
+    u32 pos = 0u;
+    int found = 0;
+
+    if (g_screen_w == 0u || g_screen_h == 0u) {
+        return;
+    }
+    if (g_menu_win > 0) {
+        struct window *mw = win_find(g_menu_win);
+        const struct intuition_menu *m;
+        int row;
+
+        if (!mw || g_menu_index < 0 || (u32)g_menu_index >= mw->menu_count) {
+            menu_close();
+            return;
+        }
+        m = &mw->menus[g_menu_index];
+        if (key == INPUT_KEY_DOWN || key == INPUT_KEY_UP) {
+            row = g_menu_hover;
+            if (key == INPUT_KEY_DOWN) {
+                if (row < 0) {
+                    row = 0;
+                } else if ((u32)(row + 1) < m->item_count) {
+                    row++;
+                }
+            } else if (row > 0) {
+                row--;
+            }
+            if (row != g_menu_hover) {
+                g_menu_hover = row;
+                if (row >= 0 && g_reporting) {
+                    kprintf("CRUGOS: wb menu '%s' item %d highlighted ('%s')\n",
+                            m->title, row, m->items[row]);
+                }
+                intuition_redraw();
+            }
+            return;
+        }
+        if (key == '\n' || key == '\r') {
+            menu_select(mw, (u32)(g_menu_hover > 0 ? g_menu_hover : 0));
+            return;
+        }
+        if (key == 0x1b) {
+            menu_close();
+            if (g_reporting) {
+                kprintf("CRUGOS: wb menu closed (escape)\n");
+            }
+            return;
+        }
+        return;
+    }
+    if (key == '\t') {
+        if (g_order_count == 0u) {
+            return;
+        }
+        for (i = 0; i < g_order_count; i++) {
+            if (g_order[i] == g_active) {
+                pos = i;
+                found = 1;
+            }
+        }
+        pos = found ? (pos + 1u) % g_order_count : 0u;
+        w = win_find(g_order[pos]);
+        if (!w) {
+            return;
+        }
+        win_raise(w->id);
+        g_active = w->id;
+        event_push(INTUITION_EVENT_ACTIVATE, w->id, -1, 0u, w->x, w->y);
+        if (g_reporting) {
+            kprintf("CRUGOS: wb window %d focused (Tab)\n", w->id);
+        }
+        intuition_redraw();
+        return;
+    }
+    if (key == INPUT_KEY_UP || key == INPUT_KEY_DOWN ||
+        key == INPUT_KEY_LEFT || key == INPUT_KEY_RIGHT) {
+        w = win_find(g_active);
+        if (!w) {
+            return;
+        }
+        if (key == INPUT_KEY_UP) {
+            w->y -= (i32)INTUITION_KEY_STEP;
+        } else if (key == INPUT_KEY_DOWN) {
+            w->y += (i32)INTUITION_KEY_STEP;
+        } else if (key == INPUT_KEY_LEFT) {
+            w->x -= (i32)INTUITION_KEY_STEP;
+        } else {
+            w->x += (i32)INTUITION_KEY_STEP;
+        }
+        win_clamp(w);
+        if (g_reporting) {
+            kprintf("CRUGOS: wb window %d key move to (%d, %d)\n", w->id,
+                    (int)w->x, (int)w->y);
+        }
+        intuition_redraw();
+        return;
+    }
+    if (key == '\n' || key == '\r') {
+        w = win_find(g_active);
+        if (!w || w->menu_count == 0u) {
+            return;
+        }
+        if (menu_open_at((i32)menu_strip_x(w, 0u) +
+                             (i32)(menu_strip_width(&w->menus[0]) / 2u),
+                         (i32)(INTUITION_MENU_BAR_HEIGHT / 2u))) {
+            g_menu_hover = 0;
+            if (g_reporting) {
+                kprintf("CRUGOS: wb menu '%s' item 0 highlighted ('%s')\n",
+                        w->menus[0].title, w->menus[0].items[0]);
+            }
+            intuition_redraw();
+        }
+        return;
+    }
+}
+
+u64 intuition_resize_count(void)
+{
+    return g_resizes;
 }

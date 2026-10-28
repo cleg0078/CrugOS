@@ -29,6 +29,7 @@
 #   make test-workbench  drag a window on the software-rendered desktop
 #   make test-workbench-menu  click menus and gadgets on the Workbench desktop
 #   make test-workbench-shell  type commands into the Workbench shell window
+#   make test-workbench-keys  resize a window and drive the desktop from the keyboard
 #   make crypt-disk  build the AES-256-XTS crypt test disk
 #   make test-crypt  boot from an encrypted root and verify the disk
 #   make test-crypt-recovery  unlock the encrypted root with the recovery keyslot
@@ -93,6 +94,7 @@ EXPECT_GFX ?= no
 EXPECT_WB ?= no
 EXPECT_MENU ?= no
 EXPECT_SHELL ?= no
+EXPECT_KEYS ?= no
 
 # QEMU / firmware options.
 MEMORY_MB ?= 512
@@ -131,6 +133,9 @@ WB_MENU_RUN_TIMEOUT_SEC ?= 240
 WB_SHELL_WAIT ?= 30
 WB_SHELL_CMDS ?= 4
 WB_SHELL_RUN_TIMEOUT_SEC ?= 240
+WB_KEYS_WAIT ?= 30
+WB_KEYS_ACTS ?= 2
+WB_KEYS_RUN_TIMEOUT_SEC ?= 240
 
 # Interactive demo (make demo): a real QEMU window with a USB keyboard and
 # mouse, the Workbench desktop and a hold so the window stays open.
@@ -266,7 +271,7 @@ HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
         test-crypt-prompt test-crypt-prompt-wrong test-crypt-prompt-timeout \
         test-crypt-keyboard test-crypt-keyboard-wrong crypt-run test-net test-tcp \
         test-net-dns test-usb-hotplug test-usb-mouse test-audio test-gfx \
-        test-workbench test-workbench-menu test-workbench-shell \
+        test-workbench test-workbench-menu test-workbench-shell test-workbench-keys \
         iso check-iso test-iso usb \
         crash-disk \
         check-disk size check-efi repro test-host preflight version options clean distclean help
@@ -601,6 +606,21 @@ test-workbench-shell: esp
 	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" no no no no no any no no no no no no no no no "$(EXPECT_SHELL)"
 	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 
+# Keys gate: the guest boots with wb.keys=1 and waits for actions; the driver
+# hotplugs a usb-mouse and drags the resize grip to shrink the Shell window,
+# then hotplugs a usb-kbd and uses Tab, the arrow keys, Enter and the menu
+# popup. A screendump proves the enlarged desktop area left by the resize.
+test-workbench-keys: EXPECT_KEYS := yes
+test-workbench-keys: esp
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(PYTHON) scripts/run-workbench-keys.py --repo $(CURDIR) \
+		--disk $(abspath $(DISK_IMG)) --serial-log $(abspath $(SERIAL_LOG)) \
+		--exit-code $(abspath $(QEMU_EXIT)) --acts $(WB_KEYS_ACTS) \
+		--wb-wait $(WB_KEYS_WAIT) --run-timeout $(WB_KEYS_RUN_TIMEOUT_SEC) \
+		--qemu-extra "$(WB_QEMU_EXTRA)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION "$(EXPECT_AVX2)" no no no no no any no no no no no no no no no no "$(EXPECT_KEYS)"
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
 test:
 	$(Q)rm -f $(DISK_IMG)
 	$(Q)$(MAKE) --no-print-directory run
@@ -819,6 +839,10 @@ options:
 	@printf '  %-16s %s\n' WB_SHELL_WAIT "$(WB_SHELL_WAIT) (seconds)"
 	@printf '  %-16s %s\n' WB_SHELL_CMDS "$(WB_SHELL_CMDS)"
 	@printf '  %-16s %s\n' WB_SHELL_RUN_TIMEOUT_SEC "$(WB_SHELL_RUN_TIMEOUT_SEC)"
+	@printf '  %-16s %s\n' EXPECT_KEYS "$(EXPECT_KEYS)"
+	@printf '  %-16s %s\n' WB_KEYS_WAIT "$(WB_KEYS_WAIT) (seconds)"
+	@printf '  %-16s %s\n' WB_KEYS_ACTS "$(WB_KEYS_ACTS)"
+	@printf '  %-16s %s\n' WB_KEYS_RUN_TIMEOUT_SEC "$(WB_KEYS_RUN_TIMEOUT_SEC)"
 	@printf '  %-16s %s\n' MEMORY_MB "$(MEMORY_MB)"
 	@printf '  %-16s %s\n' SMP "$(SMP)"
 	@printf '  %-16s %s\n' TIMEOUT_SEC "$(TIMEOUT_SEC)"

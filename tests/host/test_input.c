@@ -90,11 +90,12 @@ void test_input_functions(void)
     expect_char(0x1B);
     input_scancode(0x9D);
 
-    /* E0-prefixed keys are ignored (or update right-hand modifiers). */
+    /* E0-prefixed arrows are decoded (phase 6D) and their break codes are
+       ignored; E0 modifier presses still apply to the next key. */
     input_init();
     input_scancode(0xE0);
     input_scancode(0x48);
-    expect_empty();
+    expect_char(INPUT_KEY_UP);
     input_scancode(0xE0);
     input_scancode(0xC8);
     expect_empty();
@@ -108,6 +109,27 @@ void test_input_functions(void)
     input_scancode(0x9D);
     input_scancode(0x2E);
     expect_char('c');
+
+    /* Phase 6D: the remaining E0 arrows become INPUT_KEY_* bytes, and a
+       held ctrl (E0 1D) does not swallow the following E0 arrow. */
+    input_init();
+    input_scancode(0xE0);
+    input_scancode(0x50);
+    expect_char(INPUT_KEY_DOWN);
+    input_scancode(0xE0);
+    input_scancode(0x4B);
+    expect_char(INPUT_KEY_LEFT);
+    input_scancode(0xE0);
+    input_scancode(0x4D);
+    expect_char(INPUT_KEY_RIGHT);
+    input_scancode(0xE0);
+    input_scancode(0x9D);   /* right ctrl release */
+    input_scancode(0xE0);
+    input_scancode(0x1D);   /* right ctrl press */
+    input_scancode(0xE0);
+    input_scancode(0x48);   /* ctrl+up is still an arrow */
+    expect_char(INPUT_KEY_UP);
+    expect_empty();
 
     /* ACK/echo, release-only and unmapped codes produce nothing. */
     input_init();

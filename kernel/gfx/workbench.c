@@ -33,6 +33,9 @@ static int g_menu_mode;
 static u32 g_want_actions;
 static u32 g_actions_seen;
 
+/* Phase 6D: keyboard navigation (Tab focus, arrow moves, menu keys). */
+static int g_keys_mode;
+
 /* Phase 6C: the Shell window hosts the live shell. */
 static int g_shell_mode;
 static u32 g_want_commands;
@@ -125,6 +128,13 @@ static void wb_cmdline_token(const char *tok, usize len)
     if (used >= 0) {
         if (wb_parse_u32(tok + used, len - (usize)used, &value) == 0) {
             g_want_actions = value > WB_ACTS_MAX ? WB_ACTS_MAX : value;
+        }
+        return;
+    }
+    used = wb_prefix(tok, len, "wb.keys=");
+    if (used >= 0) {
+        if (wb_parse_u32(tok + used, len - (usize)used, &value) == 0) {
+            g_keys_mode = value ? 1 : 0;
         }
         return;
     }
@@ -221,6 +231,11 @@ static void wb_drain_events(void)
             g_actions_seen++;
             kprintf("CRUGOS: wb action %u close window %d\n",
                     (unsigned)g_actions_seen, event.window);
+        } else if (event.type == INTUITION_EVENT_RESIZE) {
+            g_actions_seen++;
+            kprintf("CRUGOS: wb action %u resize window %d (%ux%u)\n",
+                    (unsigned)g_actions_seen, event.window, (unsigned)event.w,
+                    (unsigned)event.h);
         }
     }
 }
@@ -275,6 +290,24 @@ static int wb_shell_pump(void)
     return executed;
 }
 
+/* Phase 6D: drain input.device and hand the decoded keys to intuition.  The
+   shell window owns the keyboard when wb.shell=1, so keys mode leaves them
+   for wb_shell_pump() instead. */
+static void wb_key_pump(void)
+{
+    int ch;
+
+    if (!g_keys_mode || g_shell_mode || !g_ready) {
+        return;
+    }
+    while ((ch = input_try_getc()) >= 0) {
+        if (ch >= (int)INPUT_KEY_UP || ch == '\t' || ch == '\n' ||
+            ch == '\r' || ch == 0x1b) {
+            intuition_key_event((u8)ch);
+        }
+    }
+}
+
 int wb_init(void)
 {
     int top;
@@ -289,12 +322,15 @@ int wb_init(void)
         kprintf("CRUGOS: wb framebuffer absent\n");
         return -1;
     }
-    g_reporting = (g_want_drags > 0u || g_menu_mode || g_shell_mode) ? 1 : 0;
+    g_reporting = (g_want_drags > 0u || g_menu_mode || g_keys_mode ||
+                   g_shell_mode)
+                      ? 1
+                      : 0;
     fb_set_text_enabled(0);
     intuition_init();
     intuition_set_reporting(g_reporting);
     top = intuition_open(80, 90, 360, 220, "Workbench",
-                         "CrugOS Workbench\nphase 6c\nsoftware rendered");
+                         "CrugOS Workbench\nphase 6d\nsoftware rendered");
     shell_id = intuition_open(480, 300, 320, 200, "Shell", "4.OS\ncrugos>");
     intuition_set_menus(top, wb_menus_top, 2u);
     intuition_add_gadget(top, 12, 60, 96, 22, "Run");
@@ -321,6 +357,10 @@ int wb_init(void)
                 g_shell_window, (unsigned)(TG_COLS - 1u),
                 (unsigned)TG_ROWS_VISIBLE);
     }
+    if (g_keys_mode && !g_shell_mode) {
+        kprintf("CRUGOS: wb keys ready (window %d active)\n",
+                intuition_active());
+    }
     return 0;
 }
 
@@ -330,6 +370,7 @@ void wb_poll(void)
         return;
     }
     gfx_pointer_poll();
+    wb_key_pump();
     wb_shell_pump();
 }
 
@@ -353,7 +394,9 @@ int wb_selftest(void)
         return 1;
     }
     want = g_want_drags;
-    want_actions = g_menu_mode ? (g_want_actions ? g_want_actions : 1u) : 0u;
+    want_actions = (g_menu_mode || g_keys_mode)
+                       ? (g_want_actions ? g_want_actions : 1u)
+                       : 0u;
     want_commands = g_shell_mode ? (g_want_commands ? g_want_commands : 1u) : 0u;
     deadline = timer_monotonic_ns() +
                (u64)(g_wait_seconds ? g_wait_seconds : 5u) * 1000000000ull;
@@ -365,6 +408,7 @@ int wb_selftest(void)
            then feeds whatever the keyboard queued into the Shell window. */
         input_poll();
         wb_drain_events();
+        wb_key_pump();
         wb_shell_pump();
         if (timer_monotonic_ns() >= deadline) {
             if (intuition_drag_count() < (u64)want) {
@@ -382,6 +426,7 @@ int wb_selftest(void)
         cpu_wait_for_irq();
     }
     wb_drain_events();
+    wb_key_pump();
     wb_shell_pump();
     kprintf("CRUGOS: wb selftest ok (%u drag(s), %u action(s))\n",
             (unsigned)intuition_drag_count(), (unsigned)g_actions_seen);
@@ -419,6 +464,7 @@ void wb_hold(void)
     while (timer_monotonic_ns() < deadline) {
         input_poll();
         wb_drain_events();
+        wb_key_pump();
         wb_shell_pump();
         cpu_wait_for_irq();
     }

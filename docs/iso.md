@@ -135,7 +135,7 @@ ok: iso hybrid UEFI boot (volume CRUGOS, ESP image at LBA 34, 25165824 bytes,
 
 ## Booting the image: `make test-iso`
 
-`make test-iso` is the gate (the 36th). It `dd`s the ISO onto
+`make test-iso` is the ISO gate. It `dd`s the ISO onto
 `build/x86_64/usb-stick.img` and boots that file twice, headless, with no disk
 image and no network:
 
@@ -157,7 +157,7 @@ marker, exit status 33) still has to hold. The gate prints
 ok: iso hybrid UEFI boot (volume CRUGOS, ... fsck clean)
 run-qemu: booting build/x86_64/usb-stick.img ... usb build/x86_64/usb-stick.img, net none
 run-qemu: guest exited successfully (isa-debug-exit 0x10 -> status 33)
-ok: boot markers found, version 0.25.0 ... storage none QEMU exit status 33
+ok: boot markers found, version 0.26.0 ... storage none QEMU exit status 33
   boot   : pmm=28394 us cpu=390 us vm=635 us traps=315 us timer=65331 us heap=64 us storage=111756 us sched=591 us syscall=132 us total=207612 us
   OK    iso boots from a USB stick (exit 33)
   OK    iso boots from a CD-ROM (exit 33)
@@ -173,7 +173,7 @@ CRUGOS: usb device 46f4:0001 on port 1 (speed 4)
 CRUGOS: usb device class 8 on port 1 (unsupported)
 CRUGOS: storage skipped (storage=none)
 CRUGOS: selftest ok
-CRUGOS: phase 6c boot ok
+CRUGOS: phase 6d boot ok
 ```
 
 Class 8 is mass storage: the firmware read the FAT image, the kernel's xHCI
