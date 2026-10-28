@@ -1,4 +1,9 @@
-/* CrugOS user program loader: ELF64 -> ring 3 thread (phase U1). */
+/* CrugOS user program loader: ELF64 -> ring 3 thread (phase U1/U2).
+ *
+ * Every program gets its own vm_space before a single segment is mapped, so a
+ * segment that lands in the window is private to that program. Segments are
+ * copied through the kernel identity map (pmm_phys_to_virt of the translated
+ * page), never through the user mapping, so SMAP cannot trip the loader. */
 #include <crug/exec.h>
 #include <crug/vm.h>
 #include <crug/mm.h>
@@ -14,8 +19,7 @@
 #define PAGE_MASK (CRUG_PAGE_SIZE - 1ull)
 
 typedef struct exec_ctx {
-    thread_user_map maps[THREAD_USER_MAP_MAX];
-    u32 count;
+    vm_space *space;
     const char *error;
 } exec_ctx;
 
@@ -28,8 +32,8 @@ static int reserve_segment(exec_ctx *ctx, u64 va, u64 size, int executable)
        program without data), so it needs no reservation. */
     if (size == 0)
         return 0;
-    if (ctx->count >= THREAD_USER_MAP_MAX) {
-        ctx->error = "too many segments";
+    if (!ctx->space) {
+        ctx->error = "no address space";
         return -1;
     }
     if (!harden_user_segment_ok(va, size)) {
@@ -40,28 +44,25 @@ static int reserve_segment(exec_ctx *ctx, u64 va, u64 size, int executable)
     flags = VM_PRESENT | VM_USER;
     if (!executable)
         flags |= VM_WRITE | VM_NX;
-    if (vm_user_map_pages(va, pages, flags) != 0) {
+    if (vm_space_map_user_pages(ctx->space, va, pages, flags) != 0) {
         ctx->error = "cannot map segment";
         return -1;
     }
-    ctx->maps[ctx->count].va = va;
-    ctx->maps[ctx->count].pages = (u32)pages;
-    ctx->maps[ctx->count].pad = 0;
-    ctx->count++;
     return 0;
 }
 
-/* Segments are copied through the kernel's identity map, never through the
-   user page itself, so SMAP can never trip on a loader write. */
-static int write_segment(u64 dst, const void *src, u64 n, int zero)
+/* Copy into (or zero) a freshly mapped user range, page chunk by page chunk,
+   through the physical frame the program's own page tables point at. */
+static int write_segment(exec_ctx *ctx, u64 dst, const void *src, u64 n, int zero)
 {
     while (n != 0) {
         u64 off = dst & PAGE_MASK;
         u64 chunk = CRUG_PAGE_SIZE - off;
-        u64 pa = vm_translate(dst);
+        u64 pa;
 
         if (chunk > n)
             chunk = n;
+        pa = vm_space_translate(ctx->space, dst);
         if (pa == 0)
             return -1;
         if (zero)
@@ -85,7 +86,7 @@ static int ctx_copy(void *opaque, u64 dst, const void *src, u64 n)
 {
     exec_ctx *ctx = (exec_ctx *)opaque;
 
-    if (write_segment(dst, src, n, 0) != 0) {
+    if (write_segment(ctx, dst, src, n, 0) != 0) {
         ctx->error = "cannot copy a segment";
         return -1;
     }
@@ -96,7 +97,7 @@ static int ctx_zero(void *opaque, u64 dst, u64 n)
 {
     exec_ctx *ctx = (exec_ctx *)opaque;
 
-    if (write_segment(dst, 0, n, 1) != 0) {
+    if (write_segment(ctx, dst, 0, n, 1) != 0) {
         ctx->error = "cannot zero a segment";
         return -1;
     }
@@ -108,13 +109,14 @@ static void ctx_err(void *opaque, const char *msg)
     ((exec_ctx *)opaque)->error = msg;
 }
 
+/* Release every page of the new space, its page tables and the struct. */
 static void exec_unwind(exec_ctx *ctx)
 {
-    u32 i;
-
-    for (i = 0; i < ctx->count; i++)
-        vm_user_unmap_pages(ctx->maps[i].va, (u64)ctx->maps[i].pages);
-    ctx->count = 0;
+    if (!ctx->space)
+        return;
+    vm_space_destroy(ctx->space);
+    kfree(ctx->space);
+    ctx->space = 0;
 }
 
 thread *elf_exec_run(const char *path, elf_exec_result *out)
@@ -130,14 +132,26 @@ thread *elf_exec_run(const char *path, elf_exec_result *out)
 
     if (!fs || !path || !out)
         return 0;
-    blob = (u8 *)kmalloc(ELF_MAX_BYTES);
-    if (!blob)
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.space = (vm_space *)kmalloc(sizeof(vm_space));
+    if (!ctx.space)
         return 0;
-    if (ext4_read_file(fs, path, blob, ELF_MAX_BYTES, &size) != 0 || size == 0) {
-        kfree(blob);
+    if (vm_space_create(ctx.space) != 0) {
+        kfree(ctx.space);
+        ctx.space = 0;
+        kprintf("CRUGOS: exec %s failed (no address space)\n", path);
         return 0;
     }
-    memset(&ctx, 0, sizeof(ctx));
+    blob = (u8 *)kmalloc(ELF_MAX_BYTES);
+    if (!blob) {
+        exec_unwind(&ctx);
+        return 0;
+    }
+    if (ext4_read_file(fs, path, blob, ELF_MAX_BYTES, &size) != 0 || size == 0) {
+        kfree(blob);
+        exec_unwind(&ctx);
+        return 0;
+    }
     memset(&image, 0, sizeof(image));
     ops.ctx = &ctx;
     ops.reserve = ctx_reserve;
@@ -160,8 +174,8 @@ thread *elf_exec_run(const char *path, elf_exec_result *out)
         exec_unwind(&ctx);
         return 0;
     }
-    t = thread_create_user(path, image.entry, USER_STACK_TOP - 8ull, ctx.maps,
-                           ctx.count, SCHED_NORMAL);
+    t = thread_create_user(path, image.entry, USER_STACK_TOP - 8ull,
+                           ctx.space, SCHED_NORMAL);
     if (!t) {
         kprintf("CRUGOS: exec %s failed (cannot create a user thread)\n", path);
         exec_unwind(&ctx);

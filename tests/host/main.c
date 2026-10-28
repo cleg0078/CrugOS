@@ -36,6 +36,8 @@ void test_heap_functions(void);
 void test_trap_functions(void);
 void test_uaccess_functions(void);
 void test_exec_functions(void);
+void test_vm_space_functions(void);
+void test_vm_space_oom(void);
 
 int main(void)
 {
@@ -66,6 +68,8 @@ int main(void)
     RUN(test_trap_functions);
     RUN(test_uaccess_functions);
     RUN(test_exec_functions);
+    RUN(test_vm_space_functions);
+    RUN(test_vm_space_oom);
     printf("%d checks, %d failure(s)\n", tests_run, tests_failed);
     return tests_failed == 0 ? 0 : 1;
 }

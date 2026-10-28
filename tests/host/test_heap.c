@@ -92,6 +92,21 @@ void pmm_free_pages(u64 pa, u64 count)
     fake_free(pa, count);
 }
 
+/* Exposed for tests/host/test_vm_space.c: the number of arena pages still
+ * free lets an address-space test assert that create/map/destroy do not leak
+ * frames or table pages. */
+u64 host_pmm_free_pages_count(void)
+{
+    u64 free_pages = 0;
+    u64 i;
+
+    for (i = 0; i < FAKE_PAGES; i++) {
+        if (!fake_bit((u32)i))
+            free_pages++;
+    }
+    return free_pages;
+}
+
 static void *page_of(const void *p)
 {
     return (void *)(uintptr)((u64)(uintptr)p & CRUG_PAGE_MASK);

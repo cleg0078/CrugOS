@@ -103,11 +103,12 @@ pointer reach kernel memory by arithmetic alone. `harden_user_segment_ok()` and
 point, so the loader refuses a module that names a kernel address.
 
 The window check answers "is this allowed at all"; it does not answer "is this
-mapped". `kernel/mm/uaccess.c` therefore follows the check with a write to the
-current address space: every page in the range must resolve through
-`vm_translate()`, and an in-window but unmapped page returns `UACCESS_EFAULT`
-(`-14`) instead of taking a kernel `#PF` while the kernel is dereferencing a
-caller's pointer. Only the actual copy is bracketed by `stac`/`clac`, and only
+mapped". `kernel/mm/uaccess.c` therefore follows the check with a walk of the
+active address space: `vm_translate()` reads the root `vm_space_activate()` last
+installed in `kernel/mm/vm.c`'s `g_root`, so the walk always sees the PML4 of the
+thread being served. Every page in the range must resolve, and an in-window but
+unmapped page returns `UACCESS_EFAULT` (`-14`) instead of taking a kernel `#PF`
+while the kernel is dereferencing a caller's pointer. Only the actual copy is bracketed by `stac`/`clac`, and only
 when CPUID exposes SMAP, so the window around the access is as small as the
 instruction allows. `uaccess_user_read()`, `uaccess_user_write()` and
 `uaccess_user_str()` are the only copies the syscall layer uses for CPL3
@@ -135,7 +136,7 @@ must print.
 
 | Case | Patch | Required marker | Exit |
 | --- | --- | --- | --- |
-| `control` | none | `CRUGOS: phase u1 boot ok` (any phase id matches), `CRUGOS: ext4 ready`, `CRUGOS: storage ready`, `CRUGOS: writable storage ok`, `CRUGOS: selftest ok` | 33 |
+| `control` | none | `CRUGOS: phase u2 boot ok` (any phase id matches), `CRUGOS: ext4 ready`, `CRUGOS: storage ready`, `CRUGOS: writable storage ok`, `CRUGOS: selftest ok` | 33 |
 | `geometry-bpg` | superblock `+0x20` (`s_blocks_per_group`) = 100000 | `CRUGOS: ext4 mount rejected (geometry)` | 35 |
 | `geometry-ipg` | superblock `+0x28` (`s_inodes_per_group`) = 100000 | `CRUGOS: ext4 mount rejected (geometry)` | 35 |
 | `root-extent` | root inode `eh_max` (`inode + 44`) = 5, inode checksum recomputed | `CRUGOS: ext4 mount rejected (root extent)` | 35 |
@@ -295,7 +296,9 @@ ok: hardening pass 1 rejected 6 crafted image(s) (control boot exit 33)
 - Several Mediums became live when ring 3 landed: a bad pointer in the syscall
   ABI now comes from a `DPL3` process, not only from the in-kernel self-test.
   Phase U1 answers the pointer half with the user copy boundary above and the
-  fault half with the per-thread kill path, but the policy around the
-  validators still assumes one address space: with a shared kernel CR3 a user
-  program can read another program's pages once two live user threads are
-  allowed, which U1 avoids only by refusing the second one with `-EBUSY`.
+  fault half with the per-thread kill path. Phase U2 gives every ring-3 thread
+  its own PML4, so two programs run at once with private windows and the same
+  virtual address resolving to different frames. What remains is that slot 0
+  of every space is still the shared kernel identity map: this is isolation
+  between user programs, not kernel-address isolation, and there is no
+  per-process resource accounting.

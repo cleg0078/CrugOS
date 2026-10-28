@@ -41,7 +41,7 @@ REQUIRED_MARKERS = (
     "CRUGOS: selftest ok",
     "CRUGOS: nvme ready",
     "CRUGOS: ahci ready",
-    "CRUGOS: phase u1 boot ok",
+    "CRUGOS: phase u2 boot ok",
 )
 # A rejected unlock stops before scheduling, storage mounting and self-tests.
 WRONG_CRYPT_MARKERS = (
@@ -113,7 +113,7 @@ def main() -> int:
             argv.append(arg)
     sys.argv = [sys.argv[0]] + argv
 
-    if len(sys.argv) not in tuple(range(3, 29)):
+    if len(sys.argv) not in tuple(range(3, 30)):
         print("usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE "
               "[VERSION_FILE [EXPECT_AVX2 [EXPECT_RAID [EXPECT_NVME "
               "[EXPECT_REBUILD [EXPECT_AHCI [EXPECT_CRYPT [EXPECT_AES "
@@ -121,7 +121,7 @@ def main() -> int:
               "[EXPECT_MOUSE [EXPECT_AUDIO [EXPECT_GFX [EXPECT_WB "
               "[EXPECT_MENU [EXPECT_SHELL [EXPECT_KEYS [EXPECT_DESK "
               "[EXPECT_ICONS [EXPECT_DRAWER [EXPECT_SELECT [EXPECT_HEAP "
-              "[EXPECT_USER]]]]]]]]]]]]]]]]]]]]]]]] "
+              "[EXPECT_USER [EXPECT_USERS]]]]]]]]]]]]]]]]]]]]]]]]] "
               "[--storage=none]",
               file=sys.stderr)
         return 2
@@ -153,6 +153,7 @@ def main() -> int:
     expect_select = sys.argv[25] if len(sys.argv) >= 26 else "no"
     expect_heap = sys.argv[26] if len(sys.argv) >= 27 else "no"
     expect_user = sys.argv[27] if len(sys.argv) >= 28 else "no"
+    expect_users = sys.argv[28] if len(sys.argv) >= 29 else "no"
 
     if not serial_path.exists():
         return fail(f"missing serial log {serial_path}", "")
@@ -203,6 +204,8 @@ def main() -> int:
         return fail(f"invalid EXPECT_HEAP {expect_heap!r}", text)
     if expect_user not in ("no", "yes"):
         return fail(f"invalid EXPECT_USER {expect_user!r}", text)
+    if expect_users not in ("no", "yes"):
+        return fail(f"invalid EXPECT_USERS {expect_users!r}", text)
 
     required = list(REQUIRED_MARKERS)
     if storage_mode == "none":
@@ -589,6 +592,28 @@ def main() -> int:
     elif "CRUGOS: user selftest ok" in text:
         return fail("unexpected userspace selftest without EXPECT_USER=yes", text)
 
+    if expect_users == "yes":
+        for marker in (
+            "CRUGOS: user isolation start",
+            "CRUGOS: user isolation ok",
+        ):
+            if marker not in text:
+                return fail(f"missing serial marker: {marker!r}", text)
+        if not re.search(r"CRUGOS: user isolation frames 0x[0-9a-f]+ vs 0x[0-9a-f]+ "
+                         r"at 0x8000030000", text):
+            return fail("expected the isolation test to translate the shared word "
+                        "in both spaces", text)
+        if "CRUGOS: user isolation failed" in text:
+            return fail("the isolation test reported a shared frame or a mismatch", text)
+        if not re.search(r"CRUGOS: user isolation ok \(2 program\(s\), 0 mismatch\(es\)\)",
+                         text):
+            return fail("expected the isolation test to report two programs "
+                        "and no mismatch", text)
+        if not re.search(r"CRUGOS: iso tid \d+ word 0x[0-9a-f]+ ok", text):
+            return fail("expected the isolation programs to print their tag", text)
+    elif "CRUGOS: user isolation start" in text:
+        return fail("unexpected isolation selftest without EXPECT_USERS=yes", text)
+
     if expect_rebuild == "no" and "CRUGOS: raid rebuilt" in text:
         return fail("unexpected RAID member rebuild during boot", text)
     if expect_rebuild != "no":
@@ -625,6 +650,7 @@ def main() -> int:
           "shell", expect_shell, "keys", expect_keys, "desk", expect_desk,
           "icons", expect_icons, "drawer", expect_drawer,
           "select", expect_select, "heap", expect_heap, "user", expect_user,
+          "isolated", expect_users,
           "storage", storage_mode,
           "QEMU exit status", status)
     for line in boot_report:

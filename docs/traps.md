@@ -107,7 +107,7 @@ panic. The excerpt keeps only the policy-relevant lines; the report's
 CRUGOS: user fault writing above the window
 CRUGOS: trap report page fault vector=14 error=0x6 ist=0 from=user
 CRUGOS: trap fault present=no write=yes user=yes reserved=no instruction=no cr2=0x10000000000
-CRUGOS: user fault page fault at rip=0x0000008000010056 err=0x0000000000000006 tid 10
+CRUGOS: user fault page fault at rip=0x0000008000010054 err=0x0000000000000006 tid 10
 CRUGOS: user fault killed tid 10 code -14
 ```
 
@@ -329,9 +329,14 @@ no-zero-padding rule and a cap too small for the full text.
 
 ## What is not covered
 
-- One user thread at a time: a second `thread_create_user()` returns `-EBUSY`,
-  and every user program shares the kernel CR3, so a fault can be charged to a
-  thread but two user programs cannot be isolated from each other yet.
+- The window is private per thread but slot 0 is shared: phase U2 gives every
+  ring-3 thread its own PML4, so two user programs run at once and the same
+  virtual address maps to different frames, but the kernel identity map is
+  common to every space. That is isolation between user programs, not against
+  the kernel.
+- Window page tables are created once per space and released only at destroy:
+  `vm_space_unmap_user_pages()` frees the leaf frame, not the intermediate PTs
+  and PD, so a program that maps and unmaps in a loop keeps its tables.
 - A user-frame `#DF`, `#NMI` or `#MC` still panics. Those vectors are fatal in
   both rings by design, and there is no policy for abandoning a whole address
   space, so the machine still stops rather than killing the thread.

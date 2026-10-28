@@ -1,6 +1,6 @@
 # Roadmap
 
-The specification defines 48 phases/gates. Phase 0 established the smallest
+The specification defines 49 phases/gates. Phase 0 established the smallest
 end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
 phase 1 makes the kernel own physical memory, page tables, exceptions and
 timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
@@ -966,13 +966,13 @@ Phase H2 closed the heap free-list and magic work (report items F7/F8) with
 address-keyed page cookies, validated slab headers and a read-only integrity
 checker. Phase H3 then replaced the per-vector panic one-liner with a trap policy
 and put the four stack-destroying vectors on IST stacks, phase H4 took the
-mount path to the host with a seeded image fuzzer, and phase U1 crossed into
-ring 3, so a DPL3 frame now reaches the syscall and trap paths directly. What
-remains is a per-process address space (every program shares the kernel CR3, so
-two user programs are not isolated from each other yet), runtime `fork`/`exec`
-with `argv` and an environment, weak EFI entropy, and the AHCI timeout bounce
-reuse. Those are the prerequisites for running more than one program at a time,
-and several of the remaining Mediums stay reachable until then.
+mount path to the host with a seeded image fuzzer, phase U1 crossed into ring 3,
+and phase U2 gave every ring-3 thread its own PML4, so two programs now run at
+the same time without sharing a window. What remains is runtime `fork`/`exec`
+with `argv` and an environment (the kernel still starts one program per thread),
+weak EFI entropy, and the AHCI timeout bounce reuse. Those are the prerequisites
+for a shell that starts programs on its own, and several of the remaining
+Mediums stay reachable until then.
 
 ## Phase H2 - hardened kernel heap (done)
 
@@ -1223,6 +1223,69 @@ and several of the remaining Mediums stay reachable until then.
 - docs: `docs/userspace.md` plus README, roadmap, versioning, build, boot, traps,
   hardening, iso, fuzzing and workbench.
 - All 48 gates pass at `v0.35.0`.
+
+## Phase U2 - per-process address space (done)
+
+- Phase U2 replaces U1's single shared address space with one PML4 per ring-3
+  thread: a `vm_space` owns the window, slot 0 is inherited from the kernel, and
+  the kernel switches CR3 together with the thread. The phase adds the isolation
+  program and one gate; the kernel image and the `BootInfo` v1 handoff are
+  unchanged.
+- `include/crug/vm.h` declares `struct vm_space { u64 *pml4; u64 phys; u32
+  user_pages; u32 pad; }` and the API: `vm_space_set_kernel_root`,
+  `vm_space_create`, `vm_space_destroy`, `vm_space_map_user_pages`,
+  `vm_space_unmap_user_pages`, `vm_space_translate`, `vm_space_activate` and
+  `vm_kernel_root_phys`.
+- `kernel/mm/vm_space.c` is a separate, host-testable unit: it needs only
+  `pmm_alloc_page`/`pmm_free_page` and the identity translations, never CR3 or
+  the LAPIC. The CR3 write lives in `kernel/mm/vm.c`, where
+  `vm_space_activate` is the only writer and skips the write when the root did
+  not change.
+- Every space copies slot 0 from the kernel root, so the shared supervisor
+  identity map (kernel image, stacks, MMIO) is present in each; slot 1 is the
+  512 GiB to 1 TiB window. Mapping upgrades every intermediate entry to
+  `PRESENT|WRITE|USER`, clears `VM_GLOBAL` on the leaf, forces `VM_USER`, takes
+  W^X from the caller's flags (`VM_WRITE|VM_NX` on data pages, neither on text)
+  and validates page alignment, the window and an absent leaf before touching
+  the tables.
+- A failed mapping rolls back exactly the pages that call had mapped;
+  `vm_space_destroy` walks slot 1 and frees every leaf frame, every PT, every
+  PD, the PDPT and the root page.
+- `kernel/mm/vm.c` keeps the active root in a static `g_root` that `pte_for`
+  and `vm_translate` follow, so uaccess and every kernel-side translation see
+  the running space.
+- `struct thread` carries `vm_space *space` and loses the U1
+  `thread_user_map[8]` array; `schedule()` installs the kernel stack top and
+  then calls `vm_space_activate(next->space)`, `thread_destroy()` destroys the
+  space, and `thread_create_user(name, entry, user_rsp, vm_space *space,
+  sched_class)` no longer returns `-EBUSY`: the U1 one-user-thread rule is gone.
+- `kernel/exec/elf_exec.c` owns one space per exec: segment reservation and the
+  four-page stack with its unmapped guard go into that space, and the space is
+  handed to the new thread. Landing U2 also changed `vm_init` to publish the
+  root immediately after allocating it, because the section mapper walks the
+  root and the old order page-faulted before the IDT existed.
+- `user/iso.c` and `user/iso.ld` pin a writable page at
+  `0x0000008000030000`; each instance writes `0x15500000 | (tid << 8)`, yields
+  300 times and re-checks its own word. `kernel/core/user_test.c` under
+  `user.test=2` starts two instances, prints
+  `CRUGOS: user isolation frames 0x28000 vs 0x38000 at 0x8000030000` to prove
+  the same virtual address maps to different frames, then joins both and counts
+  mismatches.
+- `make test-user2` is the 49th gate: it rebuilds the disk with all four
+  programs, boots with `user.test=2` under `USER2_RUN_TIMEOUT_SEC` (240 s) and
+  passes boot-check the new final `EXPECT_USERS` argument (the argument guard is
+  now `tuple(range(3, 30))`), so the boot line reports `user yes isolated yes`.
+  `make test-user` (gate 48) still runs the three U1 programs under
+  `user.test=1`.
+- `tests/host/test_vm_space.c` covers slot-0 inheritance, the window validation
+  table, raw leaf flags, distinct frames for the same VA, partial rollback, full
+  reclaim and an allocation-failure path that asks for the whole 512 GiB window;
+  `host_pmm_free_pages_count()` in `test_heap.c` makes a leak visible.
+  `make test-host` reports 3554 checks, the kernel is 263056 B (256 KiB) on disk
+  and 832574 B (813 KiB) loaded.
+- docs: `docs/userspace.md` (reworked for U2) plus README, roadmap, versioning,
+  build, boot, traps, hardening and iso.
+- All 49 gates pass at `v0.36.0`.
 
 ## Bootable media - hybrid UEFI ISO (done, `v0.23.1`)
 

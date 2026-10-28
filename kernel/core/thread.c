@@ -30,9 +30,6 @@ struct scheduler {
 
 static struct scheduler g_sched;
 static thread g_boot_thread;
-/* Only one ring-3 thread exists at a time: the kernel still runs on a single
-   address space and a single user window (phase U1 limit). */
-static thread *g_user_thread;
 
 extern void thread_user_start(void);
 
@@ -113,6 +110,9 @@ static void schedule(void)
     cpu_set_kernel_stack(next->stack_base
                              ? next->stack_base + next->stack_size
                              : cpu_boot_stack_top());
+    /* Switch CR3 before the incoming thread touches its own memory. Kernel
+       threads carry space == 0 and put the kernel root back in place. */
+    vm_space_activate(next->space);
     g_sched.switches++;
     cpu_switch(&prev->rsp, &next->rsp);
 }
@@ -298,15 +298,13 @@ static void thread_destroy(thread *t)
         return;
     if (t == g_sched.current)
         panic("sched: cannot destroy current thread");
-    if (t->user_map_count) {
-        u32 i;
-
-        for (i = 0; i < t->user_map_count; i++)
-            vm_user_unmap_pages(t->user_map[i].va, t->user_map[i].pages);
-        t->user_map_count = 0;
+    if (t->space) {
+        /* The thread is already off the CPU, so its root is not the active one
+           and its tables can be walked and released page by page. */
+        vm_space_destroy(t->space);
+        kfree(t->space);
+        t->space = 0;
     }
-    if (t == g_user_thread)
-        g_user_thread = 0;
     if (t->stack_base) {
         /* The identity map must cover every page the PMM can hand out, so
            restore the guard page before returning the stack to the PMM. */
@@ -386,20 +384,14 @@ static void thread_user_never(void *arg)
 }
 
 thread *thread_create_user(const char *name, u64 entry, u64 user_rsp,
-                           const thread_user_map *maps, u32 map_count,
-                           sched_class cls)
+                           vm_space *space, sched_class cls)
 {
     thread *t;
     u64 *sp;
-    u32 i;
 
-    if (map_count > THREAD_USER_MAP_MAX || (map_count != 0 && !maps))
+    if (!space || !space->pml4)
         return 0;
-    if (!harden_user_entry_ok(entry))
-        return 0;
-    if (!harden_user_entry_ok(user_rsp))
-        return 0;
-    if (g_user_thread && g_user_thread->state != THREAD_ZOMBIE)
+    if (!harden_user_entry_ok(entry) || !harden_user_entry_ok(user_rsp))
         return 0;
     t = thread_create(name, thread_user_never, 0, cls);
     if (!t)
@@ -407,13 +399,10 @@ thread *thread_create_user(const char *name, u64 entry, u64 user_rsp,
     t->flags |= THREAD_FLAG_USER;
     t->user_rip = entry;
     t->user_rsp = user_rsp;
-    for (i = 0; i < map_count; i++)
-        t->user_map[i] = maps[i];
-    t->user_map_count = map_count;
+    t->space = space;
     sp = (u64 *)(uintptr)(t->stack_base + t->stack_size - 72ull);
     sp[7] = (u64)(uintptr)thread_user_start;
     t->rsp = (u64)(uintptr)sp;
-    g_user_thread = t;
     return t;
 }
 

@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase U1 ring 3 (`v0.35.0`)
+## Status: phase U2 per-process address space (`v0.36.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -54,7 +54,10 @@ path to the host: it mutates real disk images and mounts every mutant in a
 forked child, 22000 cases per gate. Phase U1 crosses into ring 3: a
 seven-entry GDT, a fixed 512 GiB to 1 TiB user window, an ELF loader that maps
 `/bin` programs with W^X permissions, a copy boundary on every syscall pointer,
-and a trap path that kills only the faulting user thread.
+and a trap path that kills only the faulting user thread. Phase U2 gives every
+ring-3 thread its own PML4: the window is no longer a shared range in the
+kernel's tables, two programs run at once with the same virtual address pointing
+at different frames, and `make test-user2` is the 49th gate.
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -975,6 +978,58 @@ fault path that kills only the offending user thread.
   reports 3470 checks, the kernel is 262760 B (256 KiB) on disk and 831006 B
   (811 KiB) loaded, and all 48 gates pass.
 
+Phase U2 gives every ring-3 thread its own page-table root: the 512 GiB window
+is no longer a shared range in the kernel's tables, two programs run at once with
+the same virtual address pointing at different frames, and `make test-user2` is
+the 49th gate.
+
+- `include/crug/vm.h` adds `struct vm_space` (`pml4`, `phys`, `user_pages`) and
+  the `vm_space_create`/`vm_space_destroy`/`vm_space_map_user_pages`/
+  `vm_space_unmap_user_pages`/`vm_space_translate`/`vm_space_activate` API plus
+  `vm_space_set_kernel_root()` and `vm_kernel_root_phys()`;
+  `kernel/mm/vm_space.c` is a separate, host-testable unit that needs only
+  `pmm_alloc_page`/`pmm_free_page` and the identity translations, never CR3 or
+  the LAPIC, and `vm_space_activate()` is the only CR3 writer (in
+  `kernel/mm/vm.c`), skipping the write when the root is unchanged;
+- every space copies slot 0 from the kernel root, so the shared supervisor
+  identity map (kernel image, stacks, MMIO) is present in all of them, and keeps
+  slot 1 for the 512 GiB to 1 TiB window; mapping upgrades each intermediate
+  entry to `PRESENT|WRITE|USER`, clears `VM_GLOBAL`, forces `VM_USER`, keeps the
+  caller's W^X flags, validates alignment/window/absent-leaf and rolls back
+  exactly the pages of a failed call, and `vm_space_destroy` frees every leaf,
+  PT, PD, PDPT and the root page;
+- `kernel/mm/vm.c` keeps the active root in a static that `pte_for` and
+  `vm_translate` follow, so kernel-side uaccess always walks the running space;
+- `struct thread` carries a `vm_space *space` instead of the U1
+  `thread_user_map[8]` region list; `schedule()` installs the kernel stack top
+  and then calls `vm_space_activate(next->space)`, `thread_destroy()` destroys
+  the space, and `thread_create_user(name, entry, user_rsp, space,
+  sched_class)` no longer refuses a second user thread -- the U1 one-program rule
+  is gone;
+- `kernel/exec/elf_exec.c` owns one space per exec: segment reservations and the
+  four-page stack at `USER_STACK_TOP` go into it, the unmapped guard page under
+  the stack stays, and the space is handed to the new thread. While landing U2,
+  `vm_init` started publishing the root immediately after allocating it, because
+  the section mapper walks the root and the old order page-faulted before the
+  IDT existed;
+- `user/iso.c` and its linker script `user/iso.ld` pin a writable page at
+  `0x0000008000030000`; two instances write `0x15500000 | (tid << 8)`, yield 300
+  times and re-check their own word, and `kernel/core/user_test.c` under
+  `user.test=2` proves the same virtual address maps to different physical
+  frames (the log prints `frames 0x28000 vs 0x38000`) before joining both;
+- `make test-user2` is the 49th gate: it rebuilds the disk with all four
+  programs, boots with `user.test=2`, and passes boot-check the new final
+  `EXPECT_USERS` argument (argc guard now 3..29) with
+  `USER2_RUN_TIMEOUT_SEC` (240), so the boot-check line reports
+  `user yes isolated yes`; `make test-user` (gate 48) still runs the three U1
+  programs under `user.test=1`;
+- `tests/host/test_vm_space.c` covers slot-0 inheritance, the window validation
+  table, raw leaf flags, distinct frames for the same VA, partial rollback and
+  full reclaim, plus an allocation-failure path; `host_pmm_free_pages_count()`
+  in `test_heap.c` makes a later leak visible. `make test-host` reports 3554
+  checks, the kernel is 263056 B (256 KiB) on disk and 832574 B (813 KiB)
+  loaded, and all 49 gates pass.
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -983,9 +1038,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.35.0 (phase u1) -- Amiga-inspired microkernel bring-up
+CrugOS 0.36.0 (phase u2) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.35.0
+CRUGOS: version 0.36.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -1044,9 +1099,9 @@ entropy: ca02033c50b53413
 wx     : audit ok, identity map 0..4 GiB, guard unmapped
 heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
-boot   : pmm=28541 us cpu=418 us vm=657 us traps=328 us timer=65263 us heap=426 us storage=93624 us sched=305 us syscall=94 us total=189659 us
+boot   : pmm=28671 us cpu=418 us vm=708 us traps=346 us timer=65333 us heap=464 us storage=96362 us sched=300 us syscall=102 us total=192709 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase u1 boot ok
+CRUGOS: phase u2 boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -1255,14 +1310,15 @@ make test-heap   # corrupt the kernel heap and prove the integrity checker catch
 make test-trap   # inject eight crafted faults and check the report, IST and panic
 make test-fuzz   # mutate a real disk image and fuzz the mount path
 make test-user   # boot with user.test=1 and run three ring-3 programs
+make test-user2  # boot with user.test=2, run the three programs and the isolation pair
 make iso         # build a bootable hybrid UEFI ISO (build/x86_64/crugos.iso)
 make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
 make usb         # write the ISO to a USB block device (USB_DEV=/dev/sdX)
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
-make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows/menus/gadgets, resize grips, keyboard focus and keys, icon dragging, the send-to-front gadget and keyboard icon focus, the body input handler, the text grid and the shell, the user-window and uaccess validators, and the ELF exec mapper)
+make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows/menus/gadgets, resize grips, keyboard focus and keys, icon dragging, the send-to-front gadget and keyboard icon focus, the body input handler, the text grid and the shell, the user-window and uaccess validators, the per-space page-table tests, and the ELF exec mapper)
 make check-disk  # e2fsck + persisted-file checks on the latest test disk
-make user        # build the ring-3 programs the disk image carries
+make user        # build the four ring-3 programs the disk image carries
 make disk        # generate the GPT/ext4 test disk
 make raid-disks  # generate the two RAID1 member disks
 make raid10-disks  # generate the four RAID10 member disks
@@ -1286,7 +1342,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `EXPECT_CRYPT`, `EXPECT_AES`, `EXPECT_NET`, `EXPECT_TCP`, `EXPECT_DNS`,
 `EXPECT_USB`, `EXPECT_MOUSE`, `EXPECT_AUDIO`, `EXPECT_GFX`, `EXPECT_WB`,
 `EXPECT_MENU`, `EXPECT_SHELL`, `EXPECT_KEYS`, `EXPECT_DESK`, `EXPECT_ICONS`,
-`EXPECT_DRAWER`, `EXPECT_SELECT`, `EXPECT_HEAP`, `EXPECT_USER`,
+`EXPECT_DRAWER`, `EXPECT_SELECT`, `EXPECT_HEAP`, `EXPECT_USER`, `EXPECT_USERS`,
 `AUDIO_RUN_TIMEOUT_SEC`, `AUDIO_QEMU_EXTRA`, `GFX_WAIT`, `GFX_MOVES`,
 `GFX_RUN_TIMEOUT_SEC`, `GFX_QEMU_EXTRA`, `WB_WAIT`, `WB_DRAG`,
 `WB_RUN_TIMEOUT_SEC`, `WB_QEMU_EXTRA`, `WB_MENU_WAIT`, `WB_MENU_ACTS`,
@@ -1299,6 +1355,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `WB_SELECT_FILL`, `WB_SELECT_RUN_TIMEOUT_SEC`, `HARDEN_TIMEOUT_SEC`,
 `HEAP_STRESS_OPS`, `HEAP_RUN_TIMEOUT_SEC`, `TRAP_TIMEOUT_SEC`, `FUZZ_CASES`,
 `FUZZ_CRYPT_CASES`, `FUZZ_SEED`, `FUZZ_TIMEOUT_SEC`, `USER_RUN_TIMEOUT_SEC`,
+`USER2_RUN_TIMEOUT_SEC`,
 `DEMO_DISPLAY`, `DEMO_HOLD_SEC`,
 `DEMO_TIMEOUT_SEC`, `DEMO_CMDLINE`, `DEMO_MACHINE_EXTRA`, `DEMO_QEMU_EXTRA`,
 `ISO_IMAGE`, `ISO_STAGE`, `ISO_FAT_IMG`, `ISO_SIZE_MB`, `ISO_VOLID`,

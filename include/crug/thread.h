@@ -4,6 +4,7 @@
 
 #include <crug/types.h>
 #include <crug/compiler.h>
+#include <crug/vm.h>
 
 typedef enum thread_state {
     THREAD_RUNNING = 0,
@@ -26,15 +27,8 @@ typedef enum sched_class {
 #define THREAD_GUARD_PAGES 1u
 #define SCHED_CLASSES 4u
 
-/* A thread that enters ring 3 owns a user address window (phase U1). */
+/* A thread that enters ring 3 owns a private address space (phase U2). */
 #define THREAD_FLAG_USER 1u
-#define THREAD_USER_MAP_MAX 8u
-
-typedef struct thread_user_map {
-    u64 va;
-    u32 pages;
-    u32 pad;
-} thread_user_map;
 
 typedef struct wait_queue {
     struct thread *head;
@@ -65,8 +59,9 @@ typedef struct thread {
     u64 user_rip;
     u64 user_rsp;
     u32 flags;
-    u32 user_map_count;
-    thread_user_map user_map[THREAD_USER_MAP_MAX];
+    u32 space_zero;
+    /* Private address space; 0 for every kernel thread. */
+    vm_space *space;
 } thread;
 
 void sched_init(void);
@@ -74,8 +69,7 @@ void sched_start(void);
 thread *thread_create(const char *name, void (*entry)(void *), void *arg,
                       sched_class cls);
 thread *thread_create_user(const char *name, u64 entry, u64 user_rsp,
-                           const thread_user_map *maps, u32 map_count,
-                           sched_class cls);
+                           vm_space *space, sched_class cls);
 int thread_join(thread *t);
 i64 thread_join_code(thread *t);
 void thread_exit(void) CRUG_NORETURN;

@@ -1,9 +1,11 @@
-/* Minimal freestanding syscall library for CrugOS ring-3 programs (U1). */
+/* Minimal freestanding syscall library for CrugOS ring-3 programs (U1/U2). */
 #ifndef CRUG_USER_LIB_H
 #define CRUG_USER_LIB_H
 
 #include <crug/types.h>
 
+#define U_SYS_GETTID 1u
+#define U_SYS_YIELD 2u
 #define U_SYS_EXIT 8u
 #define U_SYS_WRITE 16u
 
@@ -43,6 +45,46 @@ static inline u64 u_strlen(const char *s)
 static inline i64 u_puts(const char *s)
 {
     return u_syscall3(U_SYS_WRITE, 1u, (u64)(uintptr)s, u_strlen(s));
+}
+
+static inline i64 u_putnum(u64 v)
+{
+    char digits21[21];
+    char out[21];
+    u32 n = 0;
+    u32 i;
+
+    if (v == 0)
+        return u_puts("0");
+    while (v != 0 && (u64)n < sizeof(digits21)) {
+        digits21[n++] = (char)('0' + (v % 10u));
+        v /= 10u;
+    }
+    for (i = 0; i < n; i++)
+        out[i] = digits21[n - 1u - i];
+    out[n] = 0;
+    return u_puts(out);
+}
+
+static inline i64 u_puthex(u64 v)
+{
+    char digits[16];
+    char out[17];
+    u32 n = 0;
+    u32 i;
+
+    if (v == 0)
+        return u_puts("0");
+    while (v != 0 && (u64)n < sizeof(digits)) {
+        u32 d = (u32)(v & 0xfu);
+
+        digits[n++] = (char)(d < 10u ? ('0' + d) : ('a' + d - 10u));
+        v >>= 4;
+    }
+    for (i = 0; i < n; i++)
+        out[i] = digits[n - 1u - i];
+    out[n] = 0;
+    return u_puts(out);
 }
 
 static inline i64 u_write_bad_ptr(void)

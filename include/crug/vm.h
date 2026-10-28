@@ -41,11 +41,27 @@ void vm_flush_all(void);
 int vm_audit_wx(void);
 int vm_selftest(void);
 
-/* User mappings (phase U1). The whole walk is created with VM_USER so a leaf
-   below a fresh intermediate table is reachable at CPL3; VM_GLOBAL is stripped
-   and W^X comes from passing VM_NX on data pages. */
-int vm_user_map_page(u64 va, u64 pa, u64 flags);
-int vm_user_map_pages(u64 va, u64 pages, u64 flags);
-void vm_user_unmap_pages(u64 va, u64 pages);
+/* Per-process address space (phase U2). Every ring-3 thread owns one of these:
+   slot 0 of the root is the shared supervisor identity map and slot 1 carries
+   the whole user window, so two programs map the same virtual addresses onto
+   different physical pages. The walk lives in kernel/mm/vm_space.c and only
+   needs the page allocator; it never touches CR3, so it is host-testable.
+   vm_space_activate() (kernel/mm/vm.c) is the one place that writes CR3. */
+typedef struct vm_space {
+    u64 *pml4;
+    u64 phys;
+    u32 user_pages;
+    u32 pad;
+} vm_space;
+
+/* The kernel root new spaces copy slot 0 from (set once by vm_init). */
+void vm_space_set_kernel_root(u64 *root);
+int vm_space_create(vm_space *s);
+void vm_space_destroy(vm_space *s);
+int vm_space_map_user_pages(vm_space *s, u64 va, u64 pages, u64 flags);
+void vm_space_unmap_user_pages(vm_space *s, u64 va, u64 pages);
+u64 vm_space_translate(const vm_space *s, u64 va);
+void vm_space_activate(vm_space *s);
+u64 vm_kernel_root_phys(void);
 
 #endif
