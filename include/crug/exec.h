@@ -63,6 +63,12 @@ struct thread *elf_spawn_user(const char *path, u32 argc,
                               const char *const *argv, u32 parent_id,
                               elf_exec_result *out);
 
+/* Phase 7B: same, but the new thread starts with CAPS (include/crug/caps.h).
+   elf_spawn_user is the CAP_ALL wrapper used by the kernel's own selftests. */
+struct thread *elf_spawn_user_caps(const char *path, u32 argc,
+                                   const char *const *argv, u32 parent_id,
+                                   u32 caps, elf_exec_result *out);
+
 /* Exec: replace the calling user thread's image in place. Returns 0 and the
    new entry and stack pointer; on success it never returns to user space
    through the old image. The caller rewrites the trap frame. */

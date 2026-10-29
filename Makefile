@@ -46,7 +46,10 @@
 #   make test-workbench-select  select a drawer row and drag its scrollbar
 #   make test-workbench-screens  switch screens and move a window between them
 #   make test-workbench-cx       toggle commodity hotkeys and fire two of them
+#   make test-workbench-pkg  install a signed package from a desktop window
 #   make test-app-bundles        launch a .app bundle from the desktop and from the shell
+#   make test-pkg    install a signed package and refuse one signed by an untrusted key
+#   make test-caps   launch an installed bundle and prove its capability wall
 #   make crypt-disk  build the AES-256-XTS crypt test disk
 #   make test-crypt  boot from an encrypted root and verify the disk
 #   make test-crypt-recovery  unlock the encrypted root with the recovery keyslot
@@ -123,6 +126,8 @@ EXPECT_USHELL ?= no
 EXPECT_SPAWN ?= no
 EXPECT_FORK ?= no
 EXPECT_FORKBIG ?= no
+EXPECT_PKG ?= no
+EXPECT_CAPS ?= no
 
 # QEMU / firmware options.
 MEMORY_MB ?= 512
@@ -197,6 +202,20 @@ WB_APP_WAIT ?= 30
 WB_APP_ACTS ?= 1
 WB_APP_RUN_TIMEOUT_SEC ?= 240
 APP_RUN_TIMEOUT_SEC ?= 300
+
+# Packages-window gate (make test-workbench-pkg): wb.pkg=1 opens a window whose
+# body installs the signed captest bundle with a single click.
+WB_PKG_WAIT ?= 30
+WB_PKG_RUN_TIMEOUT_SEC ?= 240
+
+# Package gates (make test-pkg / make test-caps): pkg.test=1 installs the signed
+# captest bundle and refuses one signed by an untrusted key; pkg.test=2 launches
+# the installed bundle and checks the capability wall around it.  Both packages
+# are built from a fixed seed and timestamp so two images are byte-identical.
+PKG_SEED ?= 0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0
+PKG_BAD_SEED ?= 1122334455667788990011223344556677889900112233445566778899001122
+PKG_RUN_TIMEOUT_SEC ?= 240
+CAPS_RUN_TIMEOUT_SEC ?= 240
 
 # Hardening gate (make test-hardening): how long each crafted image may boot.
 HARDEN_TIMEOUT_SEC ?= 120
@@ -321,6 +340,8 @@ CRYPT_RUN_DISPLAY ?= gtk
 CRYPT_RUN_TIMEOUT_SEC ?= 600
 CMDLINE_EXTRA ?=
 MCRYPT := $(BUILD)/mkcrypt
+MKPKG := $(BUILD)/mkpkg
+PKG_DATA_DIR ?= $(BUILD)/pkg
 NVME_SERIAL ?= CRUGNVME0
 EXTRA_DISKS ?=
 
@@ -365,7 +386,7 @@ KERNEL_DEPS := $(KERNEL_OBJECTS:.o=.d)
 
 USER_ELF_DIR := $(BUILD)/user
 USER_OBJ := $(BUILD)/user/obj
-USER_PROGRAMS := hello badptr fault iso sh spawn child fork forkbig
+USER_PROGRAMS := hello badptr fault iso sh spawn child fork forkbig captest
 # Phase 7A: these two are installed as .app bundle payloads, not in /bin.
 APP_PROGRAMS := app_hello app_orbit
 USER_ELF := $(patsubst %,$(USER_ELF_DIR)/%,$(USER_PROGRAMS) $(APP_PROGRAMS))
@@ -391,7 +412,13 @@ LOADER_OBJECTS := $(patsubst %,$(OBJ)/%.o,$(basename $(LOADER_SOURCES)))
 LOADER_DEPS := $(LOADER_OBJECTS:.o=.d)
 
 HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
-                      $(wildcard kernel/crypto/*.c) $(wildcard kernel/crypto/*.S)
+                      $(wildcard kernel/crypto/*.c) $(wildcard kernel/crypto/*.S) \
+                      kernel/lib/string.c
+
+# Phase 7B host signer: the package format needs the kernel's SHA-512 and
+# Ed25519 routines, so the tool compiles those sources for the host.
+HOST_MKPKG_SOURCES := tools/mkpkg.c kernel/crypto/ed25519.c \
+                      kernel/crypto/sha512.c kernel/lib/string.c
 
 .PHONY: all kernel loader user esp disk raid-disks raid10-disks nvme-disk ahci-disk \
         mkcrypt crypt-disk raid-repair-disks raid10-repair-disks run demo test test-compat \
@@ -406,7 +433,7 @@ HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
         test-workbench test-workbench-menu test-workbench-shell test-workbench-keys \
         test-workbench-desk test-workbench-icons test-workbench-drawer \
         test-workbench-select test-workbench-screens test-workbench-cx \
-        test-app-bundles \
+        test-workbench-pkg test-app-bundles test-pkg test-caps packages mkpkg \
         iso check-iso test-iso usb \
         crash-disk \
         check-disk size check-efi repro test-host preflight version options clean distclean help
@@ -452,6 +479,14 @@ $(MCRYPT): $(HOST_CRYPT_SOURCES) include/crug/crypt.h
 	@echo "  HOSTCC $@"
 
 mkcrypt: $(MCRYPT)
+
+$(MKPKG): $(HOST_MKPKG_SOURCES) include/crug/pkg.h
+	@mkdir -p $(dir $@)
+	$(Q)$(HOST_CC) -Iinclude -std=gnu11 -O2 -g -Wall -Wextra -Wno-unused-parameter \
+		-fno-builtin -o $@ $(HOST_MKPKG_SOURCES)
+	@echo "  HOSTCC $@"
+
+mkpkg: $(MKPKG)
 
 $(OBJ)/kernel/%.o: kernel/%.c
 	@mkdir -p $(dir $@)
@@ -505,8 +540,17 @@ $(USER_ELF_DIR)/sh: $(USER_OBJ)/start.o $(USER_OBJ)/sh.o user/sh.ld
 
 user: $(USER_ELF)
 
-disk: user
+# Phase 7B: sign the test bundles the installer gates install.  The packages are
+# built from the user ELFs by the host signer, so this target needs both.
+packages: $(MKPKG) $(USER_ELF)
+	$(Q)PKG_SEED='$(PKG_SEED)' PKG_BAD_SEED='$(PKG_BAD_SEED)' \
+	  sh scripts/mkpkgtest.sh $(abspath $(PKG_DATA_DIR)) \
+	  $(abspath $(USER_ELF_DIR)/captest) $(abspath $(MKPKG))
+	@echo "  PKG   $(PKG_DATA_DIR)"
+
+disk: user packages
 	$(Q)USER_DIR=$(abspath $(USER_ELF_DIR)) APP_DIR=$(abspath $(USER_ELF_DIR)) \
+	  PKG_DIR=$(abspath $(PKG_DATA_DIR)) \
 	  scripts/mkdisk.sh $(DISK_IMG) $(DISK_SIZE_MB)
 	@echo "  DISK  $(DISK_IMG)"
 
@@ -881,10 +925,49 @@ test-workbench-cx: esp
 	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no --expect-cx=yes
 	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 
+# Packages gate (phase 7B): wb.pkg=1 opens a Packages window whose body installs
+# the signed captest bundle with one click; the desktop reports the registry,
+# the install and its own selftest before the boot finishes.
+test-workbench-pkg: esp user packages
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(MAKE) --no-print-directory disk
+	$(Q)$(PYTHON) scripts/run-workbench-pkg.py --repo $(CURDIR) \
+		--disk $(abspath $(DISK_IMG)) --serial-log $(abspath $(SERIAL_LOG)) \
+		--exit-code $(abspath $(QEMU_EXIT)) \
+		--wb-wait $(WB_PKG_WAIT) \
+		--run-timeout $(WB_PKG_RUN_TIMEOUT_SEC) \
+		--qemu-extra "$(WB_QEMU_EXTRA)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no --expect-wbpkg=yes
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
 # App-bundle gate (phase 7A): wb.app=1 adds the Applications icon; a double
 # click opens the bundle list and a double click on a row launches that
 # program, which the desktop then reaps with its exit status.  A second boot
 # with user.test=7 drives the same registry from /bin/sh ('app list|info|run').
+test-pkg: EXPECT_PKG := yes
+test-pkg: esp user packages
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(MAKE) --no-print-directory disk
+	$(Q)$(MAKE) --no-print-directory run TIMEOUT_SEC=$(PKG_RUN_TIMEOUT_SEC) \
+		CMDLINE_EXTRA="pkg.test=1"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION \
+		$(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no no \
+		$(EXPECT_USER) $(EXPECT_USERS) $(EXPECT_USHELL) $(EXPECT_SPAWN) $(EXPECT_FORK) $(EXPECT_FORKBIG) \
+		--expect-pkg=yes
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
+test-caps: EXPECT_CAPS := yes
+test-caps: esp user packages
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(MAKE) --no-print-directory disk
+	$(Q)$(MAKE) --no-print-directory run TIMEOUT_SEC=$(CAPS_RUN_TIMEOUT_SEC) \
+		CMDLINE_EXTRA="pkg.test=2"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION \
+		$(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no no \
+		$(EXPECT_USER) $(EXPECT_USERS) $(EXPECT_USHELL) $(EXPECT_SPAWN) $(EXPECT_FORK) $(EXPECT_FORKBIG) \
+		--expect-caps=yes
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
 test-app-bundles: EXPECT_USER := yes
 test-app-bundles: EXPECT_USERS := yes
 test-app-bundles: EXPECT_USHELL := yes
@@ -1304,6 +1387,16 @@ options:
 	@printf '  %-16s %s\n' WB_APP_ACTS "$(WB_APP_ACTS)"
 	@printf '  %-16s %s\n' WB_APP_RUN_TIMEOUT_SEC "$(WB_APP_RUN_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' APP_RUN_TIMEOUT_SEC "$(APP_RUN_TIMEOUT_SEC) (seconds)"
+	@printf '  %-16s %s\n' WB_PKG_WAIT "$(WB_PKG_WAIT) (seconds)"
+	@printf '  %-16s %s\n' WB_PKG_RUN_TIMEOUT_SEC "$(WB_PKG_RUN_TIMEOUT_SEC) (seconds)"
+	@printf '  %-16s %s\n' EXPECT_PKG "$(EXPECT_PKG)"
+	@printf '  %-16s %s\n' PKG_RUN_TIMEOUT_SEC "$(PKG_RUN_TIMEOUT_SEC) (seconds)"
+	@printf '  %-16s %s\n' EXPECT_CAPS "$(EXPECT_CAPS)"
+	@printf '  %-16s %s\n' CAPS_RUN_TIMEOUT_SEC "$(CAPS_RUN_TIMEOUT_SEC) (seconds)"
+	@printf '  %-16s %s\n' MKPKG "$(MKPKG)"
+	@printf '  %-16s %s\n' PKG_DATA_DIR "$(PKG_DATA_DIR)"
+	@printf '  %-16s %s\n' PKG_SEED "$(PKG_SEED)"
+	@printf '  %-16s %s\n' PKG_BAD_SEED "$(PKG_BAD_SEED)"
 	@printf '  %-16s %s\n' HARDEN_TIMEOUT_SEC "$(HARDEN_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' EXPECT_HEAP "$(EXPECT_HEAP)"
 	@printf '  %-16s %s\n' HEAP_STRESS_OPS "$(HEAP_STRESS_OPS)"

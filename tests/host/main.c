@@ -44,6 +44,7 @@ void test_vm_space_oom(void);
 void test_vm_space_clone(void);
 void test_vm_space_cow(void);
 void test_app_functions(void);
+void test_pkg_functions(void);
 
 int main(void)
 {
@@ -82,6 +83,7 @@ int main(void)
     RUN(test_vm_space_clone);
     RUN(test_vm_space_cow);
     RUN(test_app_functions);
+    RUN(test_pkg_functions);
     printf("%d checks, %d failure(s)\n", tests_run, tests_failed);
     return tests_failed == 0 ? 0 : 1;
 }

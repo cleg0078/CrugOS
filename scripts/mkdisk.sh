@@ -160,6 +160,31 @@ if [ -n "${APP_DIR:-}" ]; then
     debugfs -w -R "mkdir /etc" "$fs_image" >/dev/null 2>&1 || true
     debugfs -w -R "write $app_script /etc/app.rc" "$fs_image" >/dev/null
 fi
+
+# Optional signed packages (make test-pkg / make test-caps): PKG_DIR holds the
+# two .crpkg files the host signer produced, the trust list and the capability
+# policy.  The installer reads /System/packages, checks the signing key against
+# /System/trusted/keys.conf and records installs in /System/pkgdb.
+if [ -n "${PKG_DIR:-}" ]; then
+    for tree in System System/packages System/trusted System/pkgdb; do
+        debugfs -w -R "mkdir /$tree" "$fs_image" >/dev/null 2>&1 || true
+    done
+    for pkg in "$PKG_DIR"/*.crpkg; do
+        if [ ! -f "$pkg" ]; then
+            echo "mkdisk: no packages in $PKG_DIR" >&2
+            exit 1
+        fi
+        debugfs -w -R "write $pkg /System/packages/$(basename "$pkg")" "$fs_image" >/dev/null
+    done
+    for conf in keys.conf perms.conf; do
+        if [ ! -f "$PKG_DIR/$conf" ]; then
+            echo "mkdisk: missing $PKG_DIR/$conf" >&2
+            exit 1
+        fi
+    done
+    debugfs -w -R "write $PKG_DIR/keys.conf /System/trusted/keys.conf" "$fs_image" >/dev/null
+    debugfs -w -R "write $PKG_DIR/perms.conf /System/perms.conf" "$fs_image" >/dev/null
+fi
 if [ "$mode" = crypt ]; then
     mkcrypt_args=(format "$tmp/part.img" --plain "$fs_image" --password "$crypt_pass" --m "$crypt_m")
     if [ -n "$crypt_recovery" ]; then

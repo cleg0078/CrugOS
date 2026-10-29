@@ -78,6 +78,11 @@ typedef struct thread {
     trap_frame fork_frame;
     /* Open files: fds 3..10 index this table (phase U3). */
     ufile_table files;
+    /* Capability mask (phase 7B, include/crug/caps.h): kernel threads hold
+       CAP_ALL; a ring-3 program receives what its bundle manifest requires
+       intersected with /System/perms.conf, and inherits that mask through
+       fork, spawn and exec. */
+    u32 caps;
 } thread;
 
 void sched_init(void);

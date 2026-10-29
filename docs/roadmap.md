@@ -1,6 +1,6 @@
 # Roadmap
 
-The specification defines 56 phases/gates. Phase 0 established the smallest
+The specification defines 59 phases/gates. Phase 0 established the smallest
 end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
 phase 1 makes the kernel own physical memory, page tables, exceptions and
 timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
@@ -983,9 +983,16 @@ new address space, so a child owns its pages and neither side sees the other's
 writes. Phase U6 made that copy lazy: the parent's writable frames are shared
 read-only and copied on the first store from either side, so a fork of 300 pages
 costs a page table and a few reference counts, and the page cap rose from 256 to
-4096. What remains is a populated environment, weak EFI entropy, and the AHCI
-timeout bounce reuse. Those are the prerequisites for a shell that builds process
-trees, and several of the remaining Mediums stay reachable until then.
+4096. Phase 7A gave the desktop a bundle format and a registry, so a directory
+with a manifest and an ELF became a launchable application from both the
+Workbench and the shell, and phase 7B put a capability mask on every thread and
+a signature check in front of installation, so the disk a program can reach is
+now filtered by what the program was granted. What remains is making those
+capabilities hold against a program that starts another one (`SYS_SPAWN` and
+`SYS_EXEC` still hand out `CAP_ALL`), a populated environment, weak EFI
+entropy, and the AHCI timeout bounce reuse. Those are the prerequisites for a
+shell that builds process trees, and several of the remaining Mediums stay
+reachable until then.
 
 ## Phase H2 - hardened kernel heap (done)
 
@@ -1736,6 +1743,76 @@ trees, and several of the remaining Mediums stay reachable until then.
   commands, the markers, the gate and the limits) plus README, workbench,
   userspace, roadmap, versioning, boot and build.
 - All 56 gates pass at `v0.43.0`.
+
+## Phase 7B - signed packages and permissions (done)
+
+- The capability set is six bits in `include/crug/caps.h`: `fs.read` (0x01),
+  `fs.write` (0x02), `app.launch` (0x04), `net` (0x08), `audio` (0x10) and
+  `pkg.install` (0x20), with `CAP_ALL` 0x3F and the policy spelling the empty
+  set `none`. Every thread carries a mask; kernel threads start with all of
+  them and a ring-3 thread inherits its parent's.
+- `kernel/lib/perms.c` reads `/System/perms.conf` (`<id> <caps>` rules plus a
+  `default` line, eight rules at most) and prints
+  `CRUGOS: perms policy ready (default <caps>, N rule(s))` at boot. A bundle
+  launch narrows the new thread to `cap_intersect()` of the manifest's
+  `caps` and the policy grant for that id, so the manifest can only ask for
+  less than the policy allows.
+- The syscall layer enforces the mask: `SYS_OPEN` needs `fs.read` (plus
+  `fs.write` for a writable open), `SYS_LISTDIR` needs `fs.read`, socket and
+  resolve need `net`, `SYS_APP_SPAWN` needs `app.launch` and
+  `SYS_PKG_INSTALL` needs `pkg.install`; a missing bit returns
+  `SYS_EPERM` (-1) before the operation runs. `SYS_CAP_QUERY` (28) returns the
+  mask and `SYS_CAP_CHECK` (29) answers 1 or 0.
+- `kernel/crypto/sha512.c` and `kernel/crypto/ed25519.c` are the first
+  cryptographic code in the tree: a 512-byte package header carries the
+  publisher public key and a 64-byte Ed25519 signature, and the payload is
+  covered by a SHA-512 digest, so a package is verified without a heap and
+  without floating point.
+- A package is a single `.crpkg` file with a 512-byte header (`PKG_MAGIC`,
+  id, name, version, publisher, payload size, capability mask, key id) and a
+  bounded payload of at most 32 files, 96 KiB each and 128 KiB total.
+  `/System/trusted/keys.conf` holds `pub <hex> <publisher>` lines; an
+  unknown key is refused as `untrusted-key`.
+- Installation is staged and atomic: the payload unpacks under
+  `/Applications/.stage/<id>`, the directory is renamed to
+  `/Applications/<id>.app`, a record is written to `/System/pkgdb/<id>.txt`
+  and the bundle is registered in the same boot, so a failed step leaves no
+  half-installed application.
+- `make mkpkg` builds a package from a directory with `MKPKG` and
+  `PKG_DATA_DIR`, and the seeds `PKG_SEED` and `PKG_BAD_SEED` produce a
+  trusted and an untrusted package for the selftest; the host suite also links
+  `kernel/app/pkg.c`, `kernel/lib/caps.c`, `kernel/lib/perms.c` and the two
+  crypto modules.
+- `include/crug/syscall.h` grows `SYS_PKG_COUNT` (30), `SYS_PKG_INFO` (31)
+  and `SYS_PKG_INSTALL` (32) with `SYS_MAX` now 33; the info record is
+  `id|name|version|publisher|RRGGBB|caps` and is capped at
+  `SYS_PKG_INFO_MAX` (192) bytes.
+- `wb.pkg=1` adds the desktop installer: a `Packages` window at
+  (40,330,420,200) lists the installed packages, one body click installs
+  `/System/packages/captest.crpkg`, and a failed attempt paints the refusal
+  reason in the row. `make test-workbench-pkg` is gate 59 and checks the
+  window pixels, the install count and the serial markers before `check-disk`.
+- `make test-pkg` is gate 57 (`pkg.test=1`): a trusted package installs, a
+  second install and an untrusted key are rejected, the bundle is registered and
+  the marker reads `pkg selftest ok (1 installed, 2 rejected)`.
+- `make test-caps` is gate 58 (`pkg.test=2`): it launches
+  `/bin/captest` with the policy grant of `fs.read` only, requires the
+  denied write and denied install and the exit code 5, and prints
+  `caps selftest ok (exit 5, caps 0x1)`.
+- Host tests cover SHA-512, Ed25519, the capability table, the policy parser,
+  the trust list, the header, the payload container and the reason strings:
+  `make test-host` reports 8403 checks. `make size` reports a 329016 B
+  (321 KiB) file and a 980414 B (957 KiB) load image.
+- Limits: no revocation and no way to drop a capability at run time,
+  `SYS_SPAWN` and `SYS_EXEC` are not gated and hand the child `CAP_ALL`,
+  `audio` is never checked, the trust list has no rotation or expiry, and the
+  key id is informational. See [packages.md](packages.md).
+- docs: `docs/packages.md` (the capability model, the policy, the container,
+  the signing tool, the trust list, the install pipeline, the syscall ABI, the
+  selftests, the desktop installer, the gates, the failure modes and the
+  limits) plus README, workbench, userspace, roadmap, versioning, boot and
+  build.
+- All 59 gates pass at `v0.44.0`.
 
 ## Bootable media - hybrid UEFI ISO (done, `v0.23.1`)
 

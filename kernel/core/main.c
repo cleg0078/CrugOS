@@ -13,6 +13,8 @@
 #include <crug/process.h>
 #include <crug/storage.h>
 #include <crug/app.h>
+#include <crug/perms.h>
+#include <crug/pkg.h>
 #include <crug/input.h>
 #include <crug/net.h>
 #include <crug/usb.h>
@@ -67,6 +69,7 @@ void kernel_main(const boot_info *bi)
     heap_cmdline(bi);
     trap_cmdline(bi);
     user_test_cmdline(bi);
+    pkg_test_cmdline(bi);
     t.heap = arch_read_tsc();
     kprintf("CRUGOS: heap ready\n");
 
@@ -100,6 +103,10 @@ void kernel_main(const boot_info *bi)
     /* Phase 7A: register the .app bundles now that the root is mounted, so a
        launch from the shell or the Workbench always sees the whole registry. */
     (void)app_init();
+    /* Phase 7B: the capability policy and the installed-package registry both
+       live on the root filesystem, so they follow the application scan. */
+    perms_init();
+    (void)pkg_init();
 
     sched_init();
     t.sched = arch_read_tsc();
@@ -116,6 +123,12 @@ void kernel_main(const boot_info *bi)
 
     /* make test-user: run the ring-3 programs and check the user/kernel walls. */
     if (user_selftest() != 0)
+        arch_exit_qemu(0x11);
+
+    /* Phase 7B: pkg.test=1 installs a signed bundle from /System/packages,
+       pkg.test=2 launches it and checks the capability wall.  Both need the
+       filesystem and the scheduler, so they run after the user tests. */
+    if (pkg_selftest() != 0)
         arch_exit_qemu(0x11);
 
     report_boot(bi, &t);

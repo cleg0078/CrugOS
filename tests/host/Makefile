@@ -12,7 +12,7 @@ SOURCES := main.c test_string.c test_printf.c test_elf.c test_bitmap.c test_vm_m
            test_gfx.c test_intuition.c test_commodity.c test_app.c test_textgrid.c \
            test_shell.c test_harden.c \
            test_heap.c test_trap.c test_argv.c test_ufile.c \
-           test_uaccess.c test_exec.c test_vm_space.c \
+           test_uaccess.c test_exec.c test_vm_space.c test_pkg.c \
            ../../drivers/usb/usb_hid.c \
            ../../kernel/audio/audio.c ../../kernel/audio/mixer.c \
            ../../kernel/gfx/gfx.c ../../kernel/gfx/intuition.c \
@@ -29,7 +29,9 @@ SOURCES := main.c test_string.c test_printf.c test_elf.c test_bitmap.c test_vm_m
            ../../kernel/crypto/aes.c ../../kernel/crypto/xts.c ../../kernel/crypto/aesni.S \
            ../../kernel/crypto/argon2id.c ../../kernel/block/crypt_meta.c \
            ../../kernel/exec/argv.c ../../kernel/fs/ufile.c \
-           ../../kernel/core/process.c \
+           ../../kernel/core/process.c ../../kernel/app/pkg.c \
+           ../../kernel/lib/caps.c ../../kernel/lib/perms.c \
+           ../../kernel/crypto/sha512.c ../../kernel/crypto/ed25519.c \
            ../../kernel/app/manifest.c ../../boot/efi/elf.c
 
 .PHONY: all run clean fuzz

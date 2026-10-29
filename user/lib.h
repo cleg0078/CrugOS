@@ -19,6 +19,20 @@
 #define U_SYS_APP_COUNT 25u
 #define U_SYS_APP_INFO 26u
 #define U_SYS_APP_SPAWN 27u
+/* Phase 7B: capabilities and the signed package installer. */
+#define U_SYS_CAP_QUERY 28u
+#define U_SYS_CAP_CHECK 29u
+#define U_SYS_PKG_COUNT 30u
+#define U_SYS_PKG_INFO 31u
+#define U_SYS_PKG_INSTALL 32u
+
+/* Capability bits, mirroring include/crug/caps.h. */
+#define U_CAP_FS_READ (1u << 0)
+#define U_CAP_FS_WRITE (1u << 1)
+#define U_CAP_APP_LAUNCH (1u << 2)
+#define U_CAP_NET (1u << 3)
+#define U_CAP_AUDIO (1u << 4)
+#define U_CAP_PKG_INSTALL (1u << 5)
 
 /* SYS_OPEN flags (phase U3). U_O_RDONLY is the zero flag. */
 #define U_O_RDONLY 0u
@@ -196,6 +210,35 @@ static inline i64 u_app_info(u32 index, void *buf, u32 len)
 static inline i64 u_app_spawn(u32 index)
 {
     return u_syscall3(U_SYS_APP_SPAWN, (u64)index, 0, 0);
+}
+
+/* Phase 7B: the calling thread's capability mask. */
+static inline i64 u_cap_query(void)
+{
+    return u_syscall3(U_SYS_CAP_QUERY, 0, 0, 0);
+}
+
+/* 1 when every bit in MASK is held, 0 when not, -1 on a kernel error. */
+static inline i64 u_cap_check(u32 mask)
+{
+    return u_syscall3(U_SYS_CAP_CHECK, (u64)mask, 0, 0);
+}
+
+static inline i64 u_pkg_count(void)
+{
+    return u_syscall3(U_SYS_PKG_COUNT, 0, 0, 0);
+}
+
+static inline i64 u_pkg_info(u32 index, void *buf, u32 len)
+{
+    return u_syscall3(U_SYS_PKG_INFO, (u64)index, (u64)(uintptr)buf,
+                      (u64)len);
+}
+
+/* Requires U_CAP_PKG_INSTALL; returns 0, or -1 (SYS_EPERM/SYS_EIO). */
+static inline i64 u_pkg_install(const char *path)
+{
+    return u_syscall3(U_SYS_PKG_INSTALL, (u64)(uintptr)path, 0, 0);
 }
 
 static inline i64 u_gettid(void)

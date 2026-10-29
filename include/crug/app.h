@@ -46,6 +46,12 @@ struct app_manifest {
     char prog[APP_PATH_MAX];
     u32 icon_rgb;
     int has_icon;
+    /* Phase 7B capability model: the mask from [caps] require, and the
+       optional publisher id used by the permission prompt. */
+    u32 cap_mask;
+    int has_caps;
+    char publisher[APP_NAME_MAX];
+    int has_publisher;
     u8 tooltype_count;
     struct app_tooltype tooltypes[APP_TOOLTYPE_MAX];
 };
@@ -61,7 +67,7 @@ struct app {
    app_manifest_parse() returns 0 and fills *out, or -1 and sets *reason to a
    stable string from the rejection table: no-id, bad-id, dup-key, no-name,
    bad-name, no-prog, bad-prog, no-version, bad-version, min-os, bad-rgb,
-   too-many-tooltypes, bad-tooltype, bad-entry. */
+   bad-cap, too-many-tooltypes, bad-tooltype, bad-entry. */
 int app_manifest_parse(const char *text, usize len, struct app_manifest *out,
                        const char **reason);
 

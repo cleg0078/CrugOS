@@ -7,6 +7,7 @@
    because a manifest that silently loses a tool type would launch an
    application with the wrong configuration.  See include/crug/app.h. */
 #include <crug/app.h>
+#include <crug/caps.h>
 #include <crug/string.h>
 #include <crug/version.h>
 
@@ -16,6 +17,7 @@
 #define SEC_EXEC 2
 #define SEC_TOOLTYPES 3
 #define SEC_ICON 4
+#define SEC_CAPS 5
 
 static int app_space(char c)
 {
@@ -288,6 +290,8 @@ int app_manifest_parse(const char *text, usize len, struct app_manifest *out,
                 section = SEC_TOOLTYPES;
             } else if (app_slice_eq(text + name, close - name, "icon")) {
                 section = SEC_ICON;
+            } else if (app_slice_eq(text + name, close - name, "caps")) {
+                section = SEC_CAPS;
             } else {
                 return app_reason(reason, "bad-entry");
             }
@@ -372,6 +376,16 @@ int app_manifest_parse(const char *text, usize len, struct app_manifest *out,
                 }
                 memcpy(out->version, tmp, sizeof(tmp));
                 seen_version = 1;
+            } else if (app_slice_eq(text + s, ke - s, "publisher")) {
+                if (out->has_publisher) {
+                    return app_reason(reason, "dup-key");
+                }
+                if (!app_all(text + vs, ve - vs, app_text_char) ||
+                    app_copy(out->publisher, APP_NAME_MAX, text + vs,
+                             ve - vs) != 0) {
+                    return app_reason(reason, "bad-name");
+                }
+                out->has_publisher = 1;
             } else if (app_slice_eq(text + s, ke - s, "min_os")) {
                 char tmp[APP_VERSION_MAX];
 
@@ -401,6 +415,22 @@ int app_manifest_parse(const char *text, usize len, struct app_manifest *out,
                 return app_reason(reason, "bad-prog");
             }
             seen_prog = 1;
+        } else if (section == SEC_CAPS) {
+            char bad[CAP_NAME_MAX];
+            u32 mask = 0u;
+
+            if (!app_slice_eq(text + s, ke - s, "require")) {
+                return app_reason(reason, "bad-entry");
+            }
+            if (out->has_caps) {
+                return app_reason(reason, "dup-key");
+            }
+            if (cap_parse_list(text + vs, ve - vs, &mask, bad,
+                               sizeof(bad)) != 0) {
+                return app_reason(reason, "bad-cap");
+            }
+            out->cap_mask = mask;
+            out->has_caps = 1;
         } else if (section == SEC_ICON) {
             u32 rgb = 0u;
             usize h;

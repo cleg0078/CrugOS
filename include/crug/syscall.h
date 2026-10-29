@@ -33,7 +33,12 @@
 #define SYS_APP_COUNT 25u
 #define SYS_APP_INFO 26u
 #define SYS_APP_SPAWN 27u
-#define SYS_MAX 28u
+#define SYS_CAP_QUERY 28u
+#define SYS_CAP_CHECK 29u
+#define SYS_PKG_COUNT 30u
+#define SYS_PKG_INFO 31u
+#define SYS_PKG_INSTALL 32u
+#define SYS_MAX 33u
 
 /* Open flags for SYS_OPEN (phase U3). SYS_O_RDONLY is the zero flag. */
 #define SYS_O_RDONLY 0u
@@ -51,6 +56,7 @@
 #define SYS_EIO (-5ll)
 #define SYS_EFAULT (-14ll)
 #define SYS_EBUSY (-16ll)
+#define SYS_EPERM (-1ll)
 
 #define SYSCALL_VECTOR 0x80u
 #define SYS_PING_MAGIC 0x43524731ull
@@ -66,5 +72,12 @@ int syscall_resolve_selftest(const char *host, u32 addr);
 
 /* Phase 7A application registry: count, text record and spawn by id. */
 #define SYS_APP_INFO_MAX 512u
+
+/* Phase 7B capabilities and packages: the caller's mask, one check, and the
+   read-only package registry plus an installation request.  SYS_CAP_QUERY
+   returns the caller's mask, SYS_CAP_CHECK(need) returns 1 when every bit of
+   NEED is held, SYS_PKG_INFO(index, buf, cap) writes the text record and
+   SYS_PKG_INSTALL(path) installs a signed .crpkg (CAP_PKG_INSTALL). */
+#define SYS_PKG_INFO_MAX 192u
 
 #endif /* CRUG_SYSCALL_H */

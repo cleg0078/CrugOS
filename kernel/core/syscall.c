@@ -13,6 +13,9 @@
 #include <crug/storage.h>
 #include <crug/exec.h>
 #include <crug/app.h>
+#include <crug/caps.h>
+#include <crug/perms.h>
+#include <crug/pkg.h>
 
 static i64 syscall_port_create(void)
 {
@@ -52,6 +55,31 @@ static i64 syscall_socket_handle(handle_table *table, struct net_tcp_socket *s)
 /* Phase U1: the same dispatcher serves CPL0 selftests and CPL3 programs. A
    user call never dereferences an argument directly: every pointer is range
    checked and copied through a kernel bounce buffer. */
+/* Phase 7B: every user-originated request carries the caller's capability
+   mask.  Kernel threads hold CAP_ALL, so a CPL0 selftest never trips this. */
+static int syscall_caps_ok(int user, u32 need)
+{
+    thread *cur;
+
+    if (!user)
+        return 1;
+    cur = sched_current();
+    if (!cur)
+        return 0;
+    return (cur->caps & need) == need;
+}
+
+/* A read-only open needs CAP_FS_READ; creating, truncating or opening for
+   write additionally needs CAP_FS_WRITE. */
+static u32 syscall_open_need(u32 flags)
+{
+    u32 need = CAP_FS_READ;
+
+    if ((flags & (u32)(SYS_O_WRONLY | SYS_O_CREAT | SYS_O_TRUNC)) != 0)
+        need |= CAP_FS_WRITE;
+    return need;
+}
+
 #define SYS_BOUNCE_MAX MSGPORT_MAX_PAYLOAD
 #define SYS_USER_IO_MAX 4096u
 #define SYS_WRITE_CHUNK 256u
@@ -391,6 +419,10 @@ void syscall_dispatch(trap_frame *frame)
         break;
     }
     case SYS_SOCKET_CONNECT: {
+        if (!syscall_caps_ok(user, CAP_NET)) {
+            ret = SYS_EPERM;
+            break;
+        }
         handle_table *table = process_handles(process_current());
         struct net_tcp_socket *s = tcp_socket_new();
 
@@ -407,6 +439,10 @@ void syscall_dispatch(trap_frame *frame)
         break;
     }
     case SYS_SOCKET_LISTEN: {
+        if (!syscall_caps_ok(user, CAP_NET)) {
+            ret = SYS_EPERM;
+            break;
+        }
         handle_table *table = process_handles(process_current());
         struct net_tcp_socket *s = tcp_socket_new();
 
@@ -423,6 +459,10 @@ void syscall_dispatch(trap_frame *frame)
         break;
     }
     case SYS_SOCKET_SEND: {
+        if (!syscall_caps_ok(user, CAP_NET)) {
+            ret = SYS_EPERM;
+            break;
+        }
         handle_table *table = process_handles(process_current());
         struct net_tcp_socket *s = (struct net_tcp_socket *)handle_get(
             table, frame->rdi, HANDLE_SOCKET);
@@ -452,6 +492,10 @@ void syscall_dispatch(trap_frame *frame)
         break;
     }
     case SYS_SOCKET_RECV: {
+        if (!syscall_caps_ok(user, CAP_NET)) {
+            ret = SYS_EPERM;
+            break;
+        }
         handle_table *table = process_handles(process_current());
         struct net_tcp_socket *s = (struct net_tcp_socket *)handle_get(
             table, frame->rdi, HANDLE_SOCKET);
@@ -489,6 +533,10 @@ void syscall_dispatch(trap_frame *frame)
         break;
     }
     case SYS_SOCKET_CLOSE: {
+        if (!syscall_caps_ok(user, CAP_NET)) {
+            ret = SYS_EPERM;
+            break;
+        }
         handle_table *table = process_handles(process_current());
         struct net_tcp_socket *s = (struct net_tcp_socket *)handle_get(
             table, frame->rdi, HANDLE_SOCKET);
@@ -503,6 +551,10 @@ void syscall_dispatch(trap_frame *frame)
         break;
     }
     case SYS_SOCKET_ACCEPT: {
+        if (!syscall_caps_ok(user, CAP_NET)) {
+            ret = SYS_EPERM;
+            break;
+        }
         handle_table *table = process_handles(process_current());
         struct net_tcp_socket *ls = (struct net_tcp_socket *)handle_get(
             table, frame->rdi, HANDLE_SOCKET);
@@ -521,6 +573,10 @@ void syscall_dispatch(trap_frame *frame)
         break;
     }
     case SYS_RESOLVE: {
+        if (!syscall_caps_ok(user, CAP_NET)) {
+            ret = SYS_EPERM;
+            break;
+        }
         struct net_dns_answer answer;
         char namebuf[SYS_USER_NAME_MAX];
         const char *name;
@@ -566,6 +622,10 @@ void syscall_dispatch(trap_frame *frame)
         path = syscall_path(frame, user, frame->rdi);
         if (!path || path[0] == 0) {
             ret = SYS_EFAULT;
+            break;
+        }
+        if (!syscall_caps_ok(user, syscall_open_need((u32)frame->rsi))) {
+            ret = SYS_EPERM;
             break;
         }
         ret = (i64)ufile_open(&cur->files, &g_ufile_backend, fs, path,
@@ -641,6 +701,10 @@ void syscall_dispatch(trap_frame *frame)
 
         if (!fs) {
             ret = SYS_EIO;
+            break;
+        }
+        if (!syscall_caps_ok(user, CAP_FS_READ)) {
+            ret = SYS_EPERM;
             break;
         }
         path = syscall_path(frame, user, frame->rdi);
@@ -821,6 +885,7 @@ void syscall_dispatch(trap_frame *frame)
             ret = SYS_ENOMEM;
             break;
         }
+        child->caps = cur->caps;
         ret = (i64)child->id;
         /* The parent's own TLB may still hold the writable translation of a
            leaf this clone just write-protected (phase U6): reload CR3 before
@@ -887,11 +952,94 @@ void syscall_dispatch(trap_frame *frame)
             ret = SYS_ENOENT;
             break;
         }
+        if (!syscall_caps_ok(user, CAP_APP_LAUNCH)) {
+            ret = SYS_EPERM;
+            break;
+        }
         if (app_launch(a, cur->id, &tid) != 0) {
             ret = SYS_EIO;
             break;
         }
         ret = (i64)tid;
+        break;
+    }
+    case SYS_CAP_QUERY: {
+        thread *cur = sched_current();
+
+        ret = cur ? (i64)cur->caps : 0;
+        break;
+    }
+    case SYS_CAP_CHECK: {
+        thread *cur = sched_current();
+        u32 need = (u32)frame->rdi;
+
+        if (!cur) {
+            ret = SYS_EPERM;
+            break;
+        }
+        ret = (cur->caps & need) == need ? 1 : 0;
+        break;
+    }
+    case SYS_PKG_COUNT:
+        ret = (i64)pkg_count();
+        break;
+    case SYS_PKG_INFO: {
+        const struct pkg *pkg = pkg_at((u32)frame->rdi);
+        u64 cap = frame->rdx;
+        int n;
+
+        if (!pkg) {
+            ret = SYS_ENOENT;
+            break;
+        }
+        if (frame->rsi == 0 || cap == 0) {
+            ret = SYS_EFAULT;
+            break;
+        }
+        if (cap > SYS_PKG_INFO_MAX)
+            cap = SYS_PKG_INFO_MAX;
+        if (user && uaccess_check(frame->rsi, cap) != 0) {
+            ret = SYS_EFAULT;
+            break;
+        }
+        if (!user && !harden_range_ok(frame->rsi, cap, HARDEN_IDENTITY_LIMIT)) {
+            ret = SYS_EFAULT;
+            break;
+        }
+        n = pkg_format_info(pkg, (char *)g_io_buf, (usize)cap);
+        if (n < 0) {
+            ret = SYS_EINVAL;
+            break;
+        }
+        if (user) {
+            if (uaccess_user_write(frame->rsi, g_io_buf, (usize)n) != 0) {
+                ret = SYS_EFAULT;
+                break;
+            }
+        } else {
+            memcpy((void *)(uintptr)frame->rsi, g_io_buf, (usize)n);
+        }
+        ret = (i64)n;
+        break;
+    }
+    case SYS_PKG_INSTALL: {
+        const char *path;
+        const char *reason = 0;
+
+        if (!syscall_caps_ok(user, CAP_PKG_INSTALL)) {
+            ret = SYS_EPERM;
+            break;
+        }
+        path = syscall_path(frame, user, frame->rdi);
+        if (!path || path[0] == 0) {
+            ret = SYS_EFAULT;
+            break;
+        }
+        if (pkg_install(path, &reason) != 0) {
+            ret = SYS_EIO;
+            break;
+        }
+        ret = 0;
         break;
     }
     case SYS_WRITE:

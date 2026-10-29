@@ -5,6 +5,7 @@
  * copied through the kernel identity map (pmm_phys_to_virt of the translated
  * page), never through the user mapping, so SMAP cannot trip the loader. */
 #include <crug/exec.h>
+#include <crug/caps.h>
 #include <crug/vm.h>
 #include <crug/mm.h>
 #include <crug/heap.h>
@@ -204,8 +205,9 @@ int elf_load_user(const char *path, u32 argc, const char *const *argv,
     return 0;
 }
 
-thread *elf_spawn_user(const char *path, u32 argc, const char *const *argv,
-                       u32 parent_id, elf_exec_result *out)
+thread *elf_spawn_user_caps(const char *path, u32 argc,
+                            const char *const *argv, u32 parent_id, u32 caps,
+                            elf_exec_result *out)
 {
     elf_image_load img;
     thread *t;
@@ -220,6 +222,7 @@ thread *elf_spawn_user(const char *path, u32 argc, const char *const *argv,
         return 0;
     }
     t->parent_id = parent_id;
+    t->caps = caps;
     if (out) {
         out->tid = t->id;
         out->reserved = 0;
@@ -228,6 +231,12 @@ thread *elf_spawn_user(const char *path, u32 argc, const char *const *argv,
         out->size = img.size;
     }
     return t;
+}
+
+thread *elf_spawn_user(const char *path, u32 argc, const char *const *argv,
+                       u32 parent_id, elf_exec_result *out)
+{
+    return elf_spawn_user_caps(path, argc, argv, parent_id, CAP_ALL, out);
 }
 
 /* Phase U4: exec replaces the running image. The new space must be active

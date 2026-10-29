@@ -1,5 +1,6 @@
 /* CrugOS phase 2 threads and preemptive scheduler. */
 #include <crug/thread.h>
+#include <crug/caps.h>
 #include <crug/heap.h>
 #include <crug/mm.h>
 #include <crug/vm.h>
@@ -373,6 +374,9 @@ thread *thread_create(const char *name, void (*entry)(void *), void *arg,
     t->stack_size = (u64)pages * CRUG_PAGE_SIZE;
     wait_queue_init(&t->joiners);
     t->parent_id = 0;
+    /* Kernel threads are fully privileged; a ring-3 thread gets its own mask
+       from elf_spawn_user_caps and inherits it through fork (phase 7B). */
+    t->caps = CAP_ALL;
 
     /* Every live thread hangs off g_sched.all so SYS_WAIT can resolve a tid. */
     t->all_next = g_sched.all;

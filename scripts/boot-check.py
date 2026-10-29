@@ -43,7 +43,7 @@ REQUIRED_MARKERS = (
     "CRUGOS: selftest ok",
     "CRUGOS: nvme ready",
     "CRUGOS: ahci ready",
-    "CRUGOS: phase 7a boot ok",
+    "CRUGOS: phase 7b boot ok",
 )
 # A rejected unlock stops before scheduling, storage mounting and self-tests.
 WRONG_CRYPT_MARKERS = (
@@ -107,6 +107,9 @@ def main() -> int:
     screen_mode = "no"
     cx_mode = "no"
     app_mode = "no"
+    pkg_mode = "no"
+    caps_mode = "no"
+    wbpkg_mode = "no"
     argv = []
     for arg in sys.argv[1:]:
         if arg == "--storage=none":
@@ -129,6 +132,21 @@ def main() -> int:
         elif arg.startswith("--expect-app="):
             print(f"FAIL: invalid app expectation {arg!r}", file=sys.stderr)
             return 2
+        elif arg == "--expect-pkg=yes":
+            pkg_mode = "yes"
+        elif arg.startswith("--expect-pkg="):
+            print(f"FAIL: invalid package expectation {arg!r}", file=sys.stderr)
+            return 2
+        elif arg == "--expect-caps=yes":
+            caps_mode = "yes"
+        elif arg.startswith("--expect-caps="):
+            print(f"FAIL: invalid caps expectation {arg!r}", file=sys.stderr)
+            return 2
+        elif arg == "--expect-wbpkg=yes":
+            wbpkg_mode = "yes"
+        elif arg.startswith("--expect-wbpkg="):
+            print(f"FAIL: invalid packages-window expectation {arg!r}", file=sys.stderr)
+            return 2
         else:
             argv.append(arg)
     sys.argv = [sys.argv[0]] + argv
@@ -144,7 +162,8 @@ def main() -> int:
               "[EXPECT_USER [EXPECT_USERS [EXPECT_USHELL [EXPECT_SPAWN [EXPECT_FORK "
               "[EXPECT_FORKBIG]]]]]]]]]]]]]]]]]]]]]]]]]] "
               "[--storage=none] [--expect-screen=yes] [--expect-cx=yes] "
-              "[--expect-app=yes]",
+              "[--expect-app=yes] [--expect-pkg=yes] [--expect-caps=yes] "
+              "[--expect-wbpkg=yes]",
               file=sys.stderr)
         return 2
 
@@ -244,6 +263,12 @@ def main() -> int:
         return fail(f"invalid exchange mode {cx_mode!r}", text)
     if app_mode not in ("no", "yes"):
         return fail(f"invalid app mode {app_mode!r}", text)
+    if pkg_mode not in ("no", "yes"):
+        return fail(f"invalid package mode {pkg_mode!r}", text)
+    if caps_mode not in ("no", "yes"):
+        return fail(f"invalid caps mode {caps_mode!r}", text)
+    if wbpkg_mode not in ("no", "yes"):
+        return fail(f"invalid packages-window mode {wbpkg_mode!r}", text)
 
     required = list(REQUIRED_MARKERS)
     if storage_mode == "none":
@@ -664,6 +689,67 @@ def main() -> int:
             return fail("expected the launched bundle to be reaped with its exit status", text)
         if not re.search(r"CRUGOS: wb app selftest ok \(\d+ click\(s\), [1-9]\d* launch\(es\)\)", text):
             return fail("expected the desktop to count the app clicks and launches", text)
+    if pkg_mode == "yes":
+        for marker in (
+            "CRUGOS: package registry ready",
+            "CRUGOS: pkg selftest start",
+            "CRUGOS: pkg selftest probe untrusted rejected (untrusted-key)",
+            "CRUGOS: pkg selftest rejected second install (already-installed)",
+            "CRUGOS: pkg selftest rejected untrusted (untrusted-key)",
+            "CRUGOS: pkg selftest app registered captest",
+            "CRUGOS: pkg selftest ok (1 installed, 2 rejected)",
+        ):
+            if marker not in text:
+                return fail(f"missing serial marker: {marker!r}", text)
+        if not re.search(r"CRUGOS: pkg selftest probe captest 1\.0\.0 trusted", text):
+            return fail("expected the signed package to probe as trusted", text)
+        if not re.search(r"CRUGOS: pkg installed captest 1\.0\.0 \(\d+ file\(s\), \d+ cap\(s\)\)", text):
+            return fail("expected the installer to materialise the bundle", text)
+        if not re.search(r"CRUGOS: pkg selftest installed captest 1\.0\.0", text):
+            return fail("expected the installed package in the registry", text)
+    elif "CRUGOS: pkg selftest ok" in text:
+        return fail("unexpected package selftest without --expect-pkg=yes", text)
+
+    if caps_mode == "yes":
+        for marker in (
+            "CRUGOS: caps selftest start",
+            "CRUGOS: pkg installed captest 1.0.0",
+            "CRUGOS: captest ok",
+            "CRUGOS: caps selftest ok (exit 5, caps 0x1)",
+        ):
+            if marker not in text:
+                return fail(f"missing serial marker: {marker!r}", text)
+        if not re.search(r"CRUGOS: caps selftest manifest 0x1 policy 0x1 granted 0x1", text):
+            return fail("expected the manifest and policy to intersect at fs.read", text)
+        if not re.search(r"CRUGOS: caps selftest launched tid \d+ caps 0x1", text):
+            return fail("expected the launched thread to hold exactly fs.read", text)
+        if "CRUGOS: captest denied fs.write" not in text:
+            return fail("expected the child to be denied fs.write", text)
+        if "CRUGOS: captest denied pkg.install" not in text:
+            return fail("expected the child to be denied pkg.install", text)
+    elif "CRUGOS: caps selftest ok" in text:
+        return fail("unexpected caps selftest without --expect-caps=yes", text)
+
+    if wbpkg_mode == "yes":
+        for marker in (
+            "CRUGOS: wb desktop ready",
+            "CRUGOS: wb pkg ready",
+            "CRUGOS: wb pkg installed /System/packages/captest.crpkg",
+            "CRUGOS: wb pkg selftest ok",
+            "CRUGOS: wb selftest ok",
+        ):
+            if marker not in text:
+                return fail(f"missing serial marker: {marker!r}", text)
+        if not re.search(r"CRUGOS: wb pkg ready \(window \d+, 0 package\(s\)\)", text):
+            return fail("expected the Packages window to open before the registry fills", text)
+        if not re.search(r"CRUGOS: wb pkg installed /System/packages/captest\.crpkg "
+                         r"\(1 package\(s\)\)", text):
+            return fail("expected one body click to install the signed package", text)
+        if not re.search(r"CRUGOS: wb pkg selftest ok \(1 install\(s\), 1 package\(s\)\)", text):
+            return fail("expected the desktop to count exactly one install", text)
+    elif "CRUGOS: wb pkg installed" in text:
+        return fail("unexpected package install without --expect-wbpkg=yes", text)
+
     if expect_heap == "yes":
         for marker in (
             "CRUGOS: heap ready",
@@ -865,7 +951,8 @@ def main() -> int:
           "shell", expect_shell, "keys", expect_keys, "desk", expect_desk,
           "icons", expect_icons, "drawer", expect_drawer,
           "select", expect_select, "screen", screen_mode, "cx", cx_mode,
-          "app", app_mode,
+          "app", app_mode, "pkg", pkg_mode, "caps", caps_mode,
+          "wbpkg", wbpkg_mode,
           "heap", expect_heap, "user", expect_user,
           "isolated", expect_users, "ushell", expect_ushell,
           "spawn", expect_spawn, "fork", expect_fork,

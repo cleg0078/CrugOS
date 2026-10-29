@@ -10,9 +10,11 @@
    argv[0] set to the bundle directory so an application can find its own
    files.  See include/crug/app.h. */
 #include <crug/app.h>
+#include <crug/caps.h>
 #include <crug/exec.h>
 #include <crug/ext4.h>
 #include <crug/kernel.h>
+#include <crug/perms.h>
 #include <crug/storage.h>
 #include <crug/string.h>
 
@@ -270,7 +272,13 @@ int app_launch(const struct app *a, u32 parent_id, u32 *out_tid)
     argv[0] = a->dir;
     argv[1] = 0;
     memset(&result, 0, sizeof(result));
-    t = elf_spawn_user(a->prog, 1u, argv, parent_id, &result);
+    /* Phase 7B: the granted set is the manifest's requirement intersected
+       with the policy, so neither alone can widen what the bundle gets. */
+    t = elf_spawn_user_caps(a->prog, 1u, argv, parent_id,
+                            cap_intersect(a->m.cap_mask,
+                                          perms_granted(perms_current(),
+                                                        a->m.id)),
+                            &result);
     if (!t) {
         return -1;
     }

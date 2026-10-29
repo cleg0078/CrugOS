@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 7A .app bundles and tool types (`v0.43.0`)
+## Status: phase 7B signed packages (v0.44.0)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -81,7 +81,12 @@ keyboard, with `make test-workbench-cx` as the 55th gate. Phase 7A adds
 application bundles: `/Applications/<Name>.app` directories with a bounded
 `manifest.toml`, a boot-time registry that validates them, a Workbench window
 that launches one and a shell builtin that lists, inspects and runs them, with
-`make test-app-bundles` as the 56th gate.
+`make test-app-bundles` as the 56th gate. Phase 7B adds capabilities and
+signed packages: every ring-3 thread carries a capability mask, a policy file
+in `/System` decides what a bundle may hold, a `.crpkg` container carries an
+Ed25519 signature over a SHA-512 digest that a trust list must recognise, and
+`make test-pkg`, `make test-caps` and `make test-workbench-pkg` are gates 57 to
+59.
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -1436,6 +1441,66 @@ the disk without rebuilding the kernel.
 See [docs/apps.md](docs/apps.md) for the manifest grammar, the reason table and
 the registry API.
 
+Phase 7B gives the system capabilities and signed packages: a program can do
+only what its capability mask allows, and the code it runs arrives as a signed,
+verifiable package instead of a copied directory.
+
+- `include/crug/caps.h` defines the six bits a mask can hold: `CAP_FS_READ`
+  0x01, `CAP_FS_WRITE` 0x02, `CAP_APP_LAUNCH` 0x04, `CAP_NET` 0x08,
+  `CAP_AUDIO` 0x10 and `CAP_PKG_INSTALL` 0x20, plus `CAP_ALL` 0x3F and
+  `CAP_NONE`; `kernel/lib/caps.c` parses, formats and intersects them;
+- a ring-3 thread inherits its parent's mask, and a bundle launch narrows it to
+  the intersection of the manifest's `[caps] require` line and the policy. The
+  policy is `/System/perms.conf` (`default <caps>` plus one line per app id, at
+  most eight rules) and the boot prints
+  `CRUGOS: perms policy ready (default app.launch,fs.read, N rule(s))`;
+- `kernel/core/syscall.c` checks the mask on every gated call: `SYS_OPEN` needs
+  `fs.read` (`fs.write` for a write mode), `SYS_LISTDIR` `fs.read`,
+  `SYS_APP_SPAWN` `app.launch`, `SYS_PKG_INSTALL` `pkg.install` and the socket
+  and resolver calls `CAP_NET`. A refusal is `SYS_EPERM` (-1); a caller at CPL0
+  always passes, so the in-kernel self-tests keep working;
+- two calls let a program inspect its own rights instead of running into the
+  wall: `SYS_CAP_QUERY` 28 returns the mask and `SYS_CAP_CHECK` 29 answers 1 or
+  0 for a mask argument;
+- a `.crpkg` package is a 512-byte header (`PKG_MAGIC` `CRUGPKG1`, id, name,
+  version, publisher, capability mask, icon colour, the 32-byte public key at
+  offset 0xE8 and the 64-byte Ed25519 signature at 0x110) followed by a
+  container of up to 32 files (96 KiB each, `PKG_MAX_BYTES` 128 KiB). The
+  signature covers the SHA-512 digest of header and payload, so
+  `kernel/crypto/sha512.c` and `kernel/crypto/ed25519.c` are the first crypto
+  the kernel performs for the user's benefit rather than for disk encryption;
+- `kernel/app/pkg.c` verifies the signature against
+  `/System/trusted/keys.conf` (`pub <64 hex> <publisher>`), stages the files
+  under `/Applications/.stage/<id>`, renames the tree to `<id>.app`, writes a
+  record to `/System/pkgdb/<id>.txt` and registers the bundle, then prints
+  `CRUGOS: pkg installed <id> <version> (N file(s), M cap(s))`. A refusal prints
+  `CRUGOS: pkg rejected <path> (<reason>)` with one of twenty-one stable reasons
+  (`untrusted-key`, `digest`, `signature`, `already-installed`,
+  `too-many-files`, ...), and the boot line is
+  `CRUGOS: package registry ready (N package(s))`;
+- `make mkpkg` builds `tools/mkpkg.c` and `make packages` signs the test
+  bundles. `PKG_SEED` and `PKG_BAD_SEED` are two fixed Ed25519 seeds, so the
+  images are byte-identical run to run and the trust list holds only the first
+  key, which is what makes the untrusted refusal reproducible;
+- `wb.pkg=1` adds a `Packages` window at (40,330), 420 by 200, with one row per
+  package and a one-click install. The row shows the id and the version, turns
+  amber with `installed` once the package lands, and the desktop counts the
+  installs in its self-test;
+- the gates are `make test-pkg` (57), `make test-caps` (58) and
+  `make test-workbench-pkg` (59). The first boots `pkg.test=1` and proves an
+  install, a duplicate refusal and an untrusted-key refusal; the second boots
+  `pkg.test=2` and runs `/bin/captest` with `fs.read` only, so its write and its
+  install both return `SYS_EPERM` and it exits 5; the third installs the same
+  package from the desktop and checks the window pixels;
+- `tests/host/test_pkg.c` covers the SHA-512 and Ed25519 vectors, the mask
+  helpers, the policy parser, the trust list, the header layout and the payload
+  walk, so `make test-host` reports 8403 checks; `make size` reports a 329016 B
+  (321 KiB) kernel file and a 980414 B (957 KiB) load image (`.text` 236070 B,
+  `.rodata` 35648 B, `.data` 88 B, `.bss` 708608 B), and all 59 gates pass.
+
+See [docs/packages.md](docs/packages.md) for the capability matrix, the policy
+and manifest grammar, the container layout and the refusal table.
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -1444,9 +1509,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.43.0 (phase 7a) -- Amiga-inspired microkernel bring-up
+CrugOS 0.44.0 (phase 7b) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.43.0
+CRUGOS: version 0.44.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -1495,7 +1560,7 @@ CRUGOS: tcp http served (72 bytes)
 CRUGOS: net selftest ok
 CRUGOS: gfx ready (1024x768, cursor at 512,384)
 CRUGOS: selftest ok
-kernel : 0x0000000000100000 size=289 KiB
+kernel : 0x0000000000100000 size=321 KiB
 boot   : cpu=0 acpi_rsdp=0x1f77e000 fdt=0x0 initrd=0x0
 memory : 36 regions, usable 474080 KiB (462 MiB)
 pmm    : total=118520 free=118462 bitmap=131072 B
@@ -1505,9 +1570,9 @@ entropy: ca02033c50b53413
 wx     : audit ok, identity map 0..4 GiB, guard unmapped
 heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
-boot   : pmm=28663 us cpu=400 us vm=689 us traps=326 us timer=65383 us heap=419 us storage=133465 us sched=306 us syscall=85 us total=219787 us
+boot   : pmm=28663 us cpu=455 us vm=665 us traps=361 us timer=65361 us heap=578 us storage=97059 us sched=7420 us syscall=113 us total=200681 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase 7a boot ok
+CRUGOS: phase 7b boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -1722,6 +1787,9 @@ make test-workbench-select  # click drawer rows and drag its scrollbar
 make test-workbench-screens  # switch screens and move a window between them
 make test-workbench-cx  # drive commodity hotkeys and toggle rows in the Exchange manager
 make test-app-bundles  # launch a .app bundle from the desktop and from the shell
+make test-pkg    # install a signed package and refuse a duplicate and an untrusted key
+make test-caps   # launch the installed bundle and prove its capability wall
+make test-workbench-pkg  # install a signed package from the Workbench
 make test-hardening  # craft hostile superblock/inode/crypt images and boot them
 make test-heap   # corrupt the kernel heap and prove the integrity checker catches it
 make test-trap   # inject eight crafted faults and check the report, IST and panic
@@ -1737,9 +1805,11 @@ make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
 make usb         # write the ISO to a USB block device (USB_DEV=/dev/sdX)
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
-make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows/menus/gadgets, resize grips, keyboard focus and keys, icon dragging, the send-to-front gadget and keyboard icon focus, the body input handler, the text grid and the shell, the user-window and uaccess validators, the per-space page-table tests, the ELF exec mapper, the argv predicates, the fork clone, the copy-on-write table, the screen model, the commodity registry and the app manifest parser)
+make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows/menus/gadgets, resize grips, keyboard focus and keys, icon dragging, the send-to-front gadget and keyboard icon focus, the body input handler, the text grid and the shell, the user-window and uaccess validators, the per-space page-table tests, the ELF exec mapper, the argv predicates, the fork clone, the copy-on-write table, the screen model, the commodity registry, the app manifest parser, the capability mask and permission policy, and the package container with its Ed25519 signatures)
 make check-disk  # e2fsck + persisted-file checks on the latest test disk
 make user        # build the ring-3 programs and .app payloads the disk image carries
+make packages    # sign the test bundles the installer gates install
+make mkpkg       # build the host package signer (tools/mkpkg.c)
 make disk        # generate the GPT/ext4 test disk
 make raid-disks  # generate the two RAID1 member disks
 make raid10-disks  # generate the four RAID10 member disks
@@ -1777,7 +1847,9 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `WB_SELECT_FILL`, `WB_SELECT_RUN_TIMEOUT_SEC`, `WB_SCREEN_WAIT`,
 `WB_SCREEN_ACTS`, `WB_SCREEN_RUN_TIMEOUT_SEC`, `WB_CX_WAIT`, `WB_CX_ACTS`,
 `WB_CX_RUN_TIMEOUT_SEC`, `WB_APP_WAIT`, `WB_APP_ACTS`,
-`WB_APP_RUN_TIMEOUT_SEC`, `HARDEN_TIMEOUT_SEC`,
+`WB_APP_RUN_TIMEOUT_SEC`, `WB_PKG_WAIT`, `WB_PKG_RUN_TIMEOUT_SEC`,
+`MKPKG`, `PKG_DATA_DIR`, `PKG_SEED`, `PKG_BAD_SEED`, `PKG_RUN_TIMEOUT_SEC`,
+`CAPS_RUN_TIMEOUT_SEC`, `HARDEN_TIMEOUT_SEC`,
 `HEAP_STRESS_OPS`, `HEAP_RUN_TIMEOUT_SEC`, `TRAP_TIMEOUT_SEC`, `FUZZ_CASES`,
 `FUZZ_CRYPT_CASES`, `FUZZ_SEED`, `FUZZ_TIMEOUT_SEC`, `USER_RUN_TIMEOUT_SEC`,
 `USER2_RUN_TIMEOUT_SEC`, `SHELL_RUN_TIMEOUT_SEC`, `SPAWN_RUN_TIMEOUT_SEC`,
@@ -1807,24 +1879,24 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/arch/x86_64/` | boot code, linker script, port I/O, serial, i8042 keyboard, framebuffer, CPU/IDT/APIC/timer, context switch |
 | `kernel/core/` | kernel entry, console, printf, panic, self-tests, scheduler, handles, MsgPort, syscall dispatcher, boot report |
 | `kernel/exec/` | ELF loader for ring-3 programs: segment policy, W^X user mappings and the user stack |
-| `kernel/lib/` | freestanding string, formatting, bitmap, console line-editor and text-grid routines |
+| `kernel/lib/` | freestanding string, formatting, bitmap, console line-editor and text-grid routines, the capability mask and the permission policy |
 | `kernel/input/` | `input.device`: set-1 scancode decoder, the console byte queue and the pointer state |
 | `kernel/audio/` | `audio.device` PCM ring, the per-channel mixer and the tone generator |
 | `kernel/net/` | `net.device`, Ethernet/ARP/IPv4/ICMP/UDP, TCP, the DHCP client and the DNS resolver |
 | `kernel/gfx/` | `gfx.device` (the pointer-driven framebuffer cursor) and `intuition.device` with the phase 6A desktop, its phase 6B menus, gadgets and event queue, and the phase 6C body painter the shell window uses, the phase 6D resize grips and keyboard navigation, the phase 6E desktop objects, depth gadget and drawer, the phase 6F icon dragging, send-to-front gadget and keyboard icon focus, the phase 6G scrolling drawer with its scrollbar, refresh and reflow, and the phase 6H drawer row selection with its draggable scrollbar and body-input hook |
-| `kernel/app/` | the application registry and the bounded manifest parser for `.app` bundles |
+| `kernel/app/` | the application registry, the bounded manifest parser for `.app` bundles and the signed `.crpkg` container |
 | `kernel/shell/` | the Workbench shell: line editor, history, the command table and the `shell_io` binding to the mounted ext4 root |
 | `kernel/mm/` | physical allocator, W^X page tables, the user-window mapper and uaccess copy boundary, copy-on-write frame references, kernel heap |
 | `kernel/block/` | block-device registry, partitions, bounds checks, RAID1/RAID10, boot-time rebuild and the AES-256-XTS `crypt.device` |
 | `kernel/fs/` | GPT, writable checksummed ext4, checksummed JBD2 journal and the storage boot policy (including the console passphrase prompt) |
-| `kernel/crypto/` | AES, XTS, AES-NI, BLAKE2b and Argon2id (shared with the host tools) |
+| `kernel/crypto/` | AES, XTS, AES-NI, BLAKE2b, Argon2id, SHA-512 and Ed25519 (shared with the host tools) |
 | `drivers/` | PCI, legacy virtio-blk, NVMe and AHCI/SATA block device drivers, legacy virtio-net, and the xHCI controller with its USB HID keyboard, mouse and Audio Class decoders (audio frames flow into `kernel/audio/`) |
 | `scripts/` | QEMU runner, disk/RAID1/RAID10/crypt image builders, the hybrid ISO builder (`mkiso.sh`, `mkfat.py`), boot/PE/disk/RAID/journal/crypt/ISO checks, the serial and keyboard prompt drivers, tamper helper, size and reproducibility gates |
 | `tests/host/` | host unit tests for freestanding code and the mount-path fuzzer (`fuzz_mount.c`) |
 | `tools/` | host-side development tools (`gen-font.py`, `mkcrypt.c`, `gen-crc32c.py`) |
 | `user/` | ring-3 programs and their freestanding runtime (`user.ld`, `start.S`, `lib.h`) |
 | `docs/` | [build](docs/build.md), [boot](docs/boot.md), [storage](docs/storage.md), [checksums](docs/checksums.md), [crypto](docs/crypto.md), [input](docs/input.md), [network](docs/network.md),
-[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [USB/xHCI](docs/usb.md), [audio](docs/audio.md), [graphics](docs/gfx.md), [Workbench](docs/workbench.md), [application bundles](docs/apps.md), [bootable ISO](docs/iso.md), [kernel heap](docs/heap.md), [trap policy](docs/traps.md), [mount-path fuzzing](docs/fuzzing.md), [ring 3](docs/userspace.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
+[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [USB/xHCI](docs/usb.md), [audio](docs/audio.md), [graphics](docs/gfx.md), [Workbench](docs/workbench.md), [application bundles](docs/apps.md), [signed packages](docs/packages.md), [bootable ISO](docs/iso.md), [kernel heap](docs/heap.md), [trap policy](docs/traps.md), [mount-path fuzzing](docs/fuzzing.md), [ring 3](docs/userspace.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
 
 ## Versioning
 
