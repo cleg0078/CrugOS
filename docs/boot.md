@@ -52,7 +52,7 @@ for drawer scrolling and refresh plus `wb.fill=<n>` to fill the root first, and
 phase 6H adds `wb.dsel=1` for click-selected drawer rows and a draggable
 scrollbar, phase 6I adds `wb.screens=1` for a retained `Tools` screen with its
 window, gadget and self-test, phase 6J adds `wb.cx=1` for the Commodities
-Exchange (four built-in hotkey utilities and a manager window), and phase H2 adds `heap.stress=<1..200000>` and `heap.guard=1`,
+Exchange (four built-in hotkey utilities and a manager window), phase 7A adds `wb.app=1` for the Applications icon and the bundle window behind it, and phase H2 adds `heap.stress=<1..200000>` and `heap.guard=1`,
 parsed by `heap_cmdline()` right after `heap_init()`, and phase H3 adds
 `trap.test=<recipe>` (`de`, `ud`, `gp`, `pf`, `df`, `nmi`, `mc`, `db`) for the
 fault injector, parsed by `trap_cmdline()` right after `heap_cmdline()`, and
@@ -66,7 +66,9 @@ execs the same child in place, phase U5's `user.test=5` adds `/bin/fork`, which
 copies the calling program into a second address space so the child can write
 its own pages without the parent seeing the write, and phase U6's
 `user.test=6` adds `/bin/forkbig`, which forks 300 shared pages and proves the
-child's writes never reach the parent's copy. Without the token the user level
+child's writes never reach the parent's copy, and phase 7A's `user.test=7` adds
+`app_list()`, which runs `/bin/sh /etc/app.rc` so the shell lists, inspects and
+launches a bundle and exits 9. Without the token the user level
 is 0 and the self-test is silent. A boot
 medium that ships no block device (the hybrid
 ISO) passes `storage=none`, which is the one token that changes the storage
@@ -160,7 +162,8 @@ post-snapshot allocations cannot push it over capacity.
    `wb.screens=<0|1>` (a second `Tools` screen with a window, a gadget that
    moves it to screen 0, and the screens self-test) and `wb.cx=<0|1>` (a
    Commodities Exchange registry; only 0 disables it, and it needs
-   `wb.enable=1`), and
+   `wb.enable=1`) and `wb.app=<0|1>` (the Applications icon and its bundle
+   window, which the app self-test drives; it also needs `wb.enable=1`), and
    `wb_init` builds the desktop only when
    the token was supplied: it takes
    the framebuffer away from the text console and prints `CRUGOS: wb desktop
@@ -174,8 +177,10 @@ post-snapshot allocations cannot push it over capacity.
    the scrollbar)` when `wb.dsel=1` installed the body-input handler after the
    desktop-ready line, and by `CRUGOS: wb screens ready (N screen(s), front 0)`
    when `wb.screens=1` added the retained Tools screen with its window, menus
-   and Send to Workbench gadget, and by `CRUGOS: wb cx ready (N commodity(ies))`
-   when `wb.cx=1` registered the four built-in commodities; a screen switch prints `CRUGOS: wb screen N
+   and Send to Workbench gadget, by `CRUGOS: wb cx ready (N commodity(ies))` when `wb.cx=1` registered the four
+   built-in commodities, and by `CRUGOS: wb app icon ready (Applications:)` and
+   `CRUGOS: wb app ready (N application(s))` when `wb.app=1` added the
+   Applications icon and its window; a screen switch prints `CRUGOS: wb screen N
    front (K window(s))` and a move between screens `CRUGOS: wb window N moved
    to screen M`. Without the token the framebuffer console keeps
    its text mode and no Workbench line appears.
@@ -232,6 +237,12 @@ post-snapshot allocations cannot push it over capacity.
    `CRUGOS: raid healthy`/`raid degraded` when RAID is used, then
    `CRUGOS: root device <partition>` for the selected root partition, then
    `CRUGOS: ext4 ready`, `CRUGOS: journal ready`, `CRUGOS: storage ready`.
+   `app_init` then lists `/Applications`, validates each `manifest.toml`, checks
+   that the payload program exists and prints `CRUGOS: app registry ready (N
+   app(s), M rejected)` plus one `CRUGOS: app rejected <dir> (<reason>)` line per
+   refused bundle. A disk without bundles (every gate but
+   `make test-app-bundles`) prints `CRUGOS: app registry ready (0 app(s), 0
+   rejected)`.
 11. `sched_init`: per-class run queues, boot thread id 0 and the idle thread.
    `CRUGOS: sched ready`.
 12. `process_init`: the kernel process and its handle table.
@@ -268,7 +279,10 @@ post-snapshot allocations cannot push it over capacity.
     strip twice and moves the `Tools` window once, printing
     `CRUGOS: wb screens selftest ok (N switch(es), M move(s))`; with `wb.cx=1`
     it waits for two row toggles and two hotkey fires and prints
-    `CRUGOS: wb cx selftest ok (N toggle(s), M fire(s))`. The whole
+    `CRUGOS: wb cx selftest ok (N toggle(s), M fire(s))`; with `wb.app=1` it
+    opens the Applications window, clicks the first row and launches it, printing
+    `CRUGOS: wb app selftest ok (N click(s), M launch(es))` once the desktop has
+    reaped the program. The whole
     check is silent unless `wb.enable=` enabled it. `heap_selftest()` prints
     `CRUGOS: heap check ok (S slab(s), O object(s), L large block(s))` and,
     when `heap.stress=` or `heap.guard=` was supplied, runs those passes too.
@@ -289,12 +303,15 @@ post-snapshot allocations cannot push it over capacity.
     `user.test=6` runs level 5 and then `user_forkbig()`, which runs
     `/bin/forkbig`, joins it and requires exit 0; the program maps 300 pages,
     forks them copy-on-write, has the child write both ends and exit 7, and then
-    checks that its own sentinel and trailing byte survived. A mismatch exits 35
+    checks that its own sentinel and trailing byte survived. `user.test=7` runs
+    level 6 and then `user_app()`, which runs `/bin/sh /etc/app.rc`; the script
+    performs `app list`, `app info orbit` and `app run orbit` and then exits 9,
+    and the kernel requires that code. A mismatch exits 35
     before the report. Without the token the user level is 0 and nothing is
     printed.
 14. The user self-test of step 13, when it ran, has already joined its threads;
     then `report_boot`, `storage_lock` (wipes the passphrase, the volume keys
-    and the bounce buffer), `CRUGOS: phase 6j boot ok`, then
+    and the bounce buffer), `CRUGOS: phase 7a boot ok`, then
     `wb_hold` (only when
     `wb.hold=` was given: the guest stays alive with the desktop on screen until
     the deadline), `trap_test_run()` (only when `trap.test=` was given, so the
@@ -499,6 +516,8 @@ CRUGOS: journal replayed (100 block(s) at mount)  # only after a crash
 CRUGOS: ext4 ready
 CRUGOS: journal ready
 CRUGOS: storage ready
+CRUGOS: app rejected Broken.app (no-version)  # one line per refused bundle
+CRUGOS: app registry ready (2 app(s), 1 rejected)  # 0/0 on a disk with no bundles
 CRUGOS: sched ready
 CRUGOS: syscall ready
 CRUGOS: heap check ok (6 slab(s), 8 object(s), 1 large block(s))
@@ -571,7 +590,7 @@ CRUGOS: wb window 1 sent to front
 CRUGOS: wb action 6 front window 1
 CRUGOS: wb icons selftest ok (1 move(s), 1 front(s))
 CRUGOS: sh run 'ver'
-CRUGOS: sh out CrugOS 0.42.0 (phase 6j), x86_64
+CRUGOS: sh out CrugOS 0.43.0 (phase 7a), x86_64
 CRUGOS: wb selftest ok (1 drag(s), 1 action(s))
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb drawer selftest ok (3 scroll(s), 1 refresh(es))
@@ -583,6 +602,12 @@ CRUGOS: wb action 2 commodity Mute on
 CRUGOS: wb action 3 commodity Mute fired (muted)
 CRUGOS: wb action 4 commodity Clock fired (uptime 1 s)
 CRUGOS: wb cx selftest ok (2 toggle(s), 2 fire(s))
+CRUGOS: wb app icon ready (Applications:)     # only with wb.app=1
+CRUGOS: wb app ready (2 application(s))       # only with wb.app=1
+CRUGOS: wb app selected hello (index 0 of 2)  # one click selects a row
+CRUGOS: wb app launch hello tid 11            # a second click launches it
+CRUGOS: wb app reaped tid 11 exit 0
+CRUGOS: wb app selftest ok (1 click(s), 1 launch(es))
 CRUGOS: sh selftest ok (1 command(s))
 CRUGOS: selftest ok
 CRUGOS: user selftest start                  # only with user.test=
@@ -618,12 +643,12 @@ CRUGOS: sh cmd exit
 CRUGOS: sh exit 7
 CRUGOS: user shell finished (exit 7)
 CRUGOS: user selftest ok (3 program(s), 1 fault(s))
-boot   : pmm=28663 us cpu=400 us vm=689 us traps=326 us timer=65383 us heap=419 us storage=133465 us sched=306 us syscall=85 us total=229739 us
-CRUGOS: phase 6j boot ok
+boot   : pmm=28663 us cpu=400 us vm=689 us traps=326 us timer=65383 us heap=419 us storage=133465 us sched=306 us syscall=85 us total=219787 us
+CRUGOS: phase 7a boot ok
 ```
 
 With `trap.test=<recipe>` the same boot ends differently: the injector runs after
-`CRUGOS: phase 6j boot ok`, injects exactly one fault and the guest exits 35
+`CRUGOS: phase 7a boot ok`, injects exactly one fault and the guest exits 35
 instead of 33. A `trap.test=de` boot ends:
 
 ```
@@ -695,11 +720,25 @@ CRUGOS: sh cmd exit
 CRUGOS: sh exit 7
 CRUGOS: user shell finished (exit 7)
 CRUGOS: user selftest ok (3 program(s), 1 fault(s))
-boot   : pmm=28663 us cpu=400 us vm=689 us traps=326 us timer=65383 us heap=419 us storage=133465 us sched=306 us syscall=85 us total=229739 us
-CRUGOS: phase 6j boot ok
+boot   : pmm=28663 us cpu=400 us vm=689 us traps=326 us timer=65383 us heap=419 us storage=133465 us sched=306 us syscall=85 us total=219787 us
+CRUGOS: phase 7a boot ok
 ```
 
-Both user excerpts keep the lines the check asserts; a real boot also prints the
+A `user.test=7` boot, the second leg of `make test-app-bundles`, adds the app
+stage after the large fork and ends its user stage with these lines (the
+`app run` child's own output is elided, and the shell leg's report line ends
+`total=196487 us`):
+
+```
+CRUGOS: user app test start
+CRUGOS: sh app count 3
+CRUGOS: sh app orbit 1.0.0
+CRUGOS: sh app orbit tid N
+CRUGOS: sh app orbit exit 5
+CRUGOS: user app ok (exit 9)
+```
+
+All three user excerpts keep the lines the check asserts; a real boot also prints the
 report's `trap rip=` line and the two `trap regs` lines around the `trap fault`
 line, which the curated samples above leave out.
 
@@ -802,11 +841,14 @@ line: `scripts/boot-check.py` takes the user expectation as `EXPECT_USER`
 expectation as `EXPECT_USERS` (argv[28]), the shell expectation as
 `EXPECT_USHELL` (argv[29]), the spawn expectation as `EXPECT_SPAWN`
 (argv[30]), the fork expectation as `EXPECT_FORK` (argv[31]) and the large-fork
-expectation as `EXPECT_FORKBIG` (argv[32]), so the plain boot markers above stay
+expectation as `EXPECT_FORKBIG` (argv[32]). Phase 7A adds no positional: the app
+bundle expectation is the flag `--expect-app=yes`, so the plain boot markers
+above stay
 the contract for every gate except `make test-user` (gate 48),
 `make test-user2` (gate 49), `make test-user3` (gate 50),
-`make test-user4` (gate 51), `make test-user5` (gate 52) and
-`make test-user6` (gate 53). Phase U6 widened the argument guard to
+`make test-user4` (gate 51), `make test-user5` (gate 52),
+`make test-user6` (gate 53) and `make test-app-bundles` (gate 56). Phase U6
+widened the argument guard to
 `if len(sys.argv) < 3 or len(sys.argv) > 33:` so argv[32] fits; see
 [userspace.md](userspace.md).
 
@@ -876,8 +918,13 @@ usual check-disk pass. `make test-workbench-cx` sets `wb.cx=1` (with
 it enabled, presses F6 for the Clock, and checks the Exchange body and active
 title bar in a screendump; the run then calls
 `scripts/boot-check.py --expect-cx=yes` (again a flag, so the argv layout is
-unchanged) before its check-disk pass. See [workbench.md](workbench.md)
-and [build.md](build.md).
+unchanged) before its check-disk pass. `make test-app-bundles` has two legs:
+the first sets `wb.app=1` on the desktop line, double-clicks the Applications
+icon at (48,324) and the first row in the window it opens, and calls
+`scripts/boot-check.py --expect-app=yes` (again a flag, so the argv layout is
+unchanged); the second runs `make run CMDLINE_EXTRA="user.test=7"` and drives
+the registry from the shell. Both pass check-disk. See [workbench.md](workbench.md),
+[apps.md](apps.md) and [build.md](build.md).
 
 The `audio` lines appear only on machines with a USB audio function: a default
 `q35` boot prints `CRUGOS: audio device absent`, while `make test-audio` adds
@@ -912,14 +959,14 @@ replaced by the skip marker, and the USB device the firmware booted from shows
 up in the USB lines as an unsupported mass-storage function:
 
 ```
-CRUGOS: version 0.42.0
+CRUGOS: version 0.43.0
 CRUGOS: usb controller ready (xhci, 8 port(s))
 CRUGOS: usb device 46f4:0001 on port 1 (speed 4)
 CRUGOS: usb device class 8 on port 1 (unsupported)
 CRUGOS: storage skipped (storage=none)
 CRUGOS: heap check ok (6 slab(s), 8 object(s), 1 large block(s))
 CRUGOS: selftest ok
-CRUGOS: phase 6j boot ok
+CRUGOS: phase 7a boot ok
 ```
 
 `kernel/core/report.c` prints the machine description between them: kernel

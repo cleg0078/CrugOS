@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 6J commodities exchange (`v0.42.0`)
+## Status: phase 7A .app bundles and tool types (`v0.43.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -77,7 +77,11 @@ per-screen windows and desktop icons, and a window move between screens;
 Exchange: a fixed registry of four global hotkey utilities (`Volume up`,
 `Volume down`, `Mute` and `Clock`), an `Exchange` manager window whose rows
 toggle them, and function keys decoded from both the PS/2 and the USB HID
-keyboard, with `make test-workbench-cx` as the 55th gate.
+keyboard, with `make test-workbench-cx` as the 55th gate. Phase 7A adds
+application bundles: `/Applications/<Name>.app` directories with a bounded
+`manifest.toml`, a boot-time registry that validates them, a Workbench window
+that launches one and a shell builtin that lists, inspects and runs them, with
+`make test-app-bundles` as the 56th gate.
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -1379,6 +1383,59 @@ hotkey utilities with a manager window:
   200518 B, `.rodata` 30880 B, `.data` 68 B, `.bss` 688128 B), and all 55
   gates pass.
 
+Phase 7A gives the system application bundles: directories a user copies onto
+the disk without rebuilding the kernel.
+
+- `/Applications/<Name>.app/manifest.toml` plus
+  `/Applications/<Name>.app/bin/x86_64/<program>` make one bundle; the payload is
+  an ordinary ring-3 ELF and the manifest is a bounded TOML subset
+  (`APP_MANIFEST_MAX` 2048 bytes) with `[app]` (`id`, `name`, `version` as three
+  numeric parts, optional `min_os`), `[exec]` (`prog`, relative, no `..`),
+  `[tooltypes]` (up to eight uppercase `KEY = "value"` entries) and `[icon]`
+  (`rgb = "RRGGBB"`);
+- `kernel/app/manifest.c` is the pure parser and `kernel/app/app.c` the registry:
+  `APP_MAX` 8 bundles scanned once by `app_init()` after the filesystem mounts and
+  before the scheduler starts, sorted by id, with duplicate ids and names refused;
+  a bundle either registers or prints `CRUGOS: app rejected <dir> (<reason>)` with
+  one of nineteen stable reasons (`no-manifest`, `bad-entry`, `bad-version`,
+  `bad-prog`, `bad-rgb`, `too-many-tooltypes`, `dup-id`, `registry-full`, ...),
+  and the boot line is
+  `CRUGOS: app registry ready (N app(s), M rejected)`;
+- `app_launch()` checks that the payload resolves and calls `elf_spawn_user()`
+  with the bundle directory as `argv[0]`, so a bundle program can find its own
+  files;
+- `wb.app=1` adds an `Applications:` drawer icon at (16,300) and opens a 340 by
+  240 window at (560,320) on a double click; one row per bundle, 20 pixels apart,
+  name left and version right, an amber band on the selected row, and a second
+  press within `WB_DOUBLE_CLICK_NS` 600 ms launches it. One launch runs at a time
+  (`CRUGOS: wb app busy (tid N)`), and the desktop reaps the thread and prints
+  `CRUGOS: wb app reaped tid N exit E`;
+- the ring-3 shell gains `app list`, `app info <id>` and `app run <id>`, backed by
+  `SYS_APP_COUNT` 25, `SYS_APP_INFO` 26 and `SYS_APP_SPAWN` 27 (`SYS_MAX` 28):
+  `SYS_APP_INFO` copies a 512-byte `id|name|version|prog|RRGGBB|KEY=value;...`
+  record through the uaccess boundary and `SYS_APP_SPAWN` starts a registered
+  bundle and returns its tid;
+- `mkdisk.sh` installs `Hello.app` (tool type `GREET="world"`, amber icon) and
+  `Orbit.app` (`MODE="demo"`, blue icon) plus a deliberately broken
+  `Broken.app` the registry rejects, and `user.test=7` runs
+  `/bin/sh /etc/app.rc` (`app list`, `app info orbit`, `app run orbit`, `exit 9`)
+  so the gate proves the shell path as well as the desktop path;
+- `make test-app-bundles` is the 56th gate in two legs: leg one boots headless
+  with `wb.enable=1 wb.wait=30 wb.app=1 wb.acts=1`, double-clicks the icon at
+  (48,324) and the first row at (600,358), checks the window pixels and the
+  self-test count, and passes `--expect-app=yes` to `boot-check.py` (a flag, so
+  the argument order is unchanged); leg two boots `user.test=7` under
+  `APP_RUN_TIMEOUT_SEC` 300 and checks the shell markers; both end with a clean
+  `e2fsck`;
+- `tests/host/test_app.c` parses the shipped manifests, rejects the broken one and
+  walks the reason table, and `make test-host` reports 8216 checks;
+- `make size` reports a 296848 B (289 KiB) kernel file and a 942394 B (920 KiB)
+  load image (`.text` 209926 B, `.rodata` 31968 B, `.data` 84 B, `.bss` 700416 B),
+  and all 56 gates pass.
+
+See [docs/apps.md](docs/apps.md) for the manifest grammar, the reason table and
+the registry API.
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -1387,9 +1444,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.42.0 (phase 6j) -- Amiga-inspired microkernel bring-up
+CrugOS 0.43.0 (phase 7a) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.42.0
+CRUGOS: version 0.43.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -1438,7 +1495,7 @@ CRUGOS: tcp http served (72 bytes)
 CRUGOS: net selftest ok
 CRUGOS: gfx ready (1024x768, cursor at 512,384)
 CRUGOS: selftest ok
-kernel : 0x0000000000100000 size=276 KiB
+kernel : 0x0000000000100000 size=289 KiB
 boot   : cpu=0 acpi_rsdp=0x1f77e000 fdt=0x0 initrd=0x0
 memory : 36 regions, usable 474080 KiB (462 MiB)
 pmm    : total=118520 free=118462 bitmap=131072 B
@@ -1448,9 +1505,9 @@ entropy: ca02033c50b53413
 wx     : audit ok, identity map 0..4 GiB, guard unmapped
 heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
-boot   : pmm=28663 us cpu=400 us vm=689 us traps=326 us timer=65383 us heap=419 us storage=133465 us sched=306 us syscall=85 us total=229739 us
+boot   : pmm=28663 us cpu=400 us vm=689 us traps=326 us timer=65383 us heap=419 us storage=133465 us sched=306 us syscall=85 us total=219787 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase 6j boot ok
+CRUGOS: phase 7a boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -1664,6 +1721,7 @@ make test-workbench-drawer  # scroll, refresh and resize the System: drawer
 make test-workbench-select  # click drawer rows and drag its scrollbar
 make test-workbench-screens  # switch screens and move a window between them
 make test-workbench-cx  # drive commodity hotkeys and toggle rows in the Exchange manager
+make test-app-bundles  # launch a .app bundle from the desktop and from the shell
 make test-hardening  # craft hostile superblock/inode/crypt images and boot them
 make test-heap   # corrupt the kernel heap and prove the integrity checker catches it
 make test-trap   # inject eight crafted faults and check the report, IST and panic
@@ -1679,9 +1737,9 @@ make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
 make usb         # write the ISO to a USB block device (USB_DEV=/dev/sdX)
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
-make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows/menus/gadgets, resize grips, keyboard focus and keys, icon dragging, the send-to-front gadget and keyboard icon focus, the body input handler, the text grid and the shell, the user-window and uaccess validators, the per-space page-table tests, the ELF exec mapper, the argv predicates, the fork clone, the copy-on-write table, the screen model and the commodity registry)
+make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows/menus/gadgets, resize grips, keyboard focus and keys, icon dragging, the send-to-front gadget and keyboard icon focus, the body input handler, the text grid and the shell, the user-window and uaccess validators, the per-space page-table tests, the ELF exec mapper, the argv predicates, the fork clone, the copy-on-write table, the screen model, the commodity registry and the app manifest parser)
 make check-disk  # e2fsck + persisted-file checks on the latest test disk
-make user        # build the nine ring-3 programs the disk image carries
+make user        # build the ring-3 programs and .app payloads the disk image carries
 make disk        # generate the GPT/ext4 test disk
 make raid-disks  # generate the two RAID1 member disks
 make raid10-disks  # generate the four RAID10 member disks
@@ -1718,11 +1776,12 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `WB_DRAWER_RUN_TIMEOUT_SEC`, `WB_SELECT_WAIT`, `WB_SELECT_ACTS`,
 `WB_SELECT_FILL`, `WB_SELECT_RUN_TIMEOUT_SEC`, `WB_SCREEN_WAIT`,
 `WB_SCREEN_ACTS`, `WB_SCREEN_RUN_TIMEOUT_SEC`, `WB_CX_WAIT`, `WB_CX_ACTS`,
-`WB_CX_RUN_TIMEOUT_SEC`, `HARDEN_TIMEOUT_SEC`,
+`WB_CX_RUN_TIMEOUT_SEC`, `WB_APP_WAIT`, `WB_APP_ACTS`,
+`WB_APP_RUN_TIMEOUT_SEC`, `HARDEN_TIMEOUT_SEC`,
 `HEAP_STRESS_OPS`, `HEAP_RUN_TIMEOUT_SEC`, `TRAP_TIMEOUT_SEC`, `FUZZ_CASES`,
 `FUZZ_CRYPT_CASES`, `FUZZ_SEED`, `FUZZ_TIMEOUT_SEC`, `USER_RUN_TIMEOUT_SEC`,
 `USER2_RUN_TIMEOUT_SEC`, `SHELL_RUN_TIMEOUT_SEC`, `SPAWN_RUN_TIMEOUT_SEC`,
-`FORK_RUN_TIMEOUT_SEC`, `FORKBIG_RUN_TIMEOUT_SEC`,
+`FORK_RUN_TIMEOUT_SEC`, `FORKBIG_RUN_TIMEOUT_SEC`, `APP_RUN_TIMEOUT_SEC`,
 `DEMO_DISPLAY`, `DEMO_HOLD_SEC`, `DEMO_FILL_FILES`,
 `DEMO_TIMEOUT_SEC`, `DEMO_CMDLINE`, `DEMO_MACHINE_EXTRA`, `DEMO_QEMU_EXTRA`,
 `ISO_IMAGE`, `ISO_STAGE`, `ISO_FAT_IMG`, `ISO_SIZE_MB`, `ISO_VOLID`,
@@ -1753,6 +1812,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/audio/` | `audio.device` PCM ring, the per-channel mixer and the tone generator |
 | `kernel/net/` | `net.device`, Ethernet/ARP/IPv4/ICMP/UDP, TCP, the DHCP client and the DNS resolver |
 | `kernel/gfx/` | `gfx.device` (the pointer-driven framebuffer cursor) and `intuition.device` with the phase 6A desktop, its phase 6B menus, gadgets and event queue, and the phase 6C body painter the shell window uses, the phase 6D resize grips and keyboard navigation, the phase 6E desktop objects, depth gadget and drawer, the phase 6F icon dragging, send-to-front gadget and keyboard icon focus, the phase 6G scrolling drawer with its scrollbar, refresh and reflow, and the phase 6H drawer row selection with its draggable scrollbar and body-input hook |
+| `kernel/app/` | the application registry and the bounded manifest parser for `.app` bundles |
 | `kernel/shell/` | the Workbench shell: line editor, history, the command table and the `shell_io` binding to the mounted ext4 root |
 | `kernel/mm/` | physical allocator, W^X page tables, the user-window mapper and uaccess copy boundary, copy-on-write frame references, kernel heap |
 | `kernel/block/` | block-device registry, partitions, bounds checks, RAID1/RAID10, boot-time rebuild and the AES-256-XTS `crypt.device` |
@@ -1764,7 +1824,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `tools/` | host-side development tools (`gen-font.py`, `mkcrypt.c`, `gen-crc32c.py`) |
 | `user/` | ring-3 programs and their freestanding runtime (`user.ld`, `start.S`, `lib.h`) |
 | `docs/` | [build](docs/build.md), [boot](docs/boot.md), [storage](docs/storage.md), [checksums](docs/checksums.md), [crypto](docs/crypto.md), [input](docs/input.md), [network](docs/network.md),
-[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [USB/xHCI](docs/usb.md), [audio](docs/audio.md), [graphics](docs/gfx.md), [Workbench](docs/workbench.md), [bootable ISO](docs/iso.md), [kernel heap](docs/heap.md), [trap policy](docs/traps.md), [mount-path fuzzing](docs/fuzzing.md), [ring 3](docs/userspace.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
+[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [USB/xHCI](docs/usb.md), [audio](docs/audio.md), [graphics](docs/gfx.md), [Workbench](docs/workbench.md), [application bundles](docs/apps.md), [bootable ISO](docs/iso.md), [kernel heap](docs/heap.md), [trap policy](docs/traps.md), [mount-path fuzzing](docs/fuzzing.md), [ring 3](docs/userspace.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
 
 ## Versioning
 

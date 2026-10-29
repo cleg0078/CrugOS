@@ -17,7 +17,9 @@
    moves that window back to the Workbench screen.  Phase 6J adds the
    Commodities Exchange: wb.cx=1 registers four hotkey utilities (volume up,
    volume down, mute, clock) on F2/F3/F4/F6 and opens a manager window whose
-   rows switch them on and off. */
+   rows switch them on and off.  Phase 7A puts the .app bundles on the desktop:
+   wb.app=1 adds an Applications icon, a double click lists the bundles found
+   under /Applications, and a double click on a row launches the program. */
 #include <crug/types.h>
 #include <crug/string.h>
 #include <crug/kernel.h>
@@ -34,6 +36,8 @@
 #include <crug/workbench.h>
 #include <crug/commodity.h>
 #include <crug/audio.h>
+#include <crug/app.h>
+#include <crug/thread.h>
 
 static int g_enabled;
 static int g_ready;
@@ -95,6 +99,19 @@ static int g_cx_window = -1;
 static u32 g_cx_toggles;
 static u32 g_cx_fires;
 static u32 g_cx_ops;
+
+/* Phase 7A: the Applications icon, the bundle window and the launched app. */
+static int g_app_mode;
+static int g_app_icon = -1;
+static int g_apps_window = -1;
+static int g_app_sel = -1;
+static u32 g_app_clicks;
+static u32 g_app_launches;
+static u32 g_app_reaps;
+static u32 g_app_ops;
+static int g_app_click_index = -1;
+static u64 g_app_click_ns;
+static u32 g_app_tid;
 
 static void wb_open_drawer(void);
 static void wb_icon_keyboard_activate(void);
@@ -251,6 +268,13 @@ static void wb_cmdline_token(const char *tok, usize len)
     if (used >= 0) {
         if (wb_parse_u32(tok + used, len - (usize)used, &value) == 0) {
             g_cx_mode = value ? 1 : 0;
+        }
+        return;
+    }
+    used = wb_prefix(tok, len, "wb.app=");
+    if (used >= 0) {
+        if (wb_parse_u32(tok + used, len - (usize)used, &value) == 0) {
+            g_app_mode = value ? 1 : 0;
         }
         return;
     }
@@ -504,6 +528,174 @@ static void wb_cx_pump(void)
     }
 }
 
+/* ---- phase 7A: the .app bundles on the desktop --------------------- */
+
+#define WB_APP_ICON_X 16
+#define WB_APP_ICON_Y 300
+#define WB_APP_ROW_H 20u
+
+/* Body-relative row under the pointer, or -1. */
+static int wb_app_row_at(i32 y)
+{
+    i32 row;
+
+    if (y < 6 || app_count() == 0u) {
+        return -1;
+    }
+    row = (y - 6) / (i32)WB_APP_ROW_H;
+    if (row < 0 || (u32)row >= app_count()) {
+        return -1;
+    }
+    return row;
+}
+
+/* Body painter: one row per bundle, the name on the left and the version on
+   the right. The selected row is the same inverse amber the drawer uses. */
+static void wb_app_paint(int id, i32 x, i32 y, u32 w, u32 h, void *ctx)
+{
+    u32 i;
+
+    (void)id;
+    (void)ctx;
+    fb_fill_rect((u32)x, (u32)y, w, h, INTUITION_WINDOW_RGB);
+    if (app_count() == 0u) {
+        fb_draw_text((u32)x + 6u, (u32)y + 6u, "no applications",
+                     INTUITION_TITLE_IDLE_RGB, INTUITION_WINDOW_RGB);
+        return;
+    }
+    for (i = 0u; i < app_count(); i++) {
+        const struct app *a = app_at(i);
+        u32 row_y = (u32)y + 6u + i * WB_APP_ROW_H;
+        u32 vx = (u32)x + (w > 76u ? w - 76u : 0u);
+        u32 fg = INTUITION_BODY_TEXT_RGB;
+        u32 bg = INTUITION_WINDOW_RGB;
+
+        if (!a || row_y + 8u > (u32)y + h) {
+            break;
+        }
+        if ((int)i == g_app_sel) {
+            fg = INTUITION_WINDOW_RGB;
+            bg = INTUITION_MENU_HIGHLIGHT_RGB;
+            fb_fill_rect((u32)x, (u32)y + 4u + i * WB_APP_ROW_H,
+                         w > 12u ? w - 12u : w, WB_APP_ROW_H, bg);
+        }
+        fb_draw_text((u32)x + 6u, row_y, a->m.name, fg, bg);
+        fb_draw_text(vx, row_y, a->m.version,
+                     (int)i == g_app_sel ? fg : INTUITION_TITLE_IDLE_RGB, bg);
+    }
+}
+
+/* Launch one bundle row: the program becomes a user thread and the pump
+   reaps it when it exits. */
+static void wb_app_launch(int row)
+{
+    const struct app *a = app_at((u32)row);
+    u32 tid = 0u;
+    int rc;
+
+    if (!a) {
+        return;
+    }
+    if (g_app_tid != 0u) {
+        kprintf("CRUGOS: wb app busy (tid %u)\n", (unsigned)g_app_tid);
+        return;
+    }
+    rc = app_launch(a, 0u, &tid);
+    if (rc != 0 || tid == 0u) {
+        kprintf("CRUGOS: wb app launch %s failed (%d)\n", a->m.id, rc);
+        return;
+    }
+    g_app_tid = tid;
+    g_app_launches++;
+    g_app_ops++;
+    kprintf("CRUGOS: wb app launch %s tid %u\n", a->m.id, (unsigned)tid);
+}
+
+/* The window body is a list: one click selects a row, a second click on the
+   same row inside the double-click window launches it. */
+static void wb_app_input(int id, u32 kind, i32 x, i32 y, void *ctx)
+{
+    u64 now;
+    int row;
+
+    (void)x;
+    (void)ctx;
+    if (kind != INTUITION_BODY_PRESS) {
+        return;
+    }
+    row = wb_app_row_at(y);
+    if (row < 0) {
+        return;
+    }
+    now = timer_monotonic_ns();
+    g_app_sel = row;
+    g_app_clicks++;
+    g_app_ops++;
+    kprintf("CRUGOS: wb app selected %s (index %d of %u)\n",
+            app_at((u32)row)->m.id, row, (unsigned)app_count());
+    if (g_app_click_index == row && g_app_click_ns != 0u &&
+        now >= g_app_click_ns &&
+        now - g_app_click_ns <= WB_DOUBLE_CLICK_NS) {
+        g_app_click_index = -1;
+        g_app_click_ns = 0u;
+        wb_app_launch(row);
+    } else {
+        g_app_click_index = row;
+        g_app_click_ns = now;
+    }
+    if (id == g_apps_window) {
+        intuition_redraw_window(id);
+    }
+}
+
+/* Reap the app the desktop launched: the child only reaches THREAD_ZOMBIE
+   once it has exited, and thread_join_code then reports its status. */
+static void wb_app_reap(void)
+{
+    thread *t;
+    i64 code;
+
+    if (g_app_tid == 0u) {
+        return;
+    }
+    t = thread_find(g_app_tid);
+    if (!t || t->state != THREAD_ZOMBIE) {
+        return;
+    }
+    code = thread_join_code(t);
+    kprintf("CRUGOS: wb app reaped tid %u exit %lld\n", (unsigned)g_app_tid,
+            (long long)code);
+    g_app_tid = 0u;
+    g_app_reaps++;
+    g_app_ops++;
+}
+
+static void wb_app_pump(void)
+{
+    if (g_app_mode && g_ready) {
+        wb_app_reap();
+    }
+}
+
+/* Open the Applications window lazily: the registry is filled once the
+   volume is mounted, which happens after the desktop was built. */
+static void wb_open_apps(void)
+{
+    if (g_apps_window > 0) {
+        intuition_redraw_window(g_apps_window);
+        return;
+    }
+    g_apps_window = intuition_open(560, 320, 340, 240, "Applications:",
+                                   "Applications:");
+    if (g_apps_window <= 0) {
+        kprintf("CRUGOS: wb app window failed\n");
+        return;
+    }
+    intuition_set_paint(g_apps_window, wb_app_paint, 0);
+    intuition_set_body_input(g_apps_window, wb_app_input, 0);
+    kprintf("CRUGOS: wb app ready (%u application(s))\n",
+            (unsigned)app_count());
+}
 /* Drain what intuition.device consumed: the gate counts the same actions the
    device already validated, and prints them in a fixed numeric form. */
 static void wb_drain_events(void)
@@ -546,7 +738,11 @@ static void wb_drain_events(void)
             if (event.index >= 0 && event.index == g_icon_last &&
                 g_icon_last_ns != 0u && now >= g_icon_last_ns &&
                 now - g_icon_last_ns <= WB_DOUBLE_CLICK_NS) {
-                wb_open_drawer();
+                if (g_app_mode && event.index == g_app_icon) {
+                    wb_open_apps();
+                } else {
+                    wb_open_drawer();
+                }
                 g_icon_last = -1;
                 g_icon_last_ns = 0u;
             } else {
@@ -1150,14 +1346,14 @@ int wb_init(void)
     g_reporting = (g_want_drags > 0u || g_menu_mode || g_keys_mode ||
                    g_shell_mode || g_desk_mode || g_icon_keys_mode ||
                    g_drawer_mode || g_select_mode || g_screens_mode ||
-                   g_cx_mode)
+                   g_cx_mode || g_app_mode)
                       ? 1
                       : 0;
     fb_set_text_enabled(0);
     intuition_init();
     intuition_set_reporting(g_reporting);
     top = intuition_open(80, 90, 360, 220, "Workbench",
-                         "CrugOS Workbench\nphase 6j\nsoftware rendered");
+                         "CrugOS Workbench\nphase 7a\nsoftware rendered");
     shell_id = intuition_open(480, 300, 320, 200, "Shell", "4.OS\ncrugos>");
     intuition_set_menus(top, wb_menus_top, 2u);
     intuition_add_gadget(top, 12, 60, 96, 22, "Run");
@@ -1175,7 +1371,7 @@ int wb_init(void)
         } else {
             (void)intuition_set_screen((u32)screen);
             g_tools_window = intuition_open(160, 140, 340, 200, "Tools",
-                                            "CrugOS Tools\nphase 6j\nsecond screen");
+                                            "CrugOS Tools\nphase 7a\nsecond screen");
             if (g_tools_window > 0) {
                 intuition_set_menus(g_tools_window, wb_menus_tools, 2u);
                 intuition_add_gadget(g_tools_window, 12, 60, 160, 22,
@@ -1196,6 +1392,13 @@ int wb_init(void)
         if (g_cx_window > 0) {
             intuition_set_paint(g_cx_window, wb_cx_paint, 0);
             intuition_set_body_input(g_cx_window, wb_cx_body, 0);
+        }
+    }
+    if (g_app_mode) {
+        g_app_icon = intuition_add_icon(WB_APP_ICON_X, WB_APP_ICON_Y,
+                                        "Applications:", INTUITION_ICON_DRAWER);
+        if (g_app_icon < 0) {
+            kprintf("CRUGOS: wb app icon table full\n");
         }
     }
     intuition_set_menus(shell_id, wb_menus_shell, 2u);
@@ -1246,6 +1449,9 @@ int wb_init(void)
         kprintf("CRUGOS: wb cx ready (%u commodity(ies))\n",
                 (unsigned)commodity_count());
     }
+    if (g_app_mode) {
+        kprintf("CRUGOS: wb app icon ready (Applications:)\n");
+    }
     return 0;
 }
 
@@ -1256,6 +1462,7 @@ void wb_poll(void)
     }
     gfx_pointer_poll();
     wb_cx_pump();
+    wb_app_pump();
     wb_key_pump();
     wb_drawer_pump();
     wb_shell_pump();
@@ -1270,6 +1477,7 @@ int wb_selftest(void)
     u32 want_drawer;
     u32 want_select;
     u32 want_cx;
+    u32 want_app;
 
     if (!g_enabled) {
         return 1;
@@ -1299,6 +1507,9 @@ int wb_selftest(void)
     /* Exchange mode counts its own commodity actions, so pointer events that
        raise a window do not satisfy the gate early. */
     want_cx = g_cx_mode ? (g_want_actions ? g_want_actions : 1u) : 0u;
+    /* App mode waits for the launched bundle to be reaped, which also proves
+       the desktop keeps pumping while the child runs. */
+    want_app = g_app_mode ? (g_want_actions ? g_want_actions : 1u) : 0u;
     deadline = timer_monotonic_ns() +
                (u64)(g_wait_seconds ? g_wait_seconds : 5u) * 1000000000ull;
     while (intuition_drag_count() < (u64)want ||
@@ -1306,6 +1517,7 @@ int wb_selftest(void)
            g_drawer_ops_seen < want_drawer ||
            g_select_ops < want_select ||
            g_cx_ops < want_cx ||
+           g_app_reaps < want_app ||
            g_commands_seen < want_commands) {
         /* input_poll() runs the console hook, which pumps the USB mouse and
            then drains the pointer state into intuition.device; the shell pump
@@ -1313,6 +1525,7 @@ int wb_selftest(void)
         input_poll();
         wb_drain_events();
         wb_cx_pump();
+        wb_app_pump();
         wb_key_pump();
         wb_drawer_pump();
         wb_shell_pump();
@@ -1332,6 +1545,9 @@ int wb_selftest(void)
             } else if (g_cx_ops < want_cx) {
                 kprintf("CRUGOS: wb cx timeout (%u/%u)\n",
                         (unsigned)g_cx_ops, (unsigned)want_cx);
+            } else if (g_app_reaps < want_app) {
+                kprintf("CRUGOS: wb app timeout (%u/%u)\n",
+                        (unsigned)g_app_reaps, (unsigned)want_app);
             } else {
                 kprintf("CRUGOS: sh command timeout (%u/%u)\n",
                         (unsigned)g_commands_seen, (unsigned)want_commands);
@@ -1342,6 +1558,7 @@ int wb_selftest(void)
     }
     wb_drain_events();
     wb_cx_pump();
+    wb_app_pump();
     wb_key_pump();
     wb_shell_pump();
     kprintf("CRUGOS: wb selftest ok (%u drag(s), %u action(s))\n",
@@ -1376,6 +1593,10 @@ int wb_selftest(void)
         kprintf("CRUGOS: wb cx selftest ok (%u toggle(s), %u fire(s))\n",
                 (unsigned)g_cx_toggles, (unsigned)g_cx_fires);
     }
+    if (g_app_mode) {
+        kprintf("CRUGOS: wb app selftest ok (%u click(s), %u launch(es))\n",
+                (unsigned)g_app_clicks, (unsigned)g_app_launches);
+    }
     /* Keep the finished desktop on screen for a moment so the gate's last
        screendump does not race the rest of the boot to the exit. */
     deadline = timer_monotonic_ns() + 1500000000ull;
@@ -1407,6 +1628,7 @@ void wb_hold(void)
         input_poll();
         wb_drain_events();
         wb_cx_pump();
+        wb_app_pump();
         wb_key_pump();
         wb_drawer_pump();
         wb_shell_pump();

@@ -26,6 +26,12 @@
  * spaces map that address onto different physical frames; each program asserts
  * it always reads back its own tag.
  *
+ * `user.test=6` adds /bin/forkbig: a 300-page copy-on-write fork.
+ *
+ * `user.test=7` adds /etc/app.rc: the ring-3 shell lists the .app registry,
+ * reads one bundle's info record and launches Orbit.app through the
+ * SYS_APP_* syscalls, then exits 9.
+ *
  * Every default boot leaves the token out, so nothing here runs and no marker
  * is printed.  See docs/userspace.md. */
 #include <crug/exec.h>
@@ -39,7 +45,7 @@
 
 /* 0 = off, 1 = U1 programs, 2 = U1 programs plus the isolation pair,
    3 = plus the ring-3 shell, 4 = plus spawn/wait/exec, 5 = plus fork,
-   6 = plus a 300-page copy-on-write fork. */
+   6 = plus a 300-page copy-on-write fork, 7 = plus the .app registry. */
 static int g_user_test;
 
 static int user_space(char c)
@@ -268,6 +274,33 @@ static int user_forkbig(void)
     return 0;
 }
 
+/* Phase 7A: /bin/sh runs /etc/app.rc, which drives the .app syscalls: it
+   lists the registry, reads one bundle's info record and launches Orbit.app
+   through SYS_APP_SPAWN, then exits 9. */
+static int user_app(void)
+{
+    static const char *const argv[2] = { "/bin/sh", "/etc/app.rc" };
+    elf_exec_result res;
+    thread *t;
+    i64 code;
+
+    kprintf("CRUGOS: user app test start\n");
+    memset(&res, 0, sizeof(res));
+    t = elf_exec_run_args("/bin/sh", 2, argv, &res);
+    if (!t) {
+        kprintf("CRUGOS: user selftest failed (/bin/sh did not start)\n");
+        return -1;
+    }
+    code = thread_join_code(t);
+    if (code != 9) {
+        kprintf("CRUGOS: user selftest failed (/bin/sh exited %lld, expected 9)\n",
+                code);
+        return -1;
+    }
+    kprintf("CRUGOS: user app ok (exit 9)\n");
+    return 0;
+}
+
 int user_selftest(void)
 {
     if (!g_user_test)
@@ -289,6 +322,8 @@ int user_selftest(void)
     if (g_user_test >= 5 && user_fork() != 0)
         return -1;
     if (g_user_test >= 6 && user_forkbig() != 0)
+        return -1;
+    if (g_user_test >= 7 && user_app() != 0)
         return -1;
     kprintf("CRUGOS: user selftest ok (3 program(s), 1 fault(s))\n");
     return 0;

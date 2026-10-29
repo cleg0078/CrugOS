@@ -12,6 +12,7 @@
 #include <crug/ext4.h>
 #include <crug/storage.h>
 #include <crug/exec.h>
+#include <crug/app.h>
 
 static i64 syscall_port_create(void)
 {
@@ -828,6 +829,69 @@ void syscall_dispatch(trap_frame *frame)
         vm_flush_all();
         kprintf("CRUGOS: user fork tid %u -> %u (%u page(s) shared, COW)\n",
                 cur->id, child->id, space->user_pages);
+        break;
+    }
+    case SYS_APP_COUNT:
+        ret = (i64)app_count();
+        break;
+    case SYS_APP_INFO: {
+        const struct app *a = app_at((u32)frame->rdi);
+        u64 cap = frame->rdx;
+        int n;
+
+        if (!a) {
+            ret = SYS_ENOENT;
+            break;
+        }
+        if (frame->rsi == 0 || cap == 0) {
+            ret = SYS_EFAULT;
+            break;
+        }
+        if (cap > SYS_APP_INFO_MAX)
+            cap = SYS_APP_INFO_MAX;
+        if (user && uaccess_check(frame->rsi, cap) != 0) {
+            ret = SYS_EFAULT;
+            break;
+        }
+        if (!user && !harden_range_ok(frame->rsi, cap, HARDEN_IDENTITY_LIMIT)) {
+            ret = SYS_EFAULT;
+            break;
+        }
+        n = app_info(a, (char *)g_io_buf, (usize)cap);
+        if (n < 0) {
+            ret = SYS_EINVAL;
+            break;
+        }
+        if (user) {
+            if (uaccess_user_write(frame->rsi, g_io_buf, (usize)n) != 0) {
+                ret = SYS_EFAULT;
+                break;
+            }
+        } else {
+            memcpy((void *)(uintptr)frame->rsi, g_io_buf, (usize)n);
+        }
+        ret = (i64)n;
+        break;
+    }
+    case SYS_APP_SPAWN: {
+        thread *cur = sched_current();
+        const struct app *a;
+        u32 tid = 0u;
+
+        if (!cur) {
+            ret = SYS_EINVAL;
+            break;
+        }
+        a = app_at((u32)frame->rdi);
+        if (!a) {
+            ret = SYS_ENOENT;
+            break;
+        }
+        if (app_launch(a, cur->id, &tid) != 0) {
+            ret = SYS_EIO;
+            break;
+        }
+        ret = (i64)tid;
         break;
     }
     case SYS_WRITE:

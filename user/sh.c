@@ -197,6 +197,131 @@ static int sh_cmd_echo(int argc, char **argv)
     return 0;
 }
 
+/* Phase 7A: the .app registry builtin. A record is
+   'id|name|version|prog|RRGGBB|KEY=value;...' with no trailing newline. */
+#define SH_APP_REC 256u
+
+static void sh_field(const char *rec, int index, char *out, u64 cap)
+{
+    u64 i = 0;
+    int f = 0;
+
+    while (*rec != 0 && f < index) {
+        if (*rec == (char)124)
+            f++;
+        rec++;
+    }
+    while (*rec != 0 && *rec != (char)124) {
+        if (i + 1u < cap)
+            out[i++] = *rec;
+        rec++;
+    }
+    out[i] = 0;
+}
+
+static i64 sh_app_lookup(const char *id, i64 count, char *rec, u32 cap)
+{
+    char idbuf[40];
+    i64 i;
+
+    for (i = 0; i < count; i++) {
+        if (u_app_info((u32)i, rec, cap) <= 0)
+            continue;
+        sh_field(rec, 0, idbuf, sizeof(idbuf));
+        if (u_strcmp(idbuf, id) == 0)
+            return i;
+    }
+    return -1;
+}
+
+static int sh_cmd_app(int argc, char **argv)
+{
+    char rec[SH_APP_REC];
+    char idbuf[40];
+    char namebuf[40];
+    char verbuf[24];
+    char iconbuf[16];
+    i64 count;
+    i64 i;
+
+    if (argc < 2) {
+        sh_line("CRUGOS: sh app usage: app list|info <id>|run <id>");
+        return -1;
+    }
+    count = u_app_count();
+    if (count < 0) {
+        sh_line("CRUGOS: sh error app registry unavailable");
+        return -1;
+    }
+    if (u_strcmp(argv[1], "list") == 0) {
+        for (i = 0; i < count; i++) {
+            if (u_app_info((u32)i, rec, SH_APP_REC) <= 0)
+                continue;
+            sh_field(rec, 0, idbuf, sizeof(idbuf));
+            sh_field(rec, 2, verbuf, sizeof(verbuf));
+            u_puts("CRUGOS: sh app ");
+            u_puts(idbuf);
+            u_puts(" ");
+            sh_line(verbuf);
+        }
+        sh_marker("CRUGOS: sh app count", 0, count, "");
+        return 0;
+    }
+    if (argc < 3) {
+        sh_line("CRUGOS: sh app usage: app list|info <id>|run <id>");
+        return -1;
+    }
+    i = sh_app_lookup(argv[2], count, rec, SH_APP_REC);
+    if (i < 0) {
+        u_puts("CRUGOS: sh error unknown app ");
+        sh_line(argv[2]);
+        return -1;
+    }
+    sh_field(rec, 0, idbuf, sizeof(idbuf));
+    sh_field(rec, 1, namebuf, sizeof(namebuf));
+    sh_field(rec, 2, verbuf, sizeof(verbuf));
+    sh_field(rec, 4, iconbuf, sizeof(iconbuf));
+    if (u_strcmp(argv[1], "info") == 0) {
+        u_puts("CRUGOS: sh app ");
+        u_puts(idbuf);
+        u_puts(" ");
+        sh_line(verbuf);
+        u_puts("CRUGOS: sh app ");
+        u_puts(idbuf);
+        u_puts(" name ");
+        sh_line(namebuf);
+        u_puts("CRUGOS: sh app ");
+        u_puts(idbuf);
+        u_puts(" icon ");
+        sh_line(iconbuf);
+        return 0;
+    }
+    if (u_strcmp(argv[1], "run") == 0) {
+        i64 tid = u_app_spawn((u32)i);
+        i64 code;
+
+        if (tid < 0) {
+            u_puts("CRUGOS: sh error cannot launch ");
+            sh_line(idbuf);
+            return -1;
+        }
+        u_puts("CRUGOS: sh app ");
+        u_puts(idbuf);
+        u_puts(" tid ");
+        u_putnum((u64)tid);
+        sh_nl();
+        code = u_wait((u32)tid);
+        u_puts("CRUGOS: sh app ");
+        u_puts(idbuf);
+        u_puts(" exit ");
+        u_putnum((u64)code);
+        sh_nl();
+        return 0;
+    }
+    sh_line("CRUGOS: sh app usage: app list|info <id>|run <id>");
+    return -1;
+}
+
 static void sh_run(int argc, char **argv)
 {
     const char *cmd;
@@ -206,7 +331,7 @@ static void sh_run(int argc, char **argv)
     cmd = argv[0];
     sh_marker("CRUGOS: sh cmd ", cmd, -1, "");
     if (u_strcmp(cmd, "ver") == 0) {
-        sh_line("CrugOS ring-3 shell (phase 6j)");
+        sh_line("CrugOS ring-3 shell (phase 7a)");
     } else if (u_strcmp(cmd, "echo") == 0) {
         (void)sh_cmd_echo(argc, argv);
     } else if (u_strcmp(cmd, "cat") == 0) {
@@ -215,6 +340,8 @@ static void sh_run(int argc, char **argv)
         (void)sh_cmd_ls(argc, argv);
     } else if (u_strcmp(cmd, "write") == 0) {
         (void)sh_cmd_write(argc, argv);
+    } else if (u_strcmp(cmd, "app") == 0) {
+        (void)sh_cmd_app(argc, argv);
     } else if (u_strcmp(cmd, "exit") == 0) {
         int code = argc >= 2 ? (int)u_atoi(argv[1]) : 0;
 

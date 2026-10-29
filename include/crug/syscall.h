@@ -30,7 +30,10 @@
 #define SYS_WAIT 22u
 #define SYS_EXEC 23u
 #define SYS_FORK 24u
-#define SYS_MAX 25u
+#define SYS_APP_COUNT 25u
+#define SYS_APP_INFO 26u
+#define SYS_APP_SPAWN 27u
+#define SYS_MAX 28u
 
 /* Open flags for SYS_OPEN (phase U3). SYS_O_RDONLY is the zero flag. */
 #define SYS_O_RDONLY 0u
@@ -60,5 +63,8 @@ int syscall_socket_selftest(u32 ip, u16 port);
 
 /* Resolver path self-test: resolve HOST through int 0x80 and expect ADDR. */
 int syscall_resolve_selftest(const char *host, u32 addr);
+
+/* Phase 7A application registry: count, text record and spawn by id. */
+#define SYS_APP_INFO_MAX 512u
 
 #endif /* CRUG_SYSCALL_H */

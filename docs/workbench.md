@@ -556,7 +556,7 @@ a body-relative (12,60,160,22) `Send to Workbench` gadget, return to screen 0 an
 print `CRUGOS: wb screens ready (%u screen(s), front %d)`. A press on the gadget
 moves the Tools window to screen 0, which is the programmatic way to show a move
 without dragging the window's title bar across a screen edge. In screens mode the
-Workbench window body reads `phase 6j` and the self-test ends with
+Workbench window body reads `phase 7a` and the self-test ends with
 `CRUGOS: wb screens selftest ok (%u switch(es), %u move(s))`.
 
 ## Commodities Exchange
@@ -644,6 +644,36 @@ two fires and ends with
 running while `wb_hold()` has the desktop open, so the demo boots react to
 F2..F6 as well.
 
+## Application bundles
+
+Phase 7A turns a program into a desktop object. `kernel/app/app.c` scans
+`/Applications` once during boot, parses each bundle's `manifest.toml`, checks
+that the payload program exists and keeps the accepted bundles in a fixed
+registry of `APP_MAX` (8) entries sorted by id. The registry is not part of the
+Workbench: the desktop and the ring-3 shell are two front ends onto the same
+table, and [apps.md](apps.md) describes the bundle format, the parser and its
+rejection reasons.
+
+`wb.app=<0|1>` (default 0, only 0 disables) adds the `Applications:` icon at
+(16,300), drawn 64x48 with `INTUITION_ICON_DRAWER`, and it requires
+`wb.enable=1`. Double-clicking the icon opens the `Applications:` window at
+(560,320), 340x240, on first use. The window lists the registry in id order,
+one row per application, `WB_APP_ROW_H` (20) pixels apart, with the name at
+`x + 6` and the version right-aligned at `x + w - 76`; an empty registry draws
+`no applications` in the idle title colour instead. A single click on a row
+selects it and paints an amber band (`INTUITION_MENU_HIGHLIGHT_RGB`), and a
+second click on the same row within `WB_DOUBLE_CLICK_NS` (600 ms) launches it
+through `app_launch()`: the program's argv[0] is the bundle directory, so it
+can find its own files, and the desktop reaps it with
+`CRUGOS: wb app reaped tid N exit E` once it turns into a zombie.
+
+Only one launch is in flight at a time; a click while a program still runs
+prints `CRUGOS: wb app busy (tid N)` and is refused, and a launch that fails
+prints `CRUGOS: wb app launch <id> failed (<rc>)`. With `wb.acts=` set, the
+self-test waits for that many reaps and then ends with
+`CRUGOS: wb app selftest ok (%u click(s), %u launch(es))`; a wait that expires
+first prints `CRUGOS: wb app timeout (%u/%u)` and panics the boot.
+
 ## The event queue
 
 The event queue is the typed report the desktop hands to its caller:
@@ -689,7 +719,7 @@ index and the new tile origin.
 
    | id | rectangle | title | body |
    | --- | --- | --- | --- |
-   | 1 | (80, 90) 360x220 | `Workbench` | `CrugOS Workbench` / `phase 6j` / `software rendered` |
+   | 1 | (80, 90) 360x220 | `Workbench` | `CrugOS Workbench` / `phase 7a` / `software rendered` |
    | 2 | (480, 300) 320x200 | `Shell` | `4.OS` / `crugos>`, or the shell grid when `wb.shell=1` |
 
    Window 1 carries the `Workbench` (About/Info/Quit) and `Window`
@@ -742,6 +772,7 @@ tokens do. Values are decimal, capped, and ignored when malformed:
 | `wb.hold=S` | 0..3600 | seconds `wb_hold()` keeps the desktop on screen after the boot marker |
 | `wb.screens=1` | 0/1 | add a `Tools` screen, the `Send to Workbench` gadget and the screens self-test |
 | `wb.cx=1` | 0/1 | register the four commodity hotkey utilities, open the `Exchange` manager and run the cx self-test (needs `wb.enable=1`) |
+| `wb.app=1` | 0/1 | add the `Applications:` icon and its bundle window, and run the app self-test (needs `wb.enable=1`) |
 
 `make test-workbench` boots with `wb.enable=1 wb.wait=30 wb.drag=1`,
 `make test-workbench-menu` with `wb.enable=1 wb.wait=30 wb.menu=1 wb.acts=4`,
@@ -753,7 +784,8 @@ with `wb.enable=1 wb.wait=30 wb.desk=1 wb.dr=1 wb.fill=24 wb.acts=4`, and
 `make test-workbench-select` with `wb.enable=1 wb.wait=30 wb.desk=1 wb.dr=1
 wb.dsel=1 wb.fill=24 wb.acts=3`, and `make test-workbench-screens` with
 `wb.enable=1 wb.wait=30 wb.screens=1 wb.acts=4`, and `make test-workbench-cx` with
-`wb.enable=1 wb.wait=30 wb.cx=1 wb.acts=4`. `make demo` boots the whole desktop
+`wb.enable=1 wb.wait=30 wb.cx=1 wb.acts=4`, and `make test-app-bundles` with
+`wb.enable=1 wb.wait=30 wb.app=1 wb.acts=1`. `make demo` boots the whole desktop
 instead -- `wb.enable=1 wb.wait=0 wb.desk=1 wb.dr=1 wb.dsel=1 wb.screens=1
 wb.cx=1 wb.shell=1 wb.fill=<files> wb.hold=<seconds>`: `wb.wait=0`
 turns both self-tests into no-ops, so the interactive desktop needs neither a
@@ -780,7 +812,7 @@ CRUGOS: wb window 2 drag start (512, 312)
 CRUGOS: wb window 2 drag to (557, 337)
 CRUGOS: wb window 2 moved to (570, 350)
 CRUGOS: wb selftest ok (1 drag(s), 0 action(s))
-CRUGOS: phase 6j boot ok
+CRUGOS: phase 7a boot ok
 ```
 
 The menu gate is a second boot and adds the action lines:
@@ -798,7 +830,7 @@ CRUGOS: wb menu 'Workbench' open (window 1)
 CRUGOS: wb menu 'Workbench' selected ('Quit')
 CRUGOS: wb action 4 menu window 1 item 2
 CRUGOS: wb selftest ok (0 drag(s), 4 action(s))
-CRUGOS: phase 6j boot ok
+CRUGOS: phase 7a boot ok
 ```
 
 The shell gate is a third boot: it adds `CRUGOS: wb shell ready (window 2,
@@ -825,7 +857,7 @@ CRUGOS: wb menu 'Workbench' item 1 highlighted ('Info')
 CRUGOS: wb menu 'Workbench' selected ('Info')
 CRUGOS: wb action 2 menu window 1 item 1
 CRUGOS: wb selftest ok (0 drag(s), 2 action(s))
-CRUGOS: phase 6j boot ok
+CRUGOS: phase 7a boot ok
 ```
 
 The desktop gate is a fifth boot: it selects the `System:` object, opens its
@@ -843,7 +875,7 @@ CRUGOS: wb window 3 sent to back
 CRUGOS: wb action 3 depth window 3
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb selftest ok (0 drag(s), 3 action(s))
-CRUGOS: phase 6j boot ok
+CRUGOS: phase 7a boot ok
 ```
 
 The icon gate is a sixth boot: it focuses the `System:` object from the
@@ -867,7 +899,7 @@ CRUGOS: wb window 1 sent to front
 CRUGOS: wb action 5 front window 1
 CRUGOS: wb icons selftest ok (1 move(s), 1 front(s))
 CRUGOS: wb selftest ok (0 drag(s), 5 action(s))
-CRUGOS: phase 6j boot ok
+CRUGOS: phase 7a boot ok
 ```
 
 The drawer gate is a seventh boot, the only one that fills the volume first:
@@ -893,7 +925,7 @@ CRUGOS: wb drawer refreshed (29 entries)
 CRUGOS: wb selftest ok (0 drag(s), 0 action(s))
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb drawer selftest ok (3 scroll(s), 1 refresh(es))
-CRUGOS: phase 6j boot ok
+CRUGOS: phase 7a boot ok
 ```
 
 The select gate is an eighth boot: same filled drawer, but the pointer now
@@ -916,7 +948,7 @@ CRUGOS: wb drawer scrollbar to (top 18 of 29)
 CRUGOS: wb drawer selected '<name>' (index 18 of 29)
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb select selftest ok (2 select(s), 1 scrollbar drag(s))
-CRUGOS: phase 6j boot ok
+CRUGOS: phase 7a boot ok
 ```
 
 The screens gate is a ninth boot: two screens, a switch and a move between them:
@@ -931,7 +963,7 @@ CRUGOS: wb action 3 screen-move window 3 to 0
 CRUGOS: wb screen 0 front (3 window(s))
 CRUGOS: wb action 4 screen 0 front
 CRUGOS: wb screens selftest ok (2 switch(es), 1 move(s))
-CRUGOS: phase 6j boot ok
+CRUGOS: phase 7a boot ok
 ```
 
 The commodities gate is a tenth boot: four registered utilities, a manager
@@ -947,7 +979,25 @@ CRUGOS: wb action 3 commodity Mute fired (muted)
 CRUGOS: wb action 4 commodity Clock fired (uptime 1 s)
 CRUGOS: wb cx selftest ok (2 toggle(s), 2 fire(s))
 CRUGOS: wb selftest ok (0 drag(s), 4 action(s))
-CRUGOS: phase 6j boot ok
+CRUGOS: phase 7a boot ok
+```
+
+The app-bundle gate boots the desktop with a three-bundle registry
+(`Broken.app` is refused for having no version) and double-clicks the icon and
+then the first row:
+
+```
+CRUGOS: wb desktop ready (1024x768, 2 window(s))
+CRUGOS: wb app icon ready (Applications:)
+CRUGOS: app rejected Broken.app (no-version)
+CRUGOS: app registry ready (2 app(s), 1 rejected)
+CRUGOS: wb app ready (2 application(s))
+CRUGOS: wb app selected hello (index 0 of 2)
+CRUGOS: wb app launch hello tid 11
+CRUGOS: wb app reaped tid 11 exit 0
+CRUGOS: wb selftest ok (0 drag(s), 0 action(s))
+CRUGOS: wb app selftest ok (2 click(s), 1 launch(es))
+CRUGOS: phase 7a boot ok
 ```
 
 | marker | when |
@@ -986,6 +1036,14 @@ CRUGOS: phase 6j boot ok
 | `CRUGOS: wb action N commodity '<name>' fired (...)` | an enabled commodity's key ran its action |
 | `CRUGOS: wb cx selftest ok (N toggle(s), M fire(s))` | the exchange self-test saw its toggles and fires |
 | `CRUGOS: wb cx timeout (N/M)` | the wait expired with toggles or fires missing |
+| `CRUGOS: wb app icon ready (Applications:)` | `wb.app=1` added the Applications icon |
+| `CRUGOS: wb app ready (N application(s))` | a double click opened the bundle window |
+| `CRUGOS: wb app selected '<id>' (index N of M)` | a click selected a bundle row |
+| `CRUGOS: wb app launch '<id>' tid N` | a second click on the row launched the bundle |
+| `CRUGOS: wb app reaped tid N exit E` | the desktop collected the child's exit code |
+| `CRUGOS: wb app busy (tid N)` | a launch was attempted while a program was still running |
+| `CRUGOS: wb app selftest ok (N click(s), M launch(es))` | the app self-test saw its clicks and launches |
+| `CRUGOS: wb app timeout (N/M)` | the wait expired before a launch was reaped |
 | `CRUGOS: wb window N sent to back` | the depth gadget was pressed |
 | `CRUGOS: wb icons ready (N object(s), keyboard focus)` | `wb.ikeys=1` installed icon focus mode |
 | `CRUGOS: wb icon '<label>' focused` | Tab, an arrow or Enter moved the icon selection |
@@ -1158,8 +1216,8 @@ there is no keyboard text entry, only focus, movement and menu selection.
 ## Host tests
 
 `make test-host` links the real `kernel/gfx/intuition.c`,
-`kernel/gfx/commodities.c`, `kernel/lib/textgrid.c` and
-`kernel/shell/shell.c` and reports 8102 checks.
+`kernel/gfx/commodities.c`, `kernel/app/manifest.c`, `kernel/lib/textgrid.c`
+and `kernel/shell/shell.c` and reports 8216 checks.
 `tests/host/test_intuition.c` replaces the framebuffer primitives with counting
 stubs and the cursor accessors with a settable fake (`test_fb_fake_reset()` /
 `test_fb_cursor_set()` from `tests/host/test_gfx.c`), then checks:
@@ -1250,6 +1308,13 @@ stubs and the cursor accessors with a settable fake (`test_fb_fake_reset()` /
   the enabled count, a disabled commodity's key refused with `blocked` rising
   and no action, an enabled one running with `fires` rising, the row hit test
   below the header and past the last row, and the key names.
+- the app manifest parser: `tests/host/test_app.c` accepts the shipped Hello
+  and Orbit manifests (with and without a final newline, padded keys and
+  comments), rejects the Broken bundle, walks the reason table (missing or
+  uppercase id, duplicate key, two-part or missing version, an absolute or
+  `..` program, an unknown section or key, a 5-digit colour, a ninth tool type,
+  a 16-byte key) and checks `app_path_join()`, the version comparison, the
+  `app_format_info()` record and `app_tooltype_find()`.
 
 ## Gate
 
@@ -1287,7 +1352,7 @@ anything else. The script then:
    `ok: workbench title-bar drag (N drag(s), window 2 at (x, y), exit 33)`.
 
 `make test-workbench` then runs `scripts/boot-check.py` with `EXPECT_WB=yes`
-(the phase 6j boot marker, the desktop marker, a `wb selftest ok`, at least one
+(the phase 7a boot marker, the desktop marker, a `wb selftest ok`, at least one
 `wb window N opened`, one `wb window N moved to`, and one `wb cursor at` with
 numeric coordinates) and `scripts/check-disk.py` for the ext4 root.
 
@@ -1322,7 +1387,7 @@ larger relative motion into several 8-bit HID reports and the guest drops some
 of them, so a single jump of 644 pixels landed 136 pixels short when the gate
 was first written.
 
-`boot-check.py` then runs with `EXPECT_MENU=yes`, which requires the phase 6j
+`boot-check.py` then runs with `EXPECT_MENU=yes`, which requires the phase 7a
 marker, the desktop marker, the menu open and selected markers, the gadget
 click marker, the close marker, at least one `wb action N ...` line and a
 `wb selftest ok (N drag(s), M action(s))` with at least one action, and
@@ -1368,7 +1433,7 @@ wb.acts=$(WB_KEYS_ACTS)`:
    and Enter to select it, requiring the highlight marker, the selection marker
    and `wb action 2 menu window 1 item 1`.
 5. waits for exit status 33, then runs `scripts/boot-check.py` with
-   `EXPECT_KEYS=yes` (the phase 6j marker, the desktop and keys markers, the
+   `EXPECT_KEYS=yes` (the phase 7a marker, the desktop and keys markers, the
    resize and key-move markers, the menu markers and a two-action
    `wb selftest ok`) and `scripts/check-disk.py`, and prints
    `ok: workbench resize and keyboard navigation (exit 33)`.
@@ -1400,7 +1465,7 @@ wb.acts=$(WB_DESK_ACTS)`:
    back: the drawer title bar turns idle grey `(128,128,128)` and the Shell
    title bar behind it becomes amber at the same point.
 6. waits for exit status 33, then runs `scripts/boot-check.py` with
-   `EXPECT_DESK=yes` (the phase 6j marker, the desktop and icon markers, the
+   `EXPECT_DESK=yes` (the phase 7a marker, the desktop and icon markers, the
    drawer marker, the icon and depth action lines, the desk self-test line and
    a three-action `wb selftest ok`) and `scripts/check-disk.py`, and prints
    `ok: workbench desktop objects and depth (exit 33)`.
@@ -1427,7 +1492,7 @@ wb.ikeys=1 wb.acts=$(WB_ICONS_ACTS)`:
 5. presses the front gadget at (394,102): the same title bar turns amber
    `(255,176,0)` again and the log carries
    `CRUGOS: wb window 1 sent to front`.
-6. waits for exit status 33, then `scripts/boot-check.py` requires the phase 6j
+6. waits for exit status 33, then `scripts/boot-check.py` requires the phase 7a
    marker, the icons-ready, focus, drag, drop, front and action markers, the
    icon self-test line and `EXPECT_ICONS=yes` (its ok line reads `desk no icons
    yes storage disk`), and `scripts/check-disk.py` still runs a clean `e2fsck`.
@@ -1569,6 +1634,45 @@ Its knobs are `WB_CX_WAIT` (30), `WB_CX_ACTS` (4) and
 refuses any `--acts` other than 4 because its sequence performs exactly four
 actions. See [build.md](build.md).
 
+### App-bundle gate
+
+`make test-app-bundles` is gate 56 and has two legs, both required. The first
+drives `scripts/run-workbench-app.py` on the same machine setup (an `xhci`
+controller, `usb=off,i8042=off`, a hot-plugged `usb-mouse`) through five
+steps:
+
+1. boots with `wb.enable=1 wb.wait=$(WB_APP_WAIT) wb.app=1
+   wb.acts=$(WB_APP_ACTS)` and requires the registry line
+   `CRUGOS: app registry ready (2 app(s), 1 rejected)`, the
+   `Applications:` icon and `CRUGOS: wb app ready (2 application(s))`
+   before anything is clicked.
+2. hot-plugs `mouse0` on `xhci.0`, reads the starting cursor from
+   `CRUGOS: gfx ready` and double-clicks the icon at (48,324): two presses
+   0.12 s apart, moving the pointer in short steps first.
+3. takes a `screendump` and requires the bundle window body at (700,360) to
+   be (8,16,24) and its active title bar at (600,335) to be (255,176,0).
+4. double-clicks the first row at (600,358) and requires
+   `CRUGOS: wb app selected hello (index 0 of 2)`, the launch and reap
+   markers, and `CRUGOS: wb app selftest ok (2 click(s), 1 launch(es))`.
+5. waits for exit status 33 and the line
+   `ok: app bundles and tool types (exit 33)`, then runs
+   `scripts/boot-check.py --expect-app=yes` (a flag, not a positional
+   argument, so the argument order and the argc range are unchanged; its ok
+   line reads `app yes`) and `scripts/check-disk.py`.
+
+The second leg never starts the desktop: `make run CMDLINE_EXTRA="user.test=7"`
+boots the ring-3 shell with `/etc/app.rc`, which runs `app list`, `app info
+orbit` and `app run orbit`, and the kernel requires the shell's exit code 9
+(`CRUGOS: user app ok (exit 9)`). It runs `boot-check.py` with the
+`EXPECT_USER` through `EXPECT_FORKBIG` drivers and then `check-disk.py` as
+well; see [build.md](build.md).
+
+Its knobs are `WB_APP_WAIT` (30), `WB_APP_ACTS` (1),
+`WB_APP_RUN_TIMEOUT_SEC` (240) and `APP_RUN_TIMEOUT_SEC` (300), plus the
+shared `WB_QEMU_EXTRA`; the driver refuses any `--acts` other than 1 because
+its sequence launches exactly one bundle. See [apps.md](apps.md) for the
+manifest format and the registry itself.
+
 ## Interactive demo
 
 `make demo` boots the whole Workbench in a real QEMU window instead of a
@@ -1608,6 +1712,11 @@ driven by the mouse. After the hold the guest prints
   window, the exchange exists only while the Workbench runs, the four built-in
   actions are fixed (no plugin loading), and there is no way to add, remove or
   rename a commodity from the desktop. The exchange is off unless `wb.cx=1`.
+- The `Applications:` window shows the boot-time registry and nothing more: eight
+  bundles at most, only one launch in flight at a time, and no way to install or
+  remove one from the desktop. The icon is a colour plus a text label rather
+  than icon art, and a rejected bundle is simply absent from the list -- only the
+  serial log names the reason. See [apps.md](apps.md).
 - Four windows, two menus of six items, four gadgets and eight desktop objects,
   one open popup at a time. No sub-menus and no clipboard; a menu selection,
   gadget click, close, resize, icon press, icon move, depth press or front

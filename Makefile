@@ -46,6 +46,7 @@
 #   make test-workbench-select  select a drawer row and drag its scrollbar
 #   make test-workbench-screens  switch screens and move a window between them
 #   make test-workbench-cx       toggle commodity hotkeys and fire two of them
+#   make test-app-bundles        launch a .app bundle from the desktop and from the shell
 #   make crypt-disk  build the AES-256-XTS crypt test disk
 #   make test-crypt  boot from an encrypted root and verify the disk
 #   make test-crypt-recovery  unlock the encrypted root with the recovery keyslot
@@ -188,6 +189,14 @@ WB_SCREEN_RUN_TIMEOUT_SEC ?= 240
 WB_CX_WAIT ?= 30
 WB_CX_ACTS ?= 4
 WB_CX_RUN_TIMEOUT_SEC ?= 240
+
+# App-bundle gate (make test-app-bundles): wb.app=1 puts the Applications icon
+# on the desktop, where a double click lists the bundles and launches one.  A
+# second boot with user.test=7 drives the same registry from /bin/sh.
+WB_APP_WAIT ?= 30
+WB_APP_ACTS ?= 1
+WB_APP_RUN_TIMEOUT_SEC ?= 240
+APP_RUN_TIMEOUT_SEC ?= 300
 
 # Hardening gate (make test-hardening): how long each crafted image may boot.
 HARDEN_TIMEOUT_SEC ?= 120
@@ -344,7 +353,7 @@ KERNEL_SOURCES := $(wildcard kernel/arch/$(ARCH)/*.c) $(wildcard kernel/arch/$(A
                   $(wildcard kernel/fs/*.c) $(wildcard kernel/exec/*.c) \
                   $(wildcard kernel/input/*.c) \
                   $(wildcard kernel/net/*.c) $(wildcard kernel/audio/*.c) \
-                  $(wildcard kernel/gfx/*.c) \
+                  $(wildcard kernel/gfx/*.c) $(wildcard kernel/app/*.c) \
                   $(wildcard kernel/shell/*.c) \
                   $(wildcard drivers/*/*.c) \
                   $(wildcard kernel/crypto/*.c) $(wildcard kernel/crypto/*.S)
@@ -357,7 +366,9 @@ KERNEL_DEPS := $(KERNEL_OBJECTS:.o=.d)
 USER_ELF_DIR := $(BUILD)/user
 USER_OBJ := $(BUILD)/user/obj
 USER_PROGRAMS := hello badptr fault iso sh spawn child fork forkbig
-USER_ELF := $(patsubst %,$(USER_ELF_DIR)/%,$(USER_PROGRAMS))
+# Phase 7A: these two are installed as .app bundle payloads, not in /bin.
+APP_PROGRAMS := app_hello app_orbit
+USER_ELF := $(patsubst %,$(USER_ELF_DIR)/%,$(USER_PROGRAMS) $(APP_PROGRAMS))
 USER_FLAGS := -std=gnu11 -fcrug-kernel -ffreestanding -fno-pic -fno-pie \
               -mcmodel=large -fno-stack-protector -fno-builtin -fno-ident \
               -fno-asynchronous-unwind-tables -fno-unwind-tables \
@@ -395,6 +406,7 @@ HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
         test-workbench test-workbench-menu test-workbench-shell test-workbench-keys \
         test-workbench-desk test-workbench-icons test-workbench-drawer \
         test-workbench-select test-workbench-screens test-workbench-cx \
+        test-app-bundles \
         iso check-iso test-iso usb \
         crash-disk \
         check-disk size check-efi repro test-host preflight version options clean distclean help
@@ -494,7 +506,8 @@ $(USER_ELF_DIR)/sh: $(USER_OBJ)/start.o $(USER_OBJ)/sh.o user/sh.ld
 user: $(USER_ELF)
 
 disk: user
-	$(Q)USER_DIR=$(abspath $(USER_ELF_DIR)) scripts/mkdisk.sh $(DISK_IMG) $(DISK_SIZE_MB)
+	$(Q)USER_DIR=$(abspath $(USER_ELF_DIR)) APP_DIR=$(abspath $(USER_ELF_DIR)) \
+	  scripts/mkdisk.sh $(DISK_IMG) $(DISK_SIZE_MB)
 	@echo "  DISK  $(DISK_IMG)"
 
 crash-disk: scripts/mkdisk.sh scripts/journal-csum.py
@@ -866,6 +879,34 @@ test-workbench-cx: esp
 		--run-timeout $(WB_CX_RUN_TIMEOUT_SEC) \
 		--qemu-extra "$(WB_QEMU_EXTRA)"
 	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no --expect-cx=yes
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
+# App-bundle gate (phase 7A): wb.app=1 adds the Applications icon; a double
+# click opens the bundle list and a double click on a row launches that
+# program, which the desktop then reaps with its exit status.  A second boot
+# with user.test=7 drives the same registry from /bin/sh ('app list|info|run').
+test-app-bundles: EXPECT_USER := yes
+test-app-bundles: EXPECT_USERS := yes
+test-app-bundles: EXPECT_USHELL := yes
+test-app-bundles: EXPECT_SPAWN := yes
+test-app-bundles: EXPECT_FORK := yes
+test-app-bundles: EXPECT_FORKBIG := yes
+test-app-bundles: esp
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(MAKE) --no-print-directory disk
+	$(Q)$(PYTHON) scripts/run-workbench-app.py --repo $(CURDIR) \
+		--disk $(abspath $(DISK_IMG)) --serial-log $(abspath $(SERIAL_LOG)) \
+		--exit-code $(abspath $(QEMU_EXIT)) --acts $(WB_APP_ACTS) \
+		--wb-wait $(WB_APP_WAIT) \
+		--run-timeout $(WB_APP_RUN_TIMEOUT_SEC) \
+		--qemu-extra "$(WB_QEMU_EXTRA)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no --expect-app=yes
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+	$(Q)$(MAKE) --no-print-directory run TIMEOUT_SEC=$(APP_RUN_TIMEOUT_SEC) \
+		CMDLINE_EXTRA="user.test=7"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION \
+		$(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no no \
+		$(EXPECT_USER) $(EXPECT_USERS) $(EXPECT_USHELL) $(EXPECT_SPAWN) $(EXPECT_FORK) $(EXPECT_FORKBIG)
 	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 
 test:
@@ -1259,6 +1300,10 @@ options:
 	@printf '  %-16s %s\n' WB_CX_WAIT "$(WB_CX_WAIT) (seconds)"
 	@printf '  %-16s %s\n' WB_CX_ACTS "$(WB_CX_ACTS)"
 	@printf '  %-16s %s\n' WB_CX_RUN_TIMEOUT_SEC "$(WB_CX_RUN_TIMEOUT_SEC)"
+	@printf '  %-16s %s\n' WB_APP_WAIT "$(WB_APP_WAIT) (seconds)"
+	@printf '  %-16s %s\n' WB_APP_ACTS "$(WB_APP_ACTS)"
+	@printf '  %-16s %s\n' WB_APP_RUN_TIMEOUT_SEC "$(WB_APP_RUN_TIMEOUT_SEC) (seconds)"
+	@printf '  %-16s %s\n' APP_RUN_TIMEOUT_SEC "$(APP_RUN_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' HARDEN_TIMEOUT_SEC "$(HARDEN_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' EXPECT_HEAP "$(EXPECT_HEAP)"
 	@printf '  %-16s %s\n' HEAP_STRESS_OPS "$(HEAP_STRESS_OPS)"

@@ -114,6 +114,52 @@ if [ -n "${USER_DIR:-}" ]; then
     debugfs -w -R "write $shell_script /etc/sh.rc" "$fs_image" >/dev/null
 fi
 
+# Optional .app bundles (make test-app-bundles): the kernel scans /Applications
+# at boot and registers every <Name>.app whose manifest.toml parses. Hello.app
+# and Orbit.app are valid; Broken.app has no version, so the rejection path is
+# exercised too. APP_DIR comes from the environment, like USER_DIR.
+if [ -n "${APP_DIR:-}" ]; then
+    apps_tmp=$tmp/apps
+    mkdir -p "$apps_tmp/Hello.app/bin/x86_64" \
+             "$apps_tmp/Orbit.app/bin/x86_64" \
+             "$apps_tmp/Broken.app"
+    for prog in app_hello app_orbit; do
+        if [ ! -f "$APP_DIR/$prog" ]; then
+            echo "mkdisk: missing app payload $APP_DIR/$prog" >&2
+            exit 1
+        fi
+    done
+    cp "$APP_DIR/app_hello" "$apps_tmp/Hello.app/bin/x86_64/app_hello"
+    cp "$APP_DIR/app_orbit" "$apps_tmp/Orbit.app/bin/x86_64/app_orbit"
+    printf '%s\n' \
+        '[app]' 'id = "hello"' 'name = "Hello"' 'version = "1.0.0"' \
+        '' '[exec]' 'prog = "bin/x86_64/app_hello"' \
+        '' '[tooltypes]' 'GREET = "world"' \
+        '' '[icon]' 'rgb = "FFB000"' > "$apps_tmp/Hello.app/manifest.toml"
+    printf '%s\n' \
+        '[app]' 'id = "orbit"' 'name = "Orbit"' 'version = "1.0.0"' \
+        '' '[exec]' 'prog = "bin/x86_64/app_orbit"' \
+        '' '[tooltypes]' 'MODE = "demo"' \
+        '' '[icon]' 'rgb = "30C0FF"' > "$apps_tmp/Orbit.app/manifest.toml"
+    printf '%s\n' \
+        '[app]' 'id = "broken"' 'name = "Broken"' \
+        '' '[exec]' 'prog = "bin/x86_64/app_hello"' > "$apps_tmp/Broken.app/manifest.toml"
+    debugfs -w -R "mkdir /Applications" "$fs_image" >/dev/null 2>&1 || true
+    for app in Hello Orbit; do
+        debugfs -w -R "mkdir /Applications/$app.app" "$fs_image" >/dev/null 2>&1 || true
+        debugfs -w -R "mkdir /Applications/$app.app/bin" "$fs_image" >/dev/null 2>&1 || true
+        debugfs -w -R "mkdir /Applications/$app.app/bin/x86_64" "$fs_image" >/dev/null 2>&1 || true
+        debugfs -w -R "write $apps_tmp/$app.app/manifest.toml /Applications/$app.app/manifest.toml" "$fs_image" >/dev/null
+    done
+    debugfs -w -R "write $apps_tmp/Hello.app/bin/x86_64/app_hello /Applications/Hello.app/bin/x86_64/app_hello" "$fs_image" >/dev/null
+    debugfs -w -R "write $apps_tmp/Orbit.app/bin/x86_64/app_orbit /Applications/Orbit.app/bin/x86_64/app_orbit" "$fs_image" >/dev/null
+    debugfs -w -R "mkdir /Applications/Broken.app" "$fs_image" >/dev/null 2>&1 || true
+    debugfs -w -R "write $apps_tmp/Broken.app/manifest.toml /Applications/Broken.app/manifest.toml" "$fs_image" >/dev/null
+    app_script=$tmp/app.rc
+    printf '%s\n' 'app list' 'app info orbit' 'app run orbit' 'exit 9' > "$app_script"
+    debugfs -w -R "mkdir /etc" "$fs_image" >/dev/null 2>&1 || true
+    debugfs -w -R "write $app_script /etc/app.rc" "$fs_image" >/dev/null
+fi
 if [ "$mode" = crypt ]; then
     mkcrypt_args=(format "$tmp/part.img" --plain "$fs_image" --password "$crypt_pass" --m "$crypt_m")
     if [ -n "$crypt_recovery" ]; then

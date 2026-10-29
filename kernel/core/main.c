@@ -12,6 +12,7 @@
 #include <crug/thread.h>
 #include <crug/process.h>
 #include <crug/storage.h>
+#include <crug/app.h>
 #include <crug/input.h>
 #include <crug/net.h>
 #include <crug/usb.h>
@@ -95,6 +96,10 @@ void kernel_main(const boot_info *bi)
         arch_exit_qemu(0x11);
     }
     t.storage = arch_read_tsc();
+
+    /* Phase 7A: register the .app bundles now that the root is mounted, so a
+       launch from the shell or the Workbench always sees the whole registry. */
+    (void)app_init();
 
     sched_init();
     t.sched = arch_read_tsc();

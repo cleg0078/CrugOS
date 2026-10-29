@@ -1,6 +1,6 @@
 # Roadmap
 
-The specification defines 55 phases/gates. Phase 0 established the smallest
+The specification defines 56 phases/gates. Phase 0 established the smallest
 end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
 phase 1 makes the kernel own physical memory, page tables, exceptions and
 timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
@@ -43,7 +43,10 @@ click and to drag its scrollbar thumb; phase 6I gives Intuition up to three
 retained screens, a screen strip in the menu bar, per-screen windows and icons,
 and a window move between screens; phase 6J adds a Commodities Exchange, a
 small registry of global hotkey utilities plus an Exchange manager window whose
-rows toggle them. Release
+rows toggle them; phase 7A turns programs into `Applications` bundles, a
+`manifest.toml` with Amiga-style tool types beside a user ELF, with a registry
+built at boot and both a desktop window and a shell builtin to launch them.
+Release
 `v0.23.1` adds packaging rather than a spec phase: `make iso` produces a hybrid
 UEFI ISO that boots from a USB stick or a CD-ROM, with the kernel's
 `storage=none` token so an image with no root filesystem still passes the boot
@@ -1670,6 +1673,69 @@ trees, and several of the remaining Mediums stay reachable until then.
   the gate and the limits) plus README, roadmap, versioning, boot, build, input
   and gfx.
 - All 55 gates pass at `v0.42.0`.
+
+## Phase 7A - .app bundles and tool types (done)
+
+- `kernel/app/app.c` adds the application registry: a static `struct app`
+  table of at most `APP_MAX` (8) entries and no heap, filled once by
+  `app_init()` in `kernel/core/main.c` after `storage_init()` and before
+  `sched_init()`.
+- A bundle is a directory, `/Applications/<Name>.app/manifest.toml` plus a
+  user ELF at `bin/x86_64/<program>`; nothing else is required, and the program
+  is loaded by the normal exec loader.
+- The manifest is a bounded TOML subset with a hard cap of
+  `APP_MANIFEST_MAX` (2048) bytes: `[app]` `id`, `name` and `version` are
+  required (with `min_os` optional), `[exec]` `prog` is a relative path,
+  `[tooltypes]` holds up to eight `KEY = "value"` lines and `[icon]` carries
+  an `rgb = "RRGGBB"` colour. `#` starts a comment, blank lines are allowed,
+  and values must be printable ASCII in double quotes.
+- Every refusal has a stable reason string and is printed once at boot as
+  `CRUGOS: app rejected <dir> (<reason>)` (`bad-entry`, `manifest-too-large`,
+  `no-id`, `bad-id`, `dup-key`, `no-name`, `bad-name`, `no-version`,
+  `bad-version`, `min-os`, `no-prog`, `bad-prog`, `bad-rgb`,
+  `too-many-tooltypes`, `bad-tooltype`, `dup-id`, `dup-name` and
+  `registry-full`); the accepted set is sorted by id and summarised as
+  `CRUGOS: app registry ready (N app(s), M rejected)`.
+- `app_launch()` starts the payload with `elf_spawn_user()` and passes the
+  bundle directory as `argv[0]`, so a program can find its own manifest.
+- `include/crug/syscall.h` grows `SYS_APP_COUNT` (25), `SYS_APP_INFO` (26)
+  and `SYS_APP_SPAWN` (27) with `SYS_MAX` now 28. `SYS_APP_INFO(index, buf,
+  len)` writes a text record `id|name|version|prog|RRGGBB|KEY=value;KEY=value`
+  with no newline and uppercase hex, and rejects a bad index with `SYS_ENOENT`,
+  a bad buffer with `SYS_EFAULT` and an overflow with `SYS_EINVAL`.
+- `user/lib.h` gains `u_app_count()`, `u_app_info()` and `u_app_spawn()`,
+  and `/bin/sh` gains the `app list`, `app info <id>` and `app run <id>`
+  builtin with the `CRUGOS: sh app ...` markers.
+- `wb.app=1` adds the `Applications:` icon at (16,300) and, on a double
+  click, a lazily created window at (560,320,340,240): one click selects a row,
+  a second click on the same row within 600 ms launches it, the desktop reaps the
+  thread, and only one launch is in flight at a time.
+- `scripts/mkdisk.sh` writes three bundles -- `Hello.app` (tool type
+  `GREET="world"`, amber icon), `Orbit.app` (`MODE="demo"`, blue icon) and
+  `Broken.app`, which has no version and is rejected with `no-version` -- and
+  builds `user/app_hello.c` (exit 0) and `user/app_orbit.c` (exit 5) as their
+  payloads rather than `/bin` programs.
+- `user.test=7` runs `/bin/sh /etc/app.rc`, which performs `app list`,
+  `app info orbit` and `app run orbit` and exits 9; the kernel requires that
+  code and prints `CRUGOS: user app ok (exit 9)`.
+- `make test-app-bundles` is gate 56 and has two legs: a desktop boot with
+  `wb.app=1` that double-clicks the icon and the first row and checks both the
+  window pixels and `scripts/boot-check.py --expect-app=yes` (a flag, so the
+  argv layout is unchanged), then a `user.test=7` boot that drives the registry
+  from the shell. Both end with `check-disk`.
+- Host tests cover the manifest parser, the registry and the tool types, and
+  `make test-host` reports 8216 checks; `make size` reports a 296848 B
+  (289 KiB) file and a 942394 B (920 KiB) load image.
+- Limits: eight applications at most, no signing or permission checks, one
+  program with exactly one argument per launch, a rejected bundle is silently
+  absent from the window, the icon is a colour plus a label, and metadata is read
+  once at boot, so installing a bundle needs a reboot. See
+  [apps.md](apps.md).
+- docs: `docs/apps.md` (the bundle format, the manifest grammar, the rejection
+  reasons, the registry, the Workbench window, the syscall ABI, the shell
+  commands, the markers, the gate and the limits) plus README, workbench,
+  userspace, roadmap, versioning, boot and build.
+- All 56 gates pass at `v0.43.0`.
 
 ## Bootable media - hybrid UEFI ISO (done, `v0.23.1`)
 

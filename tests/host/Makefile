@@ -9,7 +9,8 @@ BIN := $(BUILD)/unit-tests
 SOURCES := main.c test_string.c test_printf.c test_elf.c test_bitmap.c test_vm_math.c test_handle.c \
            test_crc32c.c test_blake2b.c test_aes.c test_argon2.c test_crypt.c \
            test_lineedit.c test_input.c test_net.c test_dns.c test_usb.c test_audio.c \
-           test_gfx.c test_intuition.c test_commodity.c test_textgrid.c test_shell.c test_harden.c \
+           test_gfx.c test_intuition.c test_commodity.c test_app.c test_textgrid.c \
+           test_shell.c test_harden.c \
            test_heap.c test_trap.c test_argv.c test_ufile.c \
            test_uaccess.c test_exec.c test_vm_space.c \
            ../../drivers/usb/usb_hid.c \
@@ -29,7 +30,7 @@ SOURCES := main.c test_string.c test_printf.c test_elf.c test_bitmap.c test_vm_m
            ../../kernel/crypto/argon2id.c ../../kernel/block/crypt_meta.c \
            ../../kernel/exec/argv.c ../../kernel/fs/ufile.c \
            ../../kernel/core/process.c \
-           ../../boot/efi/elf.c
+           ../../kernel/app/manifest.c ../../boot/efi/elf.c
 
 .PHONY: all run clean fuzz
 

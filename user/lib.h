@@ -16,6 +16,9 @@
 #define U_SYS_WAIT 22u
 #define U_SYS_EXEC 23u
 #define U_SYS_FORK 24u
+#define U_SYS_APP_COUNT 25u
+#define U_SYS_APP_INFO 26u
+#define U_SYS_APP_SPAWN 27u
 
 /* SYS_OPEN flags (phase U3). U_O_RDONLY is the zero flag. */
 #define U_O_RDONLY 0u
@@ -175,6 +178,24 @@ static inline i64 u_exec(const char *path, u32 argc, const char *const *argv)
 static inline i64 u_fork(void)
 {
     return u_syscall3(U_SYS_FORK, 0, 0, 0);
+}
+
+/* Phase 7A: the .app registry.  INFO fills BUF with
+   'id|name|version|prog|RRGGBB|KEY=value;...' and returns its length. */
+static inline i64 u_app_count(void)
+{
+    return u_syscall3(U_SYS_APP_COUNT, 0, 0, 0);
+}
+
+static inline i64 u_app_info(u32 index, void *buf, u32 len)
+{
+    return u_syscall3(U_SYS_APP_INFO, (u64)index, (u64)(uintptr)buf,
+                      (u64)len);
+}
+
+static inline i64 u_app_spawn(u32 index)
+{
+    return u_syscall3(U_SYS_APP_SPAWN, (u64)index, 0, 0);
 }
 
 static inline i64 u_gettid(void)

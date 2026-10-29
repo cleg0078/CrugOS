@@ -19,13 +19,19 @@ copy lazy: the parent's writable frames are shared read-only and copied on the
 first store on either side, so a fork costs a page table and a few reference
 counts rather than one frame per page.
 
-The current gate is `make test-user6` (gate 53): it boots with `user.test=6`,
+The last user-program gate is `make test-user6` (gate 53): it boots with `user.test=6`,
 runs the U1 trio, the U2 isolation pair, the U3 shell, the U4 spawn/exec probe,
 the U5 two-page fork and then `/bin/forkbig`, which forks 300 pages and proves
 the two sides never share a writable frame. The earlier gates keep their levels:
 `make test-user5` (gate 52) stops after the two-page fork, `make test-user4`
 (gate 51) after the spawn/exec probe, `make test-user3` (gate 50) at the shell,
 `make test-user2` (gate 49) at the isolation pair.
+
+Phase 7A adds application bundles to the same boundary: `SYS_APP_COUNT`,
+`SYS_APP_INFO` and `SYS_APP_SPAWN` expose the boot-time registry to ring 3, the
+shell gains an `app` builtin, and the second leg of `make test-app-bundles`
+(gate 56) boots `user.test=7`, which runs `/etc/app.rc`. The bundle format and
+the desktop launcher live in [apps.md](apps.md) and [workbench.md](workbench.md).
 
 Nothing in these phases changes the boot paths, the disk image format or the
 loaded program ABI the UEFI loader uses. The kernel gains `SYS_WRITE`, the file
@@ -411,6 +417,13 @@ probe runs last, because its child must be reaped before the boot ends.
 | `/bin/spawn` | spawn, wait and in-place exec all work from ring 3 | 5 |
 | `/bin/child` | a spawned image receives its argv and exits for its parent | 5 |
 | `/bin/fork` | a forked child writes its own frame, not the parent's | 0 |
+| `Hello.app` payload | a bundle program runs, prints its directory and returns | 0 |
+| `Orbit.app` payload | a bundle program returns a non-zero code to its launcher | 5 |
+
+`app_hello.c` prints `CRUGOS: app hello running`, its `argv[0]` (the bundle
+directory) and `CRUGOS: app hello done`, then returns 0; `app_orbit.c` has the
+same shape and returns 5, so the desktop's reap line and the shell's exit line
+both carry a code that cannot be confused with success.
 
 `hello.c` prints `CRUGOS: user hello from ring 3` and returns 0. `badptr.c` calls
 `SYS_WRITE` with `0x00100000` (a kernel address) and checks that the return value
@@ -790,6 +803,55 @@ shape: a shared count of at least 2, at least two `(copy)` faults and one
 - A fork still inherits only the user window: no descriptors, no pending
   signals, no timers - the child starts with an empty descriptor table.
 
+## Application bundles: `SYS_APP_COUNT`, `SYS_APP_INFO` and `SYS_APP_SPAWN`
+
+The registry itself is a kernel structure built once at boot (see
+[apps.md](apps.md)). Ring 3 sees it through three syscalls, added by phase 7A
+above `SYS_FORK`:
+
+| Call | Number | Arguments | Result |
+| --- | --- | --- | --- |
+| `SYS_APP_COUNT` | 25 | none | the number of registered bundles |
+| `SYS_APP_INFO` | 26 | index, buffer, length | the record size in bytes, or `SYS_ENOENT` |
+| `SYS_APP_SPAWN` | 27 | index, pointer to a `u32` tid | the tid, or `SYS_EIO` |
+
+`SYS_MAX` is 28. `SYS_APP_INFO` copies one record of at most
+`SYS_APP_INFO_MAX` (512) bytes:
+
+```
+id|name|version|prog|RRGGBB|KEY=value;KEY=value
+```
+
+There is no trailing newline, the colour is six uppercase hex digits and the
+tool types are joined with `;`; a bundle without tool types ends after the
+colour. The kernel buffer goes through the same uaccess boundary as every other
+syscall pointer, so a kernel address returns `-EFAULT` instead of being read and
+a short buffer returns `-EINVAL`; an index past the count returns
+`-SYS_ENOENT`. `SYS_APP_SPAWN` starts the payload through `elf_spawn_user()`
+with `argc` 1, whose `argv[0]` is the bundle directory, and returns the new tid
+for the caller to reap with `SYS_WAIT`; a bundle whose payload no longer
+resolves returns `-SYS_EIO`. `user/lib.h` wraps all three as
+`u_app_count()`, `u_app_info(index, buf, len)` and `u_app_spawn(index)`.
+
+The shell builtin passes them straight through:
+
+```
+app list
+app info orbit
+app run orbit
+```
+
+`app list` prints `CRUGOS: sh app count N`, `app info <id>` prints
+`CRUGOS: sh app <id> <version>` plus the name and icon colour of that record,
+`app run <id>` prints the returned tid and the exit code it reaped, and anything
+else prints `CRUGOS: sh app usage: app list|info <id>|run <id>`.
+
+`user.test=7` is the scripted proof: the kernel runs
+`/bin/sh /etc/app.rc`, and that script is exactly `app list`, `app info
+orbit`, `app run orbit` and `exit 9`. The kernel prints
+`CRUGOS: user app test start`, runs `/bin/sh`, and requires exit 9 before it
+prints `CRUGOS: user app ok (exit 9)`. `/etc/sh.rc` still backs level 1.
+
 ## Building a user program
 
 A user program is a freestanding ELF64 linked by `user/user.ld`. The isolation
@@ -816,7 +878,10 @@ The build rule is a single Makefile target:
 make user
 ```
 
-`USER_PROGRAMS` is `hello badptr fault iso sh spawn child fork forkbig`. The common rule
+`USER_PROGRAMS` is `hello badptr fault iso sh spawn child fork forkbig`.
+`APP_PROGRAMS` is `app_hello app_orbit`: bundle payloads built by the same rule
+but installed by `mkdisk.sh` as `/Applications/<Name>.app/bin/x86_64/app_*`
+rather than into `/bin`. The common rule
 compiles `user/*.c` with `-fcrug-kernel -ffreestanding -mcmodel=large -nostdlib
 -no-pie -Wl,-T,user/user.ld` into `build/x86_64/user/<name>`; `iso` and `sh` have
 explicit rules of their own because they link with `user/iso.ld` and
@@ -881,6 +946,10 @@ warning at disk-build time and a "did not start" failure at run time.
 | `CRUGOS: user forkbig child tid <n>` | from `/bin/forkbig` | the child is alive with its own copy |
 | `CRUGOS: user forkbig reap exit <n>` | from `/bin/forkbig` | `SYS_WAIT` returned 7 |
 | `CRUGOS: user forkbig ok (child exit 7, 300 page(s) isolated)` | end of level 6 | the sentinel survived the child's writes |
+| `CRUGOS: sh app count <n>` | from `/bin/sh` | `SYS_APP_COUNT` returned the registry size |
+| `CRUGOS: sh app <id> <version>` | from `/bin/sh` | `app info` printed one record's id and version |
+| `CRUGOS: user app test start` | `user.test=7` | the kernel is about to run `/bin/sh /etc/app.rc` |
+| `CRUGOS: user app ok (exit 9)` | end of level 7 | the script listed, inspected and ran a bundle |
 | `CRUGOS: user selftest ok (3 program(s), 1 fault(s))` | end | the U1 programs behaved |
 
 The counting line is unchanged: it counts the sequential U1 programs, not the
@@ -918,7 +987,12 @@ present.
 their own levels: `user.test=1` is the three U1 programs, `user.test=2` adds the
 isolation pair, `user.test=3` adds the shell, `user.test=4` adds `/bin/spawn`,
 `user.test=5` adds `/bin/fork`, and `user.test=6` adds `/bin/forkbig` on top
-of the two-page fork.
+of the two-page fork. `user.test=7` adds the bundle script instead: the kernel
+runs `/bin/sh /etc/app.rc` and requires its exit 9. `make test-app-bundles`
+(gate 56) is the other gate that drives a user level: its second leg boots
+`user.test=7` under `APP_RUN_TIMEOUT_SEC` (300), requires
+`CRUGOS: user app ok (exit 9)` and then runs `check-disk`; its first leg boots
+no user program at all and is described in [workbench.md](workbench.md).
 
 Captured output from the gate in order (the report's `trap rip=` line and the two
 `trap regs` lines are elided - they carry the same frame the `user fault` line
