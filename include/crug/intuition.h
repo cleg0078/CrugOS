@@ -42,6 +42,15 @@
 #define INTUITION_FRONT_SIZE 12u
 #define INTUITION_ICON_DRAG_MIN 4u
 
+/* Phase 6I: full screens.  Every screen owns its background colour, its own
+   desktop objects and its own window stack; only the front screen is drawn.
+   A screen gadget at the right end of the menu bar shows every screen name
+   (the front one highlighted) and swaps the front screen on a click, exactly
+   like the Amiga screen depth arrangement. */
+#define INTUITION_MAX_SCREENS 3
+#define INTUITION_SCREEN_GLYPH_W 8u
+#define INTUITION_SCREEN_PAD 6u
+
 /* Phase 6H: a body painter can also own its window's pointer input.  The
    callback receives body-relative coordinates and one of these kinds, so a
    list can select a row and drag its own scrollbar without intuition.device
@@ -96,6 +105,8 @@ struct intuition_menu {
 #define INTUITION_EVENT_DEPTH 8u    /* a window was sent to the back */
 #define INTUITION_EVENT_ICON_MOVE 9u /* a desktop icon was dragged */
 #define INTUITION_EVENT_FRONT 10u   /* a window was sent to the front */
+#define INTUITION_EVENT_SCREEN 11u  /* the front screen changed, or a window
+                                       moved between screens (phase 6I) */
 
 struct intuition_event {
     u32 type;
@@ -187,5 +198,26 @@ u64 intuition_close_count(void);
 /* Open menu: index within the active window's menu table, or -1. */
 int intuition_menu_open(void);
 int intuition_menu_hover(void);
+
+/* Phase 6I screens.  intuition_init creates screen 0, named "Workbench" with
+   the default desktop colour; every window and every desktop object opened
+   before the first intuition_add_screen() belongs to it.  Adding a screen
+   returns its index (1..INTUITION_MAX_SCREENS-1) or -1 when the table is full,
+   the framebuffer is absent or the name is NULL.  The name is caller owned. */
+int intuition_add_screen(const char *name, u32 bg_rgb);
+/* Target screen for the windows and objects created next; 0 by default. */
+int intuition_set_screen(u32 index);
+/* Bring one screen to the front.  The windows, objects and background of the
+   old screen stay alive and come back untouched when it is fronted again;
+   the active window becomes the front screen's topmost window. */
+int intuition_screen_switch(u32 index);
+/* Move one window to another screen without changing the front screen. */
+int intuition_move_window_screen(int id, u32 index);
+int intuition_screen_front(void);
+int intuition_window_screen(int id);
+u32 intuition_screen_count(void);
+/* Front-screen swaps and windows that changed screen (phase 6I). */
+u64 intuition_screen_switches(void);
+u64 intuition_screen_moves(void);
 
 #endif /* CRUG_INTUITION_H */

@@ -155,6 +155,10 @@ both self-test outcomes.
   rows are click-selectable -- an amber `INTUITION_MENU_HIGHLIGHT_RGB` band on
   the selected row -- and its scrollbar thumb can be dragged, through a generic
   body-input hook, which `make test-workbench-select` checks in the same
+  `screendump`s, and since phase 6I Intuition keeps up to three screens, each
+  with its own name, background colour, windows and desktop icons, with a screen
+  strip at the right end of the menu bar and a gadget that moves a window from
+  one screen to another, which `make test-workbench-screens` checks in
   `screendump`s).
 - Relative motion only, no acceleration curve, no wheel scrolling of the
   console, no click handling beyond recording the button mask.

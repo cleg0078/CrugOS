@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase U6 copy-on-write fork (`v0.40.0`)
+## Status: phase 6I screens (`v0.41.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -70,7 +70,10 @@ space and resumes the child immediately after the `int 0x80`, so the child sees
 its own pages rather than the parent's, and `make test-user5` is the 52nd gate.
 Phase U6 makes that fork copy-on-write: the parent's writable pages are shared
 with the child read-only and copied on the first store, so a fork of 300 pages
-costs a handful of frames, and `make test-user6` is the 53rd gate.
+costs a handful of frames, and `make test-user6` is the 53rd gate. Phase 6I
+gives the Workbench three retained screens with a strip in the menu bar,
+per-screen windows and desktop icons, and a window move between screens;
+`make test-workbench-screens` is the 54th gate.
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -1266,6 +1269,55 @@ frame. `make test-user6` is the 53rd gate.
   277040 B (270 KiB) on disk and 913790 B (892 KiB) loaded (`.text` 196038 B,
   `.rodata` 29568 B, `.bss` 688128 B), and all 53 gates pass.
 
+Phase 6I gives Intuition full screens, so the desktop is no longer one surface:
+
+- `include/crug/intuition.h` + `kernel/gfx/intuition.c` keep up to
+  `INTUITION_MAX_SCREENS` (3) screens, each with its own name, background
+  colour, window list and desktop icons; only the front screen is painted and
+  the others keep all their state. `intuition_add_screen(name, bg_rgb)` returns
+  the new index or -1 (no framebuffer, a NULL name, or three screens already),
+  `intuition_set_screen(index)` selects the target screen for later
+  `intuition_open`/icons, `intuition_screen_switch(index)` brings a screen to
+  the front, and `intuition_move_window_screen(id, index)` re-parents a window;
+- a switch drops any pending menu, drag, resize, gadget, body or icon
+  interaction, activates the top window of the new screen, counts one action,
+  queues `INTUITION_EVENT_SCREEN` (window 0, item = screen index) and prints
+  `CRUGOS: wb screen N front (K window(s))`; a move re-parents the window, drops
+  the interactions it owned, hands activation to the next window of the front
+  screen, counts one move, queues `INTUITION_EVENT_SCREEN` (window = id,
+  item = target screen) and prints `CRUGOS: wb window N moved to screen M`;
+- the screen strip sits at the right end of the menu bar, one box per screen
+  with the front box highlighted: box width is `strlen(name) * 8 + 12`,
+  `strip_x` is the screen width minus the strip width minus 6, and a press on
+  a box that is not in front switches screens while a press on the front
+  screen's own box does nothing;
+- `kernel/gfx/workbench.c` reads `wb.screens=1` (default 0, the plain
+  single-screen desktop): it adds a `Tools` screen with background `0x00203010`
+  (RGB 32,48,16), opens a 340x200 `Tools` window at (160,140) with the `Tools`
+  `{Move, Close}` and `Workbench` `{About, Info, Quit}` menus and a
+  `Send to Workbench` gadget at body-relative (12,60,160,22), returns to
+  screen 0 and prints `CRUGOS: wb screens ready (N screen(s), front 0)`; a press
+  on that gadget moves the Tools window to screen 0 and the Workbench body
+  reads `phase 6i`;
+- `scripts/boot-check.py` gains the phase marker and a new `--expect-screen=yes`
+  flag (a flag, not a positional argument, so the argument order and the argc
+  range are unchanged) which requires the screens markers, the switch, the
+  move and the `wb action N screen N front` lines;
+- `make test-workbench-screens` is the 54th gate:
+  `scripts/run-workbench-screens.py` boots with
+  `wb.enable=1 wb.wait=30 wb.screens=1 wb.acts=4`, clicks the Tools box at
+  (992,9) and checks the Tools background, presses the gadget at (254,233),
+  clicks the Workbench box at (924,9) and checks the Workbench background, the
+  moved window's amber title bar and its body;
+- `tests/host/test_intuition.c` gains `test_intuition_screens` (the three-screen
+  limit, the target screen, only the front screen painted, a strip press on a
+  covered screen, window moves that queue one event and re-hand activation,
+  out-of-range indexes and a drag dropped by a switch), and `make test-host`
+  reports 7961 checks;
+- `make size` reports a 282032 B (275 KiB) kernel file and an 916294 B (894 KiB)
+  load image (`.text` 197958 B, `.rodata` 30144 B, `.bss` 688128 B), and all
+  54 gates pass.
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -1274,9 +1326,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.40.0 (phase u6) -- Amiga-inspired microkernel bring-up
+CrugOS 0.41.0 (phase 6i) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.40.0
+CRUGOS: version 0.41.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -1325,7 +1377,7 @@ CRUGOS: tcp http served (72 bytes)
 CRUGOS: net selftest ok
 CRUGOS: gfx ready (1024x768, cursor at 512,384)
 CRUGOS: selftest ok
-kernel : 0x0000000000100000 size=270 KiB
+kernel : 0x0000000000100000 size=275 KiB
 boot   : cpu=0 acpi_rsdp=0x1f77e000 fdt=0x0 initrd=0x0
 memory : 36 regions, usable 474080 KiB (462 MiB)
 pmm    : total=118520 free=118462 bitmap=131072 B
@@ -1335,9 +1387,9 @@ entropy: ca02033c50b53413
 wx     : audit ok, identity map 0..4 GiB, guard unmapped
 heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
-boot   : pmm=27755 us cpu=397 us vm=663 us traps=321 us timer=65329 us heap=477 us storage=95269 us sched=373 us syscall=129 us total=189132 us
+boot   : pmm=28663 us cpu=400 us vm=689 us traps=326 us timer=65383 us heap=419 us storage=133465 us sched=306 us syscall=85 us total=229739 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase u6 boot ok
+CRUGOS: phase 6i boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -1541,6 +1593,7 @@ make test-workbench-desk   # select desktop objects and send a window to the bac
 make test-workbench-icons  # drag a desktop icon, raise a window by its front gadget and drive the icons from the keyboard
 make test-workbench-drawer  # scroll, refresh and resize the System: drawer
 make test-workbench-select  # click drawer rows and drag its scrollbar
+make test-workbench-screens  # switch screens and move a window between them
 make test-hardening  # craft hostile superblock/inode/crypt images and boot them
 make test-heap   # corrupt the kernel heap and prove the integrity checker catches it
 make test-trap   # inject eight crafted faults and check the report, IST and panic
@@ -1556,7 +1609,7 @@ make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
 make usb         # write the ISO to a USB block device (USB_DEV=/dev/sdX)
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
-make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows/menus/gadgets, resize grips, keyboard focus and keys, icon dragging, the send-to-front gadget and keyboard icon focus, the body input handler, the text grid and the shell, the user-window and uaccess validators, the per-space page-table tests, the ELF exec mapper, the argv predicates, the fork clone and the copy-on-write table)
+make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows/menus/gadgets, resize grips, keyboard focus and keys, icon dragging, the send-to-front gadget and keyboard icon focus, the body input handler, the text grid and the shell, the user-window and uaccess validators, the per-space page-table tests, the ELF exec mapper, the argv predicates, the fork clone, the copy-on-write table and the screen model)
 make check-disk  # e2fsck + persisted-file checks on the latest test disk
 make user        # build the nine ring-3 programs the disk image carries
 make disk        # generate the GPT/ext4 test disk
@@ -1593,7 +1646,8 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `WB_DESK_RUN_TIMEOUT_SEC`, `WB_ICONS_WAIT`, `WB_ICONS_ACTS`,
 `WB_ICONS_RUN_TIMEOUT_SEC`, `WB_DRAWER_WAIT`, `WB_DRAWER_ACTS`, `WB_DRAWER_FILL`,
 `WB_DRAWER_RUN_TIMEOUT_SEC`, `WB_SELECT_WAIT`, `WB_SELECT_ACTS`,
-`WB_SELECT_FILL`, `WB_SELECT_RUN_TIMEOUT_SEC`, `HARDEN_TIMEOUT_SEC`,
+`WB_SELECT_FILL`, `WB_SELECT_RUN_TIMEOUT_SEC`, `WB_SCREEN_WAIT`,
+`WB_SCREEN_ACTS`, `WB_SCREEN_RUN_TIMEOUT_SEC`, `HARDEN_TIMEOUT_SEC`,
 `HEAP_STRESS_OPS`, `HEAP_RUN_TIMEOUT_SEC`, `TRAP_TIMEOUT_SEC`, `FUZZ_CASES`,
 `FUZZ_CRYPT_CASES`, `FUZZ_SEED`, `FUZZ_TIMEOUT_SEC`, `USER_RUN_TIMEOUT_SEC`,
 `USER2_RUN_TIMEOUT_SEC`, `SHELL_RUN_TIMEOUT_SEC`, `SPAWN_RUN_TIMEOUT_SEC`,

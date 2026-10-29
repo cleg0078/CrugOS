@@ -1,6 +1,6 @@
 # Roadmap
 
-The specification defines 53 phases/gates. Phase 0 established the smallest
+The specification defines 54 phases/gates. Phase 0 established the smallest
 end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
 phase 1 makes the kernel own physical memory, page tables, exceptions and
 timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
@@ -39,7 +39,9 @@ focus; phase 6G makes the drawer a scrolling viewport with arrow keys, a
 refresh key and a scrollbar, and fills the root from a boot token so there is
 something below the fold; phase 6H hands a window's body presses, motions and
 releases to a registered handler, which the drawer uses to select a row on a
-click and to drag its scrollbar thumb. Release
+click and to drag its scrollbar thumb; phase 6I gives Intuition up to three
+retained screens, a screen strip in the menu bar, per-screen windows and icons,
+and a window move between screens. Release
 `v0.23.1` adds packaging rather than a spec phase: `make iso` produces a hybrid
 UEFI ISO that boots from a USB stick or a CD-ROM, with the kernel's
 `storage=none` token so an image with no root filesystem still passes the boot
@@ -1540,6 +1542,62 @@ trees, and several of the remaining Mediums stay reachable until then.
   traps, hardening, iso, workbench, fuzzing and heap.
 - All 53 gates pass at `v0.40.0`.
 
+## Phase 6I - screens (done)
+
+- `include/crug/intuition.h` gains `INTUITION_MAX_SCREENS` (3) and the screen
+  calls: `intuition_add_screen(name, bg_rgb)` returns the new index (or -1 with
+  no framebuffer, a NULL name or three screens already present),
+  `intuition_set_screen(index)` picks the target for later windows and icons,
+  `intuition_screen_switch(index)` brings a screen to the front,
+  `intuition_move_window_screen(id, index)` re-parents one window, and
+  `intuition_screen_front()`, `intuition_window_screen()`,
+  `intuition_screen_count()`, `intuition_screen_switches()` and
+  `intuition_screen_moves()` read the state back. Screens are never destroyed
+  and only the front one is painted.
+- A switch drops any pending menu, drag, resize, gadget, body or icon
+  interaction, activates the top window of the new screen, counts one switch,
+  queues `INTUITION_EVENT_SCREEN` with window 0 and the new index in `item`,
+  prints `CRUGOS: wb screen <n> front (<k> window(s))` and repaints. Switching
+  to the screen already in front is a no-op. A move re-parents the window, drops
+  the interactions it owned, hands activation to the next window of the front
+  screen, queues `INTUITION_EVENT_SCREEN` with the window id and the target
+  screen, prints `CRUGOS: wb window <id> moved to screen <n>` and repaints.
+- A screen strip at the right end of the menu bar shows one box per screen with
+  the front one highlighted; a box is `strlen(name) * 8 + 12` pixels wide, the
+  strip starts at `screen_width - total_width - 6`, and presses below `y=18`
+  hit it. A press on a box that is not in front switches screens and counts one
+  action; a press on the front screen's own box does nothing.
+- The palette grows a second desktop background, `0x00203010` (RGB 32,48,16)
+  for the Tools screen, beside the screen 0 desktop `0x00102030` (16,32,48),
+  the window body `0x00081018` (8,16,24) and the active title bar
+  `0x00FFB000` (255,176,0).
+- `wb.screens=1` (default 0) makes `kernel/gfx/workbench.c` add a `Tools`
+  screen with a 340x200 window at (160,140), the `Tools` {Move, Close} and
+  `Workbench` {About, Info, Quit} menus and a `Send to Workbench` gadget at
+  body-relative (12,60,160,22) that moves the window to screen 0; it prints
+  `CRUGOS: wb screens ready (2 screen(s), front 0)` and ends with
+  `CRUGOS: wb screens selftest ok (2 switch(es), 1 move(s))`.
+- `make test-workbench-screens` is the 54th gate:
+  `scripts/run-workbench-screens.py` boots with
+  `wb.enable=1 wb.wait=30 wb.screens=1 wb.acts=4`, clicks the Tools box at
+  (992,9), checks the Tools background (32,48,16) and the vanished Workbench
+  window, presses the gadget at (254,233), clicks the Workbench box at (924,9)
+  and checks the amber title bar (255,176,0) over the body (8,16,24).
+  boot-check gains the `--expect-screen=yes` flag (a flag, not a positional
+  argument, so the argv order and the argc range are unchanged), and the run
+  then executes the plain check-disk pass.
+- `tests/host/test_intuition.c` gains `test_intuition_screens`: the
+  three-screen limit, the target screen, per-screen window lookup, only the front
+  screen painted (a body painter on a covered window is not called and a press
+  aimed at it hits nothing), a move queueing one `SCREEN` event and re-handing
+  activation, out-of-range window and screen indexes refused, a switch to the
+  front screen being a no-op that still sets the target, and a pending drag
+  dropped by a switch. `make test-host` reports 7961 checks.
+- docs: `docs/workbench.md` (the API, the strip geometry and colours, the
+  `SCREEN` event, the Tools screen, the gate and the limits) plus README,
+  roadmap, versioning, boot, build and gfx.
+- All 54 gates pass at `v0.41.0`.
+
 ## Bootable media - hybrid UEFI ISO (done, `v0.23.1`)
 
 - `kernel/fs/storage.c` gained the `storage=none` command-line token: every
@@ -1599,16 +1657,17 @@ trees, and several of the remaining Mediums stay reachable until then.
   validation, AAAA/PTR/SRV, search domains, negative caching) on top of the
   phase 4B-4D stack, richer socket semantics (bind, options, non-blocking, more
   than four sockets); IPv6, fragmentation and reassembly.
-- Software framebuffer -> VirtIO-GPU -> vendor GPU drivers: with the phase 6H
+- Software framebuffer -> VirtIO-GPU -> vendor GPU drivers: with the phase 6I
   desktop in place (window resizing, the depth and front gadgets, icon dragging,
   a scrolling, refreshing drawer and its selectable rows and draggable
-  scrollbar are done), the next Workbench increments are keyboard row
-  navigation and Enter activation of icons from the drawer, multi-select, a
-  gadget toolkit, sub-menus on top of the phase 6B menu bar, renaming an icon
-  and richer shell semantics (quoting, a working directory) on top of the
-  shell, the phase 5D cursor, the phase 5B pointer stack and the phase 5C audio
-  stack; application bundles (phase 7, specification section 35) are the next
-  layer above the desktop.
+  scrollbar, and up to three retained screens with per-screen windows and icons,
+  a screen strip and a window move between screens are done), the next Workbench
+  increments are application launching (application bundles, phase 7,
+  specification section 35) and Commodities, plus keyboard row navigation and
+  Enter activation of icons from the drawer, multi-select, a gadget toolkit,
+  sub-menus on top of the phase 6B menu bar, renaming an icon and richer shell
+  semantics (quoting, a working directory) on top of the shell, the phase 5D
+  cursor, the phase 5B pointer stack and the phase 5C audio stack.
 - Workbench userspace, `.app` bundles, `.crpkg` packages, capability model.
 - POSIX-like layer: 64-bit UID/GID, ACLs, process groups, signals.
 

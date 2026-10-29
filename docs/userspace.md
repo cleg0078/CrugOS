@@ -456,7 +456,7 @@ path. It executes one command per line:
 
 | Command | Effect |
 | --- | --- |
-| `ver` | print `CrugOS ring-3 shell (phase u6)` |
+| `ver` | print `CrugOS ring-3 shell (phase 6i)` |
 | `echo TEXT` | print `TEXT` |
 | `cat FILE` | read the file and write its bytes to the console |
 | `ls PATH` | list a directory |

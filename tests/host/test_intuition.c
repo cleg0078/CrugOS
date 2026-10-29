@@ -1308,6 +1308,143 @@ static void test_intuition_body_input(void)
     /* Unknown windows are refused instead of crashing. */
     CHECK(intuition_set_body_input(99, body_probe_fn, &probe) == -1);
 }
+/* Phase 6I: full screens.  A screen owns a background, its windows and its
+   desktop objects; only the front screen is drawn and the screen strip at the
+   right end of the menu bar fronts another screen without touching its state. */
+static void test_intuition_screens(void)
+{
+    struct paint_probe work_probe;
+    struct paint_probe tools_probe;
+    struct intuition_event out;
+    struct input_pointer ev;
+    u64 switches;
+
+    /* Screen 0 always exists, and three screens are the maximum. */
+    test_reset(1024, 768);
+    CHECK(intuition_screen_count() == 1u);
+    CHECK(intuition_screen_front() == 0);
+    CHECK(intuition_screen_switches() == 0u);
+    CHECK(intuition_screen_moves() == 0u);
+    CHECK(intuition_open(100, 100, 300, 200, "Workbench", "body") == 1);
+    CHECK(intuition_window_screen(1) == 0);
+    CHECK(intuition_add_screen("Tools", 0x00203010u) == 1);
+    CHECK(intuition_add_screen("Music", 0x00201020u) == 2);
+    CHECK(intuition_add_screen("Extra", 0x00000000u) == -1);
+    CHECK(intuition_screen_count() == 3u);
+    /* A window opens on the target screen and reports it. */
+    CHECK(intuition_set_screen(1) == 0);
+    CHECK(intuition_open(300, 140, 340, 200, "Tools", "body") == 2);
+    CHECK(intuition_window_screen(2) == 1);
+    CHECK(intuition_set_screen(0) == 0);
+    CHECK(intuition_set_screen(3) == -1);
+    CHECK(intuition_window_screen(1) == 0);
+    CHECK(intuition_window_screen(99) == -1);
+
+    /* Two screens at 1024 pixels: the strip starts at 882, the Workbench box
+       spans 882..966 and the Tools box 966..1018. */
+    memset(&work_probe, 0, sizeof(work_probe));
+    memset(&tools_probe, 0, sizeof(tools_probe));
+    test_reset(1024, 768);
+    CHECK(intuition_open(100, 100, 300, 200, "Workbench", "body") == 1);
+    CHECK(intuition_set_paint(1, paint_probe_fn, &work_probe) == 0);
+    CHECK(intuition_add_screen("Tools", 0x00203010u) == 1);
+    CHECK(intuition_set_screen(1) == 0);
+    CHECK(intuition_open(300, 140, 340, 200, "Tools", "body") == 2);
+    CHECK(intuition_set_paint(2, paint_probe_fn, &tools_probe) == 0);
+    CHECK(intuition_set_screen(0) == 0);
+    CHECK(intuition_active() == 1);
+
+    /* Only the front screen is painted: the covered window's painter is idle. */
+    work_probe.calls = 0;
+    tools_probe.calls = 0;
+    intuition_redraw();
+    CHECK(work_probe.calls >= 1u);
+    CHECK(tools_probe.calls == 0u);
+
+    /* A press on the Tools box fronts screen 1 and activates its top window. */
+    move_cursor(992, 9);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_screen_front() == 1);
+    CHECK(intuition_screen_switches() == 1u);
+    CHECK(intuition_action_count() == 1u);
+    CHECK(intuition_active() == 2);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    work_probe.calls = 0;
+    tools_probe.calls = 0;
+    intuition_redraw();
+    CHECK(tools_probe.calls >= 1u);
+    CHECK(work_probe.calls == 0u);
+
+    /* A press on the covered screen's window hits nothing. */
+    move_cursor(150, 120);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_active() == 2);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+
+    /* The Workbench box brings screen 0 back with its window untouched. */
+    move_cursor(924, 9);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_screen_front() == 0);
+    CHECK(intuition_screen_switches() == 2u);
+    CHECK(intuition_action_count() == 2u);
+    CHECK(intuition_active() == 1);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+
+    /* Moving a window to another screen leaves the front screen alone, queues
+       one SCREEN event and hands the activation to the remaining window. */
+    while (intuition_event_poll(&out) == 1) {
+    }
+    CHECK(intuition_move_window_screen(1, 1) == 0);
+    CHECK(intuition_window_screen(1) == 1);
+    CHECK(intuition_screen_front() == 0);
+    CHECK(intuition_screen_moves() == 1u);
+    CHECK(intuition_active() == -1);
+    CHECK(intuition_event_poll(&out) == 1);
+    CHECK(out.type == INTUITION_EVENT_SCREEN);
+    CHECK(out.window == 1);
+    CHECK(out.item == 1);
+    CHECK(intuition_event_poll(&out) == 0);
+    /* Unknown windows and screens are refused and change nothing. */
+    CHECK(intuition_move_window_screen(99, 0) == -1);
+    CHECK(intuition_move_window_screen(1, 2) == -1);
+    CHECK(intuition_screen_moves() == 1u);
+    CHECK(intuition_window_count() == 2u);
+    /* The moved window is alive on the other screen and can come back. */
+    CHECK(intuition_screen_switch(1) == 0);
+    CHECK(intuition_active() == 2);
+    CHECK(intuition_move_window_screen(2, 0) == 0);
+    CHECK(intuition_active() == 1);
+    CHECK(intuition_screen_moves() == 2u);
+    CHECK(intuition_screen_switch(0) == 0);
+    CHECK(intuition_active() == 2);
+    switches = intuition_screen_switches();
+    CHECK(switches == 4u);
+    /* Switching to the screen that is already in front is a no-op. */
+    CHECK(intuition_screen_switch(0) == 0);
+    CHECK(intuition_screen_switches() == switches);
+    CHECK(intuition_screen_switch(2) == -1);
+    /* Moving a window to the screen it is already on is a no-op too. */
+    CHECK(intuition_move_window_screen(2, 0) == 0);
+    CHECK(intuition_screen_moves() == 2u);
+    /* A screen switch drops a pending title-bar drag. */
+    move_cursor(110, 110);
+    pointer(&ev, 0, 0, 0x01u, 0x01u);
+    intuition_pointer_event(&ev);
+    move_cursor(150, 130);
+    pointer(&ev, 40, 20, 0x01u, 0x00u);
+    intuition_pointer_event(&ev);
+    pointer(&ev, 0, 0, 0x00u, 0x01u);
+    intuition_pointer_event(&ev);
+    CHECK(intuition_screen_switch(1) == 0);
+    CHECK(intuition_screen_switch(0) == 0);
+    CHECK(intuition_window_count() == 2u);
+}
 void test_intuition_functions(void)
 {
     printf("- intuition basics / clamping / limits\n");
@@ -1348,4 +1485,6 @@ void test_intuition_functions(void)
     test_intuition_icon_keys();
     printf("- intuition body input\n");
     test_intuition_body_input();
+    printf("- intuition screens / window moves\n");
+    test_intuition_screens();
 }

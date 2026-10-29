@@ -44,6 +44,7 @@
 #   make test-workbench-icons  drag a desktop icon, raise a window and drive the icons by keyboard
 #   make test-workbench-drawer  scroll, refresh and resize the System: drawer
 #   make test-workbench-select  select a drawer row and drag its scrollbar
+#   make test-workbench-screens  switch screens and move a window between them
 #   make crypt-disk  build the AES-256-XTS crypt test disk
 #   make test-crypt  boot from an encrypted root and verify the disk
 #   make test-crypt-recovery  unlock the encrypted root with the recovery keyslot
@@ -175,6 +176,11 @@ WB_SELECT_WAIT ?= 30
 WB_SELECT_ACTS ?= 3
 WB_SELECT_FILL ?= 24
 WB_SELECT_RUN_TIMEOUT_SEC ?= 240
+
+# Screens gate (make test-workbench-screens): wb.screens=1 adds a second screen.
+WB_SCREEN_WAIT ?= 30
+WB_SCREEN_ACTS ?= 4
+WB_SCREEN_RUN_TIMEOUT_SEC ?= 240
 
 # Hardening gate (make test-hardening): how long each crafted image may boot.
 HARDEN_TIMEOUT_SEC ?= 120
@@ -375,7 +381,7 @@ HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
         test-net-dns test-usb-hotplug test-usb-mouse test-audio test-gfx \
         test-workbench test-workbench-menu test-workbench-shell test-workbench-keys \
         test-workbench-desk test-workbench-icons test-workbench-drawer \
-        test-workbench-select \
+        test-workbench-select test-workbench-screens \
         iso check-iso test-iso usb \
         crash-disk \
         check-disk size check-efi repro test-host preflight version options clean distclean help
@@ -815,6 +821,21 @@ test-workbench-select: esp
 	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no $(EXPECT_ICONS) $(EXPECT_DRAWER) $(EXPECT_SELECT)
 	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 
+# Screens gate: wb.screens=1 adds a second screen with its own desktop and a
+# window on it.  Serial markers prove the two switches and the window move,
+# screendumps prove each screen paints its own background and that the moved
+# window is missing from the screen it left.
+test-workbench-screens: esp
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(PYTHON) scripts/run-workbench-screens.py --repo $(CURDIR) \
+		--disk $(abspath $(DISK_IMG)) --serial-log $(abspath $(SERIAL_LOG)) \
+		--exit-code $(abspath $(QEMU_EXIT)) --acts $(WB_SCREEN_ACTS) \
+		--wb-wait $(WB_SCREEN_WAIT) \
+		--run-timeout $(WB_SCREEN_RUN_TIMEOUT_SEC) \
+		--qemu-extra "$(WB_QEMU_EXTRA)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no --expect-screen=yes
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
 test:
 	$(Q)rm -f $(DISK_IMG)
 	$(Q)$(MAKE) --no-print-directory run
@@ -1200,6 +1221,9 @@ options:
 	@printf '  %-16s %s\n' WB_SELECT_ACTS "$(WB_SELECT_ACTS)"
 	@printf '  %-16s %s\n' WB_SELECT_FILL "$(WB_SELECT_FILL)"
 	@printf '  %-16s %s\n' WB_SELECT_RUN_TIMEOUT_SEC "$(WB_SELECT_RUN_TIMEOUT_SEC)"
+	@printf '  %-16s %s\n' WB_SCREEN_WAIT "$(WB_SCREEN_WAIT) (seconds)"
+	@printf '  %-16s %s\n' WB_SCREEN_ACTS "$(WB_SCREEN_ACTS)"
+	@printf '  %-16s %s\n' WB_SCREEN_RUN_TIMEOUT_SEC "$(WB_SCREEN_RUN_TIMEOUT_SEC)"
 	@printf '  %-16s %s\n' HARDEN_TIMEOUT_SEC "$(HARDEN_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' EXPECT_HEAP "$(EXPECT_HEAP)"
 	@printf '  %-16s %s\n' HEAP_STRESS_OPS "$(HEAP_STRESS_OPS)"

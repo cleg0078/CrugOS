@@ -496,15 +496,75 @@ window that is already frontmost is a no-op -- no event, no count and no
 repaint -- because the stacking order would not change. Compare the depth
 gadget, which sends a window back and activates the new top window.
 
+## Screens
+
+Phase 6I gives Intuition more than one screen. Up to `INTUITION_MAX_SCREENS` (3)
+screens live in memory at once, each with its own name, background colour,
+window list and desktop icons; only the front screen is painted, and a screen
+that is not in front keeps every window, icon and piece of state it had. Screens
+are never destroyed, so a program can keep a workspace on a second screen and
+switch back to it.
+
+The API in `include/crug/intuition.h`:
+
+| function | result |
+| --- | --- |
+| `intuition_add_screen(name, bg_rgb)` | the new screen index, or -1 when there is no framebuffer, `name` is NULL, or three screens already exist |
+| `intuition_set_screen(index)` | 0, or -1 when `index` is out of range; selects the target screen for later `intuition_open()` and icon calls |
+| `intuition_screen_switch(index)` | 0, or -1 when `index` is out of range; brings that screen to the front |
+| `intuition_move_window_screen(id, index)` | 0, or -1 for an unknown window or screen; re-parents one window |
+| `intuition_screen_front()`, `_count()`, `_switches()`, `_moves()` | the front index, the screen count and the two counters |
+| `intuition_window_screen(id)` | the screen a window lives on, or -1 for an unknown id |
+
+Out-of-range screen indexes and unknown window ids are refused with -1, and
+because only the front screen is painted a press aimed at a window on a covered
+screen reaches nothing and never activates it.
+
+A switch drops any pending menu, drag, resize, gadget, body or icon interaction,
+activates the top window of the new screen, counts one switch, queues
+`INTUITION_EVENT_SCREEN` with window 0 and item = the new screen index, prints
+`CRUGOS: wb screen %u front (%u window(s))` and repaints. Switching to the
+screen that is already in front is a no-op -- no event, no count and no repaint.
+A move re-parents the window, drops the interactions it owned, hands activation
+to the next window of the front screen, counts one move, queues
+`INTUITION_EVENT_SCREEN` with window = the id and item = the target screen,
+prints `CRUGOS: wb window %d moved to screen %u` and repaints.
+
+The screen strip sits at the right end of the menu bar, one box per screen with
+the front screen's box highlighted. A box is `strlen(name) * 8 + 12` pixels
+wide, the strip starts at `screen_width - total_width - 6`, and its hit area is
+`0 <= y < 18`. A press on a box that is not in front switches screens and
+counts one action; a press on the front screen's own box does nothing.
+
+Four colours define the desktop:
+
+| what | value | RGB |
+| --- | --- | --- |
+| screen 0 background | `INTUITION_DESKTOP_RGB` `0x00102030` | (16,32,48) |
+| Tools screen background | `0x00203010` | (32,48,16) |
+| window body | `INTUITION_WINDOW_RGB` `0x00081018` | (8,16,24) |
+| active title bar | `INTUITION_TITLE_ACTIVE_RGB` `0x00FFB000` | (255,176,0) |
+
+`wb.screens=1` (default 0, the plain single-screen desktop) makes
+`kernel/gfx/workbench.c` add a second screen called `Tools` with background
+`0x00203010`, open a 340x200 `Tools` window at (160,140) on it, give that
+window the `Tools` {Move, Close} and `Workbench` {About, Info, Quit} menus and
+a body-relative (12,60,160,22) `Send to Workbench` gadget, return to screen 0 and
+print `CRUGOS: wb screens ready (%u screen(s), front %d)`. A press on the gadget
+moves the Tools window to screen 0, which is the programmatic way to show a move
+without dragging the window's title bar across a screen edge. In screens mode the
+Workbench window body reads `phase 6i` and the self-test ends with
+`CRUGOS: wb screens selftest ok (%u switch(es), %u move(s))`.
+
 ## The event queue
 
-`struct intuition_event` is the typed report the desktop hands to its caller:
+The event queue is the typed report the desktop hands to its caller:
 
 | field | meaning |
 | --- | --- |
-| `type` | `INTUITION_EVENT_ACTIVATE`, `_DRAG`, `_MENU`, `_GADGET`, `_CLOSE`, `_RESIZE`, `_ICON`, `_DEPTH`, `_ICON_MOVE` or `_FRONT` (0 = none) |
+| `type` | `INTUITION_EVENT_ACTIVATE`, `_DRAG`, `_MENU`, `_GADGET`, `_CLOSE`, `_RESIZE`, `_ICON`, `_DEPTH`, `_ICON_MOVE`, `_FRONT` or `_SCREEN` (0 = none) |
 | `window` | window id the event belongs to, 0 when it has none |
-| `index` | menu index, gadget index or desktop object index, -1 when unused |
+| `index` | menu index, gadget index, desktop object index or screen index, -1 when unused |
 | `item` | selected menu item index, 0 when unused |
 | `x`, `y` | window origin, or icon tile origin on `_ICON` and `_ICON_MOVE`, when the event was generated |
 | `w`, `h` | new window size, set on `_RESIZE` and 0 otherwise |
@@ -517,7 +577,10 @@ plus `intuition_event_dropped()` accounts for every event the device produced.
 `intuition_event_poll()` returns 1 and copies the oldest event, or 0 when the
 queue is empty. `intuition_init()` resets the queue and both counters. A
 finished resize queues `INTUITION_EVENT_RESIZE` with the new `w` and `h`; the
-other seven types leave both fields at 0. A depth press queues
+other types leave both fields at 0. A switch queues `INTUITION_EVENT_SCREEN`
+with window 0 and the new screen index in `item`; a window move queues
+`INTUITION_EVENT_SCREEN` with the window id and the target screen in `item`. A
+depth press queues
 `INTUITION_EVENT_DEPTH` for the window that went back and then an
 `INTUITION_EVENT_ACTIVATE` for the new top window; an icon press queues `_ICON`
 with the object index and its tile origin. A front press queues `_FRONT` for the
@@ -538,7 +601,7 @@ index and the new tile origin.
 
    | id | rectangle | title | body |
    | --- | --- | --- | --- |
-   | 1 | (80, 90) 360x220 | `Workbench` | `CrugOS Workbench` / `phase 6g` / `software rendered` |
+   | 1 | (80, 90) 360x220 | `Workbench` | `CrugOS Workbench` / `phase 6i` / `software rendered` |
    | 2 | (480, 300) 320x200 | `Shell` | `4.OS` / `crugos>`, or the shell grid when `wb.shell=1` |
 
    Window 1 carries the `Workbench` (About/Info/Quit) and `Window`
@@ -589,6 +652,7 @@ tokens do. Values are decimal, capped, and ignored when malformed:
 | `wb.fill=N` | 0..24 | create `/f00` .. `/f(N-1)` in the root once before the drawer opens |
 | `wb.dsel=1` | 0/1 | give the drawer body the click-and-drag handler: a row click selects, the scrollbar thumb can be dragged (parsed before `wb.shell=`, and the drawer must be opened too) |
 | `wb.hold=S` | 0..3600 | seconds `wb_hold()` keeps the desktop on screen after the boot marker |
+| `wb.screens=1` | 0/1 | add a `Tools` screen, the `Send to Workbench` gadget and the screens self-test |
 
 `make test-workbench` boots with `wb.enable=1 wb.wait=30 wb.drag=1`,
 `make test-workbench-menu` with `wb.enable=1 wb.wait=30 wb.menu=1 wb.acts=4`,
@@ -598,7 +662,8 @@ wb.desk=1 wb.acts=3`, and `make test-workbench-icons` with `wb.enable=1
 wb.wait=30 wb.desk=1 wb.ikeys=1 wb.acts=5`, and `make test-workbench-drawer`
 with `wb.enable=1 wb.wait=30 wb.desk=1 wb.dr=1 wb.fill=24 wb.acts=4`, and
 `make test-workbench-select` with `wb.enable=1 wb.wait=30 wb.desk=1 wb.dr=1
-wb.dsel=1 wb.fill=24 wb.acts=3`. `make demo` boots
+wb.dsel=1 wb.fill=24 wb.acts=3`, and `make test-workbench-screens` with
+`wb.enable=1 wb.wait=30 wb.screens=1 wb.acts=4`. `make demo` boots
 `wb.enable=1 wb.wait=0 wb.hold=<seconds>` instead: `wb.wait=0` turns both
 self-tests into no-ops, so the interactive desktop needs neither a drag nor an
 action before the boot marker, and `wb.hold=` keeps the guest alive
@@ -623,7 +688,7 @@ CRUGOS: wb window 2 drag start (512, 312)
 CRUGOS: wb window 2 drag to (557, 337)
 CRUGOS: wb window 2 moved to (570, 350)
 CRUGOS: wb selftest ok (1 drag(s), 0 action(s))
-CRUGOS: phase u6 boot ok
+CRUGOS: phase 6i boot ok
 ```
 
 The menu gate is a second boot and adds the action lines:
@@ -641,7 +706,7 @@ CRUGOS: wb menu 'Workbench' open (window 1)
 CRUGOS: wb menu 'Workbench' selected ('Quit')
 CRUGOS: wb action 4 menu window 1 item 2
 CRUGOS: wb selftest ok (0 drag(s), 4 action(s))
-CRUGOS: phase u6 boot ok
+CRUGOS: phase 6i boot ok
 ```
 
 The shell gate is a third boot: it adds `CRUGOS: wb shell ready (window 2,
@@ -668,7 +733,7 @@ CRUGOS: wb menu 'Workbench' item 1 highlighted ('Info')
 CRUGOS: wb menu 'Workbench' selected ('Info')
 CRUGOS: wb action 2 menu window 1 item 1
 CRUGOS: wb selftest ok (0 drag(s), 2 action(s))
-CRUGOS: phase u6 boot ok
+CRUGOS: phase 6i boot ok
 ```
 
 The desktop gate is a fifth boot: it selects the `System:` object, opens its
@@ -686,7 +751,7 @@ CRUGOS: wb window 3 sent to back
 CRUGOS: wb action 3 depth window 3
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb selftest ok (0 drag(s), 3 action(s))
-CRUGOS: phase u6 boot ok
+CRUGOS: phase 6i boot ok
 ```
 
 The icon gate is a sixth boot: it focuses the `System:` object from the
@@ -710,7 +775,7 @@ CRUGOS: wb window 1 sent to front
 CRUGOS: wb action 5 front window 1
 CRUGOS: wb icons selftest ok (1 move(s), 1 front(s))
 CRUGOS: wb selftest ok (0 drag(s), 5 action(s))
-CRUGOS: phase u6 boot ok
+CRUGOS: phase 6i boot ok
 ```
 
 The drawer gate is a seventh boot, the only one that fills the volume first:
@@ -736,7 +801,7 @@ CRUGOS: wb drawer refreshed (29 entries)
 CRUGOS: wb selftest ok (0 drag(s), 0 action(s))
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb drawer selftest ok (3 scroll(s), 1 refresh(es))
-CRUGOS: phase u6 boot ok
+CRUGOS: phase 6i boot ok
 ```
 
 The select gate is an eighth boot: same filled drawer, but the pointer now
@@ -759,7 +824,22 @@ CRUGOS: wb drawer scrollbar to (top 18 of 29)
 CRUGOS: wb drawer selected '<name>' (index 18 of 29)
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb select selftest ok (2 select(s), 1 scrollbar drag(s))
-CRUGOS: phase u6 boot ok
+CRUGOS: phase 6i boot ok
+```
+
+The screens gate is a ninth boot: two screens, a switch and a move between them:
+
+```
+CRUGOS: wb desktop ready (1024x768, 2 window(s))
+CRUGOS: wb screens ready (2 screen(s), front 0)
+CRUGOS: wb screen 1 front (1 window(s))
+CRUGOS: wb action 1 screen 1 front
+CRUGOS: wb window 3 moved to screen 0
+CRUGOS: wb action 3 screen-move window 3 to 0
+CRUGOS: wb screen 0 front (3 window(s))
+CRUGOS: wb action 4 screen 0 front
+CRUGOS: wb screens selftest ok (2 switch(es), 1 move(s))
+CRUGOS: phase 6i boot ok
 ```
 
 | marker | when |
@@ -786,6 +866,12 @@ CRUGOS: phase u6 boot ok
 | `CRUGOS: wb drawer scrollbar to (top N of M)` | the thumb drag settled on a new top row |
 | `CRUGOS: wb select selftest ok (N select(s), M scrollbar drag(s))` | select mode saw its row clicks and its scrollbar drag |
 | `CRUGOS: wb select timeout (N/M)` | the wait expired with selections or the drag missing |
+| `CRUGOS: wb screens ready (N screen(s), front F)` | `wb.screens=1` added the Tools screen |
+| `CRUGOS: wb screen N front (K window(s))` | a press on the screen strip switched screens |
+| `CRUGOS: wb window N moved to screen M` | a window was re-parented to another screen |
+| `CRUGOS: wb action N screen N front` | a strip switch counted one action |
+| `CRUGOS: wb action N screen-move window W to S` | a screen move counted one action |
+| `CRUGOS: wb screens selftest ok (N switch(es), M move(s))` | screens mode saw its switches and moves |
 | `CRUGOS: wb window N sent to back` | the depth gadget was pressed |
 | `CRUGOS: wb icons ready (N object(s), keyboard focus)` | `wb.ikeys=1` installed icon focus mode |
 | `CRUGOS: wb icon '<label>' focused` | Tab, an arrow or Enter moved the icon selection |
@@ -958,7 +1044,7 @@ there is no keyboard text entry, only focus, movement and menu selection.
 ## Host tests
 
 `make test-host` links the real `kernel/gfx/intuition.c`,
-`kernel/lib/textgrid.c` and `kernel/shell/shell.c` and reports 3104 checks.
+`kernel/lib/textgrid.c` and `kernel/shell/shell.c` and reports 7961 checks.
 `tests/host/test_intuition.c` replaces the framebuffer primitives with counting
 stubs and the cursor accessors with a settable fake (`test_fb_fake_reset()` /
 `test_fb_cursor_set()` from `tests/host/test_gfx.c`), then checks:
@@ -1025,6 +1111,14 @@ stubs and the cursor accessors with a settable fake (`test_fb_fake_reset()` /
   `intuition_set_body_input(99, ...)` returns -1.
 - the event queue: a 16-event FIFO, the drop counter on overflow, the action
   count still growing past the queue depth, and the FIFO drain order.
+- the screen model: a maximum of three screens, `intuition_set_screen()`
+  choosing the target for later windows, `intuition_window_screen()` reporting
+  where a window lives, only the front screen being painted (a body painter on
+  a covered window is not called and a press aimed at it hits nothing and does
+  not activate it), a window move queueing one `SCREEN` event and re-handing
+  activation, out-of-range window and screen indexes refused, switching to the
+  front screen being a no-op that still sets the target, and a drag pending
+  across a switch dropped.
 
 `tests/host/test_textgrid.c` covers the grid on its own, and
 `tests/host/test_shell.c` runs the command table against a fake `shell_io`:
@@ -1073,7 +1167,7 @@ anything else. The script then:
    `ok: workbench title-bar drag (N drag(s), window 2 at (x, y), exit 33)`.
 
 `make test-workbench` then runs `scripts/boot-check.py` with `EXPECT_WB=yes`
-(the phase u6 boot marker, the desktop marker, a `wb selftest ok`, at least one
+(the phase 6i boot marker, the desktop marker, a `wb selftest ok`, at least one
 `wb window N opened`, one `wb window N moved to`, and one `wb cursor at` with
 numeric coordinates) and `scripts/check-disk.py` for the ext4 root.
 
@@ -1108,7 +1202,7 @@ larger relative motion into several 8-bit HID reports and the guest drops some
 of them, so a single jump of 644 pixels landed 136 pixels short when the gate
 was first written.
 
-`boot-check.py` then runs with `EXPECT_MENU=yes`, which requires the phase u6
+`boot-check.py` then runs with `EXPECT_MENU=yes`, which requires the phase 6i
 marker, the desktop marker, the menu open and selected markers, the gadget
 click marker, the close marker, at least one `wb action N ...` line and a
 `wb selftest ok (N drag(s), M action(s))` with at least one action, and
@@ -1154,7 +1248,7 @@ wb.acts=$(WB_KEYS_ACTS)`:
    and Enter to select it, requiring the highlight marker, the selection marker
    and `wb action 2 menu window 1 item 1`.
 5. waits for exit status 33, then runs `scripts/boot-check.py` with
-   `EXPECT_KEYS=yes` (the phase u6 marker, the desktop and keys markers, the
+   `EXPECT_KEYS=yes` (the phase 6i marker, the desktop and keys markers, the
    resize and key-move markers, the menu markers and a two-action
    `wb selftest ok`) and `scripts/check-disk.py`, and prints
    `ok: workbench resize and keyboard navigation (exit 33)`.
@@ -1186,7 +1280,7 @@ wb.acts=$(WB_DESK_ACTS)`:
    back: the drawer title bar turns idle grey `(128,128,128)` and the Shell
    title bar behind it becomes amber at the same point.
 6. waits for exit status 33, then runs `scripts/boot-check.py` with
-   `EXPECT_DESK=yes` (the phase u6 marker, the desktop and icon markers, the
+   `EXPECT_DESK=yes` (the phase 6i marker, the desktop and icon markers, the
    drawer marker, the icon and depth action lines, the desk self-test line and
    a three-action `wb selftest ok`) and `scripts/check-disk.py`, and prints
    `ok: workbench desktop objects and depth (exit 33)`.
@@ -1213,7 +1307,7 @@ wb.ikeys=1 wb.acts=$(WB_ICONS_ACTS)`:
 5. presses the front gadget at (394,102): the same title bar turns amber
    `(255,176,0)` again and the log carries
    `CRUGOS: wb window 1 sent to front`.
-6. waits for exit status 33, then `scripts/boot-check.py` requires the phase u6
+6. waits for exit status 33, then `scripts/boot-check.py` requires the phase 6i
    marker, the icons-ready, focus, drag, drop, front and action markers, the
    icon self-test line and `EXPECT_ICONS=yes` (its ok line reads `desk no icons
    yes storage disk`), and `scripts/check-disk.py` still runs a clean `e2fsck`.
@@ -1287,6 +1381,40 @@ the 11 visible rows. Its knobs are `EXPECT_SELECT` (`no`), `WB_SELECT_WAIT`
 (30), `WB_SELECT_ACTS` (3), `WB_SELECT_FILL` (24) and
 `WB_SELECT_RUN_TIMEOUT_SEC` (240); see [build.md](build.md).
 
+### Screens gate
+
+`make test-workbench-screens` is gate 54 and drives
+`scripts/run-workbench-screens.py` on the same machine setup (an `xhci`
+controller, a hot-plugged `usb-mouse`) through five steps:
+
+1. boots with `wb.enable=1 wb.wait=$(WB_SCREEN_WAIT) wb.screens=1
+   wb.acts=$(WB_SCREEN_ACTS)` on the 1024x768 framebuffer and requires
+   `CRUGOS: wb screens ready (2 screen(s), front 0)` before anything is
+   clicked.
+2. clicks the `Tools` box at (992,9) -- the strip starts at 882 -- and requires
+   `CRUGOS: wb screen 1 front (1 window(s))` and
+   `CRUGOS: wb action 1 screen 1 front`, the Tools background `(32,48,16)` in
+   the frame and no Workbench window left visible, because only the front
+   screen is painted.
+3. presses the `Send to Workbench` gadget at (254,233): the log reports
+   `CRUGOS: wb window 3 moved to screen 0` and
+   `CRUGOS: wb action 3 screen-move window 3 to 0`.
+4. clicks the `Workbench` box at (924,9) and requires
+   `CRUGOS: wb screen 0 front (3 window(s))` and
+   `CRUGOS: wb action 4 screen 0 front`; a screendump then shows the Workbench
+   background `(16,32,48)` and the moved window's active title bar
+   `(255,176,0)` above its body `(8,16,24)`.
+5. waits for `CRUGOS: wb screens selftest ok (2 switch(es), 1 move(s))`, guest
+   exit status 33 and the line
+   `ok: workbench screens and a window moving between them (exit 33)`, then runs
+   `scripts/boot-check.py --expect-screen=yes` (a flag, not a positional
+   argument, so the argument order and the argc range are unchanged; its ok line
+   reads `screen yes`) and `scripts/check-disk.py`.
+
+Its knobs are `WB_SCREEN_WAIT` (30), `WB_SCREEN_ACTS` (4) and
+`WB_SCREEN_RUN_TIMEOUT_SEC` (240), plus the shared `WB_QEMU_EXTRA`; see
+[build.md](build.md).
+
 ## Interactive demo
 
 `make demo` boots the same desktop in a real QEMU window instead of a headless
@@ -1306,6 +1434,13 @@ guest prints `CRUGOS: wb hold finished`, exits with status 33 and leaves
   `make demo` pass it, a normal boot does not) and the demo windows are
   hardcoded. There are no application tasks, no Workbench userspace and no
   window content owned by another program yet.
+- Three screens at most, and a screen is never destroyed or resized. Every
+  window still lives in one kernel-wide table, so window ids are global rather
+  than per screen, and the menu bar and the screen strip are shared by every
+  screen. Each screen is a region of the same framebuffer, not a separate
+  Workbench process: a crash or a block in the Workbench takes down or stalls
+  every screen, and per-screen processes are future work. Icons are per screen
+  but, like windows, they live in global tables.
 - Four windows, two menus of six items, four gadgets and eight desktop objects,
   one open popup at a time. No sub-menus and no clipboard; a menu selection,
   gadget click, close, resize, icon press, icon move, depth press or front

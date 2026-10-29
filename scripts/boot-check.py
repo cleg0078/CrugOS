@@ -43,7 +43,7 @@ REQUIRED_MARKERS = (
     "CRUGOS: selftest ok",
     "CRUGOS: nvme ready",
     "CRUGOS: ahci ready",
-    "CRUGOS: phase u6 boot ok",
+    "CRUGOS: phase 6i boot ok",
 )
 # A rejected unlock stops before scheduling, storage mounting and self-tests.
 WRONG_CRYPT_MARKERS = (
@@ -104,12 +104,18 @@ def main() -> int:
     # The storage flag is a switch, not a positional argument, so strip it first
     # and keep every existing positional call site unchanged.
     storage_mode = "disk"
+    screen_mode = "no"
     argv = []
     for arg in sys.argv[1:]:
         if arg == "--storage=none":
             storage_mode = "none"
         elif arg.startswith("--storage="):
             print(f"FAIL: invalid storage mode {arg!r}", file=sys.stderr)
+            return 2
+        elif arg == "--expect-screen=yes":
+            screen_mode = "yes"
+        elif arg.startswith("--expect-screen="):
+            print(f"FAIL: invalid screen expectation {arg!r}", file=sys.stderr)
             return 2
         else:
             argv.append(arg)
@@ -125,7 +131,7 @@ def main() -> int:
               "[EXPECT_ICONS [EXPECT_DRAWER [EXPECT_SELECT [EXPECT_HEAP "
               "[EXPECT_USER [EXPECT_USERS [EXPECT_USHELL [EXPECT_SPAWN [EXPECT_FORK "
               "[EXPECT_FORKBIG]]]]]]]]]]]]]]]]]]]]]]]]]] "
-              "[--storage=none]",
+              "[--storage=none] [--expect-screen=yes]",
               file=sys.stderr)
         return 2
 
@@ -219,6 +225,8 @@ def main() -> int:
         return fail(f"invalid EXPECT_SPAWN {expect_spawn!r}", text)
     if expect_fork not in ("no", "yes"):
         return fail(f"invalid EXPECT_FORK {expect_fork!r}", text)
+    if screen_mode not in ("no", "yes"):
+        return fail(f"invalid screen mode {screen_mode!r}", text)
 
     required = list(REQUIRED_MARKERS)
     if storage_mode == "none":
@@ -570,6 +578,26 @@ def main() -> int:
             return fail("expected the scrollbar drag to move the view", text)
         if not re.search(r"CRUGOS: wb select selftest ok \(([1-9]\d*) select\(s\), ([1-9]\d*) scrollbar drag\(s\)\)", text):
             return fail("expected the Workbench to count selections and scrollbar drags", text)
+    if screen_mode == "yes":
+        for marker in (
+            "CRUGOS: wb desktop ready",
+            "CRUGOS: wb screens ready",
+            "CRUGOS: wb screen",
+            "CRUGOS: wb screens selftest ok",
+            "CRUGOS: wb selftest ok",
+        ):
+            if marker not in text:
+                return fail(f"missing serial marker: {marker!r}", text)
+        if not re.search(r"CRUGOS: wb screens ready \([2-9]\d* screen\(s\), front [0-9]+\)", text):
+            return fail("expected the desktop to report at least two screens", text)
+        if not re.search(r"CRUGOS: wb screen \d+ front \(\d+ window\(s\)\)", text):
+            return fail("expected the screen gadget to swap the front screen", text)
+        if not re.search(r"CRUGOS: wb window \d+ moved to screen \d+", text):
+            return fail("expected a window to move between screens", text)
+        if not re.search(r"CRUGOS: wb action \d+ screen \d+ front", text):
+            return fail("expected the desktop to queue a screen event", text)
+        if not re.search(r"CRUGOS: wb screens selftest ok \([1-9]\d* switch\(es\), [1-9]\d* move\(s\)\)", text):
+            return fail("expected the desktop to count screen switches and moves", text)
 
     if expect_heap == "yes":
         for marker in (
@@ -771,7 +799,8 @@ def main() -> int:
           "gfx", expect_gfx, "wb", expect_wb, "menu", expect_menu,
           "shell", expect_shell, "keys", expect_keys, "desk", expect_desk,
           "icons", expect_icons, "drawer", expect_drawer,
-          "select", expect_select, "heap", expect_heap, "user", expect_user,
+          "select", expect_select, "screen", screen_mode,
+          "heap", expect_heap, "user", expect_user,
           "isolated", expect_users, "ushell", expect_ushell,
           "spawn", expect_spawn, "fork", expect_fork,
           "forkbig", expect_forkbig,

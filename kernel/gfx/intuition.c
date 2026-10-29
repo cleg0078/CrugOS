@@ -6,7 +6,9 @@
    by its title bar, opens and selects menus, runs gadgets, closes a window
    from its close gadget and queues what it consumed as typed events.  Phase
    6E adds desktop objects (icons drawn under the windows) and the depth gadget
-   that sends a window to the back.  All
+   that sends a window to the back.  Phase 6I adds full screens: every window
+   and desktop object belongs to one screen, only the front screen is drawn,
+   and a screen gadget in the menu bar swaps the front screen.  All
    drawing goes through the framebuffer primitives, so the host tests can
    replace them and check the state machine without a framebuffer. */
 #include <crug/types.h>
@@ -29,6 +31,7 @@ struct icon {
     i32 x;
     i32 y;
     u32 kind;
+    u32 screen; /* owning screen (phase 6I) */
 };
 
 struct window {
@@ -38,6 +41,7 @@ struct window {
     i32 y;
     u32 w;
     u32 h;
+    u32 screen; /* owning screen (phase 6I) */
     const char *title;
     const char *body;
     struct intuition_menu menus[INTUITION_MAX_MENUS];
@@ -85,6 +89,20 @@ static int g_reporting;
 static u64 g_drags;
 static u32 g_screen_w;
 static u32 g_screen_h;
+
+/* Phase 6I: full screens.  Screen 0 exists from intuition_init(); a client
+   adds more, and can move windows between them without losing state. */
+struct intuition_screen {
+    const char *name;
+    u32 bg;
+};
+
+static struct intuition_screen g_screens[INTUITION_MAX_SCREENS];
+static u32 g_screen_count = 1u;
+static u32 g_screen_front;
+static u32 g_screen_target;
+static u64 g_screen_switches;
+static u64 g_screen_moves;
 
 static int g_menu_win;   /* window owning the open menu, 0 when closed */
 static int g_menu_index; /* index in that window's menu table, -1 closed */
@@ -201,7 +219,7 @@ static int win_hit(i32 px, i32 py)
     for (i = g_order_count; i > 0u; i--) {
         struct window *w = win_find(g_order[i - 1u]);
 
-        if (!w) {
+        if (!w || w->screen != g_screen_front) {
             continue;
         }
         if (px >= w->x && py >= w->y && px < w->x + (i32)w->w &&
@@ -242,6 +260,113 @@ static void win_clamp(struct window *w)
     }
 }
 
+/* Phase 6I: the screen gadget group.  One box per screen, right aligned in the
+   menu bar; the front screen's box is highlighted, and a press on any other
+   box brings that screen to the front. */
+static u32 screen_box_width(u32 index)
+{
+    return (u32)strlen(g_screens[index].name) * INTUITION_SCREEN_GLYPH_W + 12u;
+}
+
+static u32 screen_strip_x(void)
+{
+    u32 total = 0u;
+    u32 i;
+
+    for (i = 0; i < g_screen_count; i++) {
+        total += screen_box_width(i);
+    }
+    if (total + INTUITION_SCREEN_PAD >= g_screen_w) {
+        return 0u;
+    }
+    return g_screen_w - total - INTUITION_SCREEN_PAD;
+}
+
+static int screen_hit(i32 px, i32 py)
+{
+    u32 x;
+    u32 i;
+
+    if (g_screen_count < 2u || py < 0 || (u32)py >= INTUITION_MENU_BAR_HEIGHT) {
+        return -1;
+    }
+    x = screen_strip_x();
+    for (i = 0; i < g_screen_count; i++) {
+        u32 bw = screen_box_width(i);
+
+        if (px >= (i32)x && px < (i32)(x + bw)) {
+            return (int)i;
+        }
+        x += bw;
+    }
+    return -1;
+}
+
+static u32 screen_window_count(u32 index)
+{
+    u32 i;
+    u32 n = 0u;
+
+    for (i = 0; i < g_order_count; i++) {
+        struct window *w = win_find(g_order[i]);
+
+        if (w && w->screen == index) {
+            n++;
+        }
+    }
+    return n;
+}
+
+/* The topmost window of one screen, or -1 when that screen has none. */
+static int screen_top_window(u32 index)
+{
+    u32 i;
+
+    for (i = g_order_count; i > 0u; i--) {
+        struct window *w = win_find(g_order[i - 1u]);
+
+        if (w && w->screen == index) {
+            return w->id;
+        }
+    }
+    return -1;
+}
+
+/* A menu-bar press that lands on a screen box swaps the front screen. */
+static int screen_press(i32 px, i32 py)
+{
+    int index = screen_hit(px, py);
+
+    if (index < 0) {
+        return 0;
+    }
+    if ((u32)index != g_screen_front) {
+        (void)intuition_screen_switch((u32)index);
+        g_actions++;
+    }
+    return 1;
+}
+
+static void menu_draw_screens(void)
+{
+    u32 x;
+    u32 i;
+
+    if (g_screen_count < 2u) {
+        return;
+    }
+    x = screen_strip_x();
+    for (i = 0; i < g_screen_count; i++) {
+        u32 bw = screen_box_width(i);
+        u32 rgb = (i == g_screen_front) ? INTUITION_MENU_HIGHLIGHT_RGB
+                                        : INTUITION_MENUBAR_RGB;
+
+        fb_fill_rect(x, 0, bw, INTUITION_MENU_BAR_HEIGHT, rgb);
+        fb_draw_text(x + 6u, 1u, g_screens[i].name, INTUITION_MENU_TEXT_RGB,
+                     rgb);
+        x += bw;
+    }
+}
 static u32 menu_strip_width(const struct intuition_menu *m)
 {
     return (u32)strlen(m->title) * 8u + 16u;
@@ -414,6 +539,7 @@ static void draw_icon(u32 index)
                          : INTUITION_FRAME_RGB;
     u32 label_rgb = selected ? INTUITION_ICON_SELECTED_BORDER_RGB
                              : INTUITION_ICON_TEXT_RGB;
+    u32 bg = g_screens[g_screen_front].bg;
 
     fb_fill_rect((u32)ic->x, (u32)ic->y, INTUITION_ICON_WIDTH,
                  INTUITION_ICON_HEIGHT, INTUITION_ICON_RGB);
@@ -425,7 +551,7 @@ static void draw_icon(u32 index)
         fb_draw_text((u32)ic->x,
                      (u32)ic->y + INTUITION_ICON_HEIGHT +
                          INTUITION_ICON_LABEL_GAP,
-                     ic->label, label_rgb, INTUITION_DESKTOP_RGB);
+                     ic->label, label_rgb, bg);
     }
 }
 
@@ -436,6 +562,9 @@ static int icon_hit(i32 px, i32 py)
     for (i = 0; i < g_icon_count; i++) {
         const struct icon *ic = &g_icons[i];
 
+        if (ic->screen != g_screen_front) {
+            continue;
+        }
         if (px >= ic->x && py >= ic->y &&
             px < ic->x + (i32)INTUITION_ICON_WIDTH &&
             py < ic->y + (i32)INTUITION_ICON_HEIGHT) {
@@ -589,22 +718,27 @@ static void menu_draw_bar(void)
     u32 x = 4u;
     u32 i;
 
-    if (!w || w->menu_count == 0u) {
+    /* Phase 6I: the bar also carries the screen gadget group, so it must
+       exist even when the front screen has no window with menus. */
+    if ((!w || w->menu_count == 0u) && g_screen_count < 2u) {
         return;
     }
     fb_fill_rect(0, 0, g_screen_w, INTUITION_MENU_BAR_HEIGHT,
                  INTUITION_MENUBAR_RGB);
-    for (i = 0; i < w->menu_count; i++) {
-        u32 bw = menu_strip_width(&w->menus[i]);
-        u32 rgb = (g_menu_win == w->id && g_menu_index == (int)i)
-                      ? INTUITION_MENU_HIGHLIGHT_RGB
-                      : INTUITION_MENUBAR_RGB;
+    if (w && w->screen == g_screen_front) {
+        for (i = 0; i < w->menu_count; i++) {
+            u32 bw = menu_strip_width(&w->menus[i]);
+            u32 rgb = (g_menu_win == w->id && g_menu_index == (int)i)
+                          ? INTUITION_MENU_HIGHLIGHT_RGB
+                          : INTUITION_MENUBAR_RGB;
 
-        fb_fill_rect(x, 0, bw, INTUITION_MENU_BAR_HEIGHT, rgb);
-        fb_draw_text(x + 8u, 1u, w->menus[i].title, INTUITION_MENU_TEXT_RGB,
-                     rgb);
-        x += bw;
+            fb_fill_rect(x, 0, bw, INTUITION_MENU_BAR_HEIGHT, rgb);
+            fb_draw_text(x + 8u, 1u, w->menus[i].title,
+                         INTUITION_MENU_TEXT_RGB, rgb);
+            x += bw;
+        }
     }
+    menu_draw_screens();
     fb_fill_rect(0, INTUITION_MENU_BAR_HEIGHT - 1u, g_screen_w, 1u,
                  INTUITION_FRAME_RGB);
 }
@@ -774,6 +908,17 @@ void intuition_init(void)
     g_icon_dy = 0;
     g_icon_drag_moved = 0;
     g_depths = 0u;
+    /* Phase 6I: screen 0 always exists; a client adds more on demand. */
+    for (i = 0; i < INTUITION_MAX_SCREENS; i++) {
+        memset(&g_screens[i], 0, sizeof(g_screens[i]));
+    }
+    g_screens[0].name = "Workbench";
+    g_screens[0].bg = INTUITION_DESKTOP_RGB;
+    g_screen_count = 1u;
+    g_screen_front = 0u;
+    g_screen_target = 0u;
+    g_screen_switches = 0u;
+    g_screen_moves = 0u;
     for (i = 0; i < INTUITION_MAX_ICONS; i++) {
         memset(&g_icons[i], 0, sizeof(g_icons[i]));
     }
@@ -814,13 +959,16 @@ int intuition_open(i32 x, i32 y, u32 w, u32 h, const char *title,
             win->h = h;
             win->title = title;
             win->body = body;
+            win->screen = g_screen_target;
             win->menu_count = 0u;
             memset(&win->menus[0], 0, sizeof(win->menus));
             win->gadget_count = 0u;
             memset(&win->gadgets[0], 0, sizeof(win->gadgets));
             win_clamp(win);
             g_order[g_order_count++] = win->id;
-            g_active = win->id;
+            if (win->screen == g_screen_front) {
+                g_active = win->id;
+            }
             if (g_reporting) {
                 kprintf("CRUGOS: wb window %d opened (%d, %d, %ux%u)\n",
                         win->id, (int)win->x, (int)win->y, (unsigned)win->w,
@@ -855,7 +1003,7 @@ int intuition_close(int id)
         g_gadget = -1;
     }
     if (g_active == id) {
-        g_active = g_order_count ? g_order[g_order_count - 1u] : -1;
+        g_active = screen_top_window(g_screen_front);
     }
     intuition_redraw();
     return 0;
@@ -970,6 +1118,7 @@ int intuition_add_icon(i32 x, i32 y, const char *label, u32 kind)
     ic->x = x;
     ic->y = y;
     ic->kind = kind;
+    ic->screen = g_screen_target;
     g_icon_count++;
     intuition_redraw();
     return (int)(g_icon_count - 1u);
@@ -1031,21 +1180,39 @@ u64 intuition_front_count(void)
    activate the selected object and Escape drops the selection. */
 int intuition_icon_key(u8 key)
 {
+    u32 list[INTUITION_MAX_ICONS];
+    u32 count = 0u;
+    u32 cur = 0u;
+    u32 i;
+    int have = 0;
     int sel = g_icon_sel;
     int next = sel;
 
-    if (g_icon_count == 0u) {
+    /* Phase 6I: only the front screen's objects take keyboard focus. */
+    for (i = 0; i < g_icon_count; i++) {
+        if (g_icons[i].screen != g_screen_front) {
+            continue;
+        }
+        if ((int)i == sel) {
+            cur = count;
+            have = 1;
+        }
+        list[count++] = i;
+    }
+    if (count == 0u) {
         return 0;
     }
     if (key == INPUT_KEY_RIGHT || key == INPUT_KEY_DOWN || key == '\t') {
-        next = sel < 0 ? 0 : (int)(((u32)sel + 1u) % g_icon_count);
+        next = have ? (int)list[(cur + 1u) % count] : (int)list[0];
     } else if (key == INPUT_KEY_LEFT || key == INPUT_KEY_UP) {
-        next = sel <= 0 ? (int)g_icon_count - 1 : sel - 1;
+        next = have ? (int)list[cur == 0u ? count - 1u : cur - 1u]
+                    : (int)list[count - 1u];
     } else if (key == '\n' || key == '\r') {
-        if (sel < 0) {
-            g_icon_sel = 0;
+        if (!have) {
+            g_icon_sel = (int)list[0];
             if (g_reporting) {
-                kprintf("CRUGOS: wb icon '%s' focused\n", g_icons[0].label);
+                kprintf("CRUGOS: wb icon '%s' focused\n",
+                        g_icons[g_icon_sel].label);
             }
             intuition_redraw();
             return 0;
@@ -1082,14 +1249,19 @@ void intuition_redraw(void)
     if (!g_screen_w || !g_screen_h) {
         return;
     }
-    fb_fill_rect(0, 0, g_screen_w, g_screen_h, INTUITION_DESKTOP_RGB);
+    /* Phase 6I: only the front screen is on the glass; the other screens keep
+       their windows and objects but are not drawn. */
+    fb_fill_rect(0, 0, g_screen_w, g_screen_h, g_screens[g_screen_front].bg);
     for (i = 0; i < g_icon_count; i++) {
+        if (g_icons[i].screen != g_screen_front) {
+            continue;
+        }
         draw_icon(i);
     }
     for (i = 0; i < g_order_count; i++) {
         struct window *w = win_find(g_order[i]);
 
-        if (w) {
+        if (w && w->screen == g_screen_front) {
             win_draw(w);
         }
     }
@@ -1145,11 +1317,17 @@ static void press(i32 px, i32 py)
         }
         menu_close();
         if (py >= 0 && py < (i32)INTUITION_MENU_BAR_HEIGHT) {
+            if (screen_press(px, py)) {
+                return;
+            }
             menu_open_at(px, py);
         }
         return;
     }
     if (py >= 0 && py < (i32)INTUITION_MENU_BAR_HEIGHT) {
+        if (screen_press(px, py)) {
+            return;
+        }
         menu_open_at(px, py);
         return;
     }
@@ -1168,9 +1346,7 @@ static void press(i32 px, i32 py)
         if (!win_send_to_back(id)) {
             return;
         }
-        if (g_active == id) {
-            g_active = g_order_count ? g_order[g_order_count - 1u] : -1;
-        }
+        g_active = screen_top_window(g_screen_front);
         top = g_active;
         if (g_reporting) {
             kprintf("CRUGOS: wb window %d sent to back\n", id);
@@ -1190,7 +1366,7 @@ static void press(i32 px, i32 py)
     /* Phase 6F: the front gadget raises a covered window and does nothing at
        all when the window already owns the front of the stack. */
     if (front_hit(w, px, py)) {
-        if (g_order_count > 0u && g_order[g_order_count - 1u] == id) {
+        if (screen_top_window(g_screen_front) == id) {
             return;
         }
         prev = g_active;
@@ -1630,7 +1806,7 @@ void intuition_redraw_window(int id)
 {
     struct window *w = win_find(id);
 
-    if (!w) {
+    if (!w || w->screen != g_screen_front) {
         return;
     }
     win_draw(w);
@@ -1747,17 +1923,40 @@ void intuition_key_event(u8 key)
         return;
     }
     if (key == '\t') {
-        if (g_order_count == 0u) {
-            return;
-        }
+        u32 total = 0u;
+        u32 want;
+
+        /* Phase 6I: Tab walks only the front screen's windows. */
         for (i = 0; i < g_order_count; i++) {
-            if (g_order[i] == g_active) {
-                pos = i;
+            struct window *tw = win_find(g_order[i]);
+
+            if (!tw || tw->screen != g_screen_front) {
+                continue;
+            }
+            if (tw->id == g_active) {
+                pos = total;
                 found = 1;
             }
+            total++;
         }
-        pos = found ? (pos + 1u) % g_order_count : 0u;
-        w = win_find(g_order[pos]);
+        if (total == 0u) {
+            return;
+        }
+        want = found ? (pos + 1u) % total : 0u;
+        w = 0;
+        pos = 0u;
+        for (i = 0; i < g_order_count; i++) {
+            struct window *tw = win_find(g_order[i]);
+
+            if (!tw || tw->screen != g_screen_front) {
+                continue;
+            }
+            if (pos == want) {
+                w = tw;
+                break;
+            }
+            pos++;
+        }
         if (!w) {
             return;
         }
@@ -1815,4 +2014,134 @@ void intuition_key_event(u8 key)
 u64 intuition_resize_count(void)
 {
     return g_resizes;
+}
+/* Phase 6I: screens.  A client adds a screen, targets it with
+   intuition_set_screen() for later windows and icons, switches the front
+   screen and moves a window from one screen to another.  Screens are never
+   destroyed: state survives every switch, which is what makes a second
+   Workbench session possible. */
+int intuition_add_screen(const char *name, u32 bg_rgb)
+{
+    if (!g_screen_w || !g_screen_h || !name) {
+        return -1;
+    }
+    if (g_screen_count >= INTUITION_MAX_SCREENS) {
+        return -1;
+    }
+    g_screens[g_screen_count].name = name;
+    g_screens[g_screen_count].bg = bg_rgb;
+    g_screen_count++;
+    intuition_redraw();
+    return (int)(g_screen_count - 1u);
+}
+
+int intuition_set_screen(u32 index)
+{
+    if (index >= g_screen_count) {
+        return -1;
+    }
+    g_screen_target = index;
+    return 0;
+}
+
+int intuition_screen_switch(u32 index)
+{
+    if (index >= g_screen_count) {
+        return -1;
+    }
+    g_screen_target = index;
+    if (index == g_screen_front) {
+        return 0;
+    }
+    g_screen_front = index;
+    /* A menu, a drag or a body interaction belongs to the screen that just
+       left the front; dropping them keeps the state machine consistent. */
+    g_menu_win = 0;
+    g_menu_index = -1;
+    g_menu_hover = -1;
+    g_drag = -1;
+    g_resize = -1;
+    g_gadget_win = 0;
+    g_gadget = -1;
+    g_body_win = -1;
+    g_icon_drag = -1;
+    g_icon_drag_moved = 0;
+    g_active = screen_top_window(index);
+    g_screen_switches++;
+    event_push(INTUITION_EVENT_SCREEN, 0, -1, index, 0, 0);
+    if (g_reporting) {
+        kprintf("CRUGOS: wb screen %u front (%u window(s))\n",
+                (unsigned)index, (unsigned)screen_window_count(index));
+    }
+    intuition_redraw();
+    return 0;
+}
+
+int intuition_move_window_screen(int id, u32 index)
+{
+    struct window *w = win_find(id);
+
+    if (!w || index >= g_screen_count) {
+        return -1;
+    }
+    if (w->screen == index) {
+        return 0;
+    }
+    w->screen = index;
+    if (g_drag == id) {
+        g_drag = -1;
+    }
+    if (g_resize == id) {
+        g_resize = -1;
+    }
+    if (g_gadget_win == id) {
+        g_gadget_win = 0;
+        g_gadget = -1;
+    }
+    if (g_body_win == id) {
+        g_body_win = -1;
+    }
+    if (g_menu_win == id) {
+        g_menu_win = 0;
+        g_menu_index = -1;
+        g_menu_hover = -1;
+    }
+    if (g_active == id) {
+        g_active = screen_top_window(g_screen_front);
+    }
+    g_screen_moves++;
+    event_push(INTUITION_EVENT_SCREEN, id, -1, index, w->x, w->y);
+    if (g_reporting) {
+        kprintf("CRUGOS: wb window %d moved to screen %u\n", id,
+                (unsigned)index);
+    }
+    intuition_redraw();
+    return 0;
+}
+
+int intuition_screen_front(void)
+{
+    return (int)g_screen_front;
+}
+
+int intuition_window_screen(int id)
+{
+    struct window *w = win_find(id);
+
+    return w ? (int)w->screen : -1;
+}
+
+u32 intuition_screen_count(void)
+{
+    return g_screen_count;
+}
+
+u64 intuition_screen_switches(void)
+{
+    return g_screen_switches;
+}
+
+u64 intuition_screen_moves(void)
+{
+    return g_screen_moves;
 }

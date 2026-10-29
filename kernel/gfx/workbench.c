@@ -11,7 +11,10 @@
    window body and routes every key there, and wb.sh=<n> waits for n typed
    commands before the boot finishes.  Phase 6G makes the drawer scroll, refresh
    and reflow on resize: wb.dr=1 gives the open drawer the arrow keys and 'r',
-   and wb.fill=<n> creates files first so there is something to scroll. */
+   and wb.fill=<n> creates files first so there is something to scroll.
+   Phase 6I adds a second screen: wb.screens=1 asks intuition.device for a
+   'Tools' screen with its own window, and the gate swaps the front screen and
+   moves that window back to the Workbench screen. */
 #include <crug/types.h>
 #include <crug/string.h>
 #include <crug/kernel.h>
@@ -76,6 +79,11 @@ static u32 g_scroll_grab;
 static u32 g_drawer_body_w;
 static u32 g_drawer_body_h;
 
+/* Phase 6I: a second screen.  The Tools window lives on it, and its body
+   gadget moves the window back to the Workbench screen. */
+static int g_screens_mode;
+static int g_tools_window = -1;
+
 static void wb_open_drawer(void);
 static void wb_icon_keyboard_activate(void);
 
@@ -94,6 +102,10 @@ static const struct intuition_menu wb_menus_top[2] = {
 };
 static const struct intuition_menu wb_menus_shell[2] = {
     { "Shell", 2u, { "New", "Close" } },
+    { "Workbench", 3u, { "About", "Info", "Quit" } },
+};
+static const struct intuition_menu wb_menus_tools[2] = {
+    { "Tools", 2u, { "Move", "Close" } },
     { "Workbench", 3u, { "About", "Info", "Quit" } },
 };
 
@@ -216,6 +228,13 @@ static void wb_cmdline_token(const char *tok, usize len)
         }
         return;
     }
+    used = wb_prefix(tok, len, "wb.screens=");
+    if (used >= 0) {
+        if (wb_parse_u32(tok + used, len - (usize)used, &value) == 0) {
+            g_screens_mode = value ? 1 : 0;
+        }
+        return;
+    }
     used = wb_prefix(tok, len, "wb.shell=");
     if (used >= 0) {
         if (wb_parse_u32(tok + used, len - (usize)used, &value) == 0) {
@@ -305,6 +324,11 @@ static void wb_drain_events(void)
             g_actions_seen++;
             kprintf("CRUGOS: wb action %u gadget window %d index %d\n",
                     (unsigned)g_actions_seen, event.window, event.index);
+            /* Phase 6I: the Tools window's only gadget moves it home. */
+            if (g_screens_mode && g_tools_window > 0 &&
+                event.window == g_tools_window) {
+                (void)intuition_move_window_screen(g_tools_window, 0u);
+            }
         } else if (event.type == INTUITION_EVENT_CLOSE) {
             g_actions_seen++;
             kprintf("CRUGOS: wb action %u close window %d\n",
@@ -342,6 +366,16 @@ static void wb_drain_events(void)
             g_actions_seen++;
             kprintf("CRUGOS: wb action %u front window %d\n",
                     (unsigned)g_actions_seen, event.window);
+        } else if (event.type == INTUITION_EVENT_SCREEN) {
+            g_actions_seen++;
+            if (event.window > 0) {
+                kprintf("CRUGOS: wb action %u screen-move window %d to %u\n",
+                        (unsigned)g_actions_seen, event.window,
+                        (unsigned)event.item);
+            } else {
+                kprintf("CRUGOS: wb action %u screen %u front\n",
+                        (unsigned)g_actions_seen, (unsigned)event.item);
+            }
         }
     }
 }
@@ -895,14 +929,14 @@ int wb_init(void)
     }
     g_reporting = (g_want_drags > 0u || g_menu_mode || g_keys_mode ||
                    g_shell_mode || g_desk_mode || g_icon_keys_mode ||
-                   g_drawer_mode || g_select_mode)
+                   g_drawer_mode || g_select_mode || g_screens_mode)
                       ? 1
                       : 0;
     fb_set_text_enabled(0);
     intuition_init();
     intuition_set_reporting(g_reporting);
     top = intuition_open(80, 90, 360, 220, "Workbench",
-                         "CrugOS Workbench\nphase 6h\nsoftware rendered");
+                         "CrugOS Workbench\nphase 6i\nsoftware rendered");
     shell_id = intuition_open(480, 300, 320, 200, "Shell", "4.OS\ncrugos>");
     intuition_set_menus(top, wb_menus_top, 2u);
     intuition_add_gadget(top, 12, 60, 96, 22, "Run");
@@ -910,6 +944,23 @@ int wb_init(void)
         if (intuition_add_icon(16, 240, "System:", INTUITION_ICON_VOLUME) <
             0) {
             kprintf("CRUGOS: wb icon table full\n");
+        }
+    }
+    if (g_screens_mode) {
+        int screen = intuition_add_screen("Tools", 0x00203010u);
+
+        if (screen < 0) {
+            kprintf("CRUGOS: wb screen table full\n");
+        } else {
+            (void)intuition_set_screen((u32)screen);
+            g_tools_window = intuition_open(160, 140, 340, 200, "Tools",
+                                            "CrugOS Tools\nphase 6i\nsecond screen");
+            if (g_tools_window > 0) {
+                intuition_set_menus(g_tools_window, wb_menus_tools, 2u);
+                intuition_add_gadget(g_tools_window, 12, 60, 160, 22,
+                                     "Send to Workbench");
+            }
+            (void)intuition_set_screen(0u);
         }
     }
     intuition_set_menus(shell_id, wb_menus_shell, 2u);
@@ -952,6 +1003,10 @@ int wb_init(void)
     if (g_select_mode) {
         kprintf("CRUGOS: wb select mode (click a row, drag the scrollbar)\n");
     }
+    if (g_screens_mode) {
+        kprintf("CRUGOS: wb screens ready (%u screen(s), front %d)\n",
+                (unsigned)intuition_screen_count(), intuition_screen_front());
+    }
     return 0;
 }
 
@@ -989,7 +1044,7 @@ int wb_selftest(void)
     }
     want = g_want_drags;
     want_actions = (g_menu_mode || g_keys_mode || g_icon_keys_mode ||
-                    (g_desk_mode && !g_drawer_mode))
+                    g_screens_mode || (g_desk_mode && !g_drawer_mode))
                        ? (g_want_actions ? g_want_actions : 1u)
                        : 0u;
     want_commands = g_shell_mode ? (g_want_commands ? g_want_commands : 1u) : 0u;
@@ -1061,6 +1116,11 @@ int wb_selftest(void)
     if (g_select_mode) {
         kprintf("CRUGOS: wb select selftest ok (%u select(s), %u scrollbar drag(s))\n",
                 (unsigned)g_drawer_selects, (unsigned)g_drawer_scrollbar);
+    }
+    if (g_screens_mode) {
+        kprintf("CRUGOS: wb screens selftest ok (%u switch(es), %u move(s))\n",
+                (unsigned)intuition_screen_switches(),
+                (unsigned)intuition_screen_moves());
     }
     /* Keep the finished desktop on screen for a moment so the gate's last
        screendump does not race the rest of the boot to the exit. */

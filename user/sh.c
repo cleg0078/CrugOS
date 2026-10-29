@@ -206,7 +206,7 @@ static void sh_run(int argc, char **argv)
     cmd = argv[0];
     sh_marker("CRUGOS: sh cmd ", cmd, -1, "");
     if (u_strcmp(cmd, "ver") == 0) {
-        sh_line("CrugOS ring-3 shell (phase u6)");
+        sh_line("CrugOS ring-3 shell (phase 6i)");
     } else if (u_strcmp(cmd, "echo") == 0) {
         (void)sh_cmd_echo(argc, argv);
     } else if (u_strcmp(cmd, "cat") == 0) {
