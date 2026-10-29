@@ -1,6 +1,6 @@
 # Roadmap
 
-The specification defines 54 phases/gates. Phase 0 established the smallest
+The specification defines 55 phases/gates. Phase 0 established the smallest
 end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
 phase 1 makes the kernel own physical memory, page tables, exceptions and
 timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
@@ -41,7 +41,9 @@ something below the fold; phase 6H hands a window's body presses, motions and
 releases to a registered handler, which the drawer uses to select a row on a
 click and to drag its scrollbar thumb; phase 6I gives Intuition up to three
 retained screens, a screen strip in the menu bar, per-screen windows and icons,
-and a window move between screens. Release
+and a window move between screens; phase 6J adds a Commodities Exchange, a
+small registry of global hotkey utilities plus an Exchange manager window whose
+rows toggle them. Release
 `v0.23.1` adds packaging rather than a spec phase: `make iso` produces a hybrid
 UEFI ISO that boots from a USB stick or a CD-ROM, with the kernel's
 `storage=none` token so an image with no root filesystem still passes the boot
@@ -1597,6 +1599,77 @@ trees, and several of the remaining Mediums stay reachable until then.
   `SCREEN` event, the Tools screen, the gate and the limits) plus README,
   roadmap, versioning, boot, build and gfx.
 - All 54 gates pass at `v0.41.0`.
+
+## Phase 6J - commodities exchange (done)
+
+- `include/crug/commodity.h` and `kernel/gfx/commodities.c` add a pure,
+  framebuffer-free registry that the host test links directly. It fixes
+  `COMMODITY_MAX` 4, `COMMODITY_NAME_MAX` 16, `COMMODITY_HEADER_H` 24,
+  `COMMODITY_ROW_TOP` 28, `COMMODITY_ROW_H` 26 and `COMMODITY_ROW_X` 6, and
+  `struct commodity` holds `name`, `hotkey`, `enabled`, `fires` and
+  `blocked`.
+- The API is `commodity_reset()`, `commodity_register(name, hotkey)` (the new
+  index, or -1 for a NULL, empty or 16-byte name, a hotkey outside
+  `INPUT_KEY_F1`..`F12`, a duplicate name or a duplicate hotkey),
+  `commodity_count()`, `commodity_at()`, `commodity_index_of_hotkey()`,
+  `commodity_toggle(index)` (the new state or -1),
+  `commodity_set_enabled(index, on)`, `commodity_hotkey(key, &fired)` (the
+  owning index or -1, `*fired` 1 when it ran and 0 when blocked),
+  `commodity_fires()`/`commodity_blocked()`, `commodity_enabled_count()`,
+  `commodity_key_name(key)` (`"F1"`..`"F12"`) and
+  `commodity_row_at(body_relative_y)`. A registered commodity starts enabled
+  with zero counters.
+- `include/crug/input.h` puts `INPUT_KEY_F1` `0x94u`..`INPUT_KEY_F12`
+  `0x9Fu` above the arrows. PS/2 set-1 make codes `0x3B`..`0x44` map to
+  F1..F10, `0x57` to F11 and `0x58` to F12; break codes yield nothing and
+  Shift/Ctrl do not change the byte. USB HID boot usages `0x3A`..`0x45` map
+  to F1..F12 (`0x46`, F13, is ignored).
+- `kernel/gfx/workbench.c` registers four built-ins: `Volume up` F2,
+  `Volume down` F3, `Mute` F4 and `Clock` F6.
+- The `Exchange` manager sits at (560,120), size 344x196, and is opened last so
+  it starts on top. Rows are 26 pixels high and start 28 pixels below the body
+  top; a row paints the name at `x+6`, the key name at `x+w-96` and
+  `[on]`/`[off]` at `x+w-44` in amber when on. A row click toggles the
+  commodity and prints `CRUGOS: wb action N commodity NAME on|off`.
+- Dispatch is refused for a disabled commodity: the key bumps `blocked` and
+  prints `CRUGOS: wb commodity NAME blocked (hotkey off)` without running the
+  action. An enabled commodity bumps `fires` and runs, printing
+  `CRUGOS: wb action N commodity NAME fired (...)`. `Volume up`/`Volume down`
+  move the audio mixer by `WB_CX_VOLUME_STEP` 600 within
+  `AUDIO_VOLUME_MAX` 0..`AUDIO_VOLUME_MIN` -7680, `Mute` toggles the mixer
+  mute (`fired (muted)`/`fired (unmuted)`) and `Clock` prints the monotonic
+  uptime (`fired (uptime N s)`). Keys no commodity owns stay with the desktop.
+- `wb.cx=<0|1>` (only 0 disables, and it needs `wb.enable=1`) turns the
+  exchange on and prints `CRUGOS: wb cx ready (4 commodity(ies))`; the
+  self-test waits for two row toggles and two fires and ends with
+  `CRUGOS: wb cx selftest ok (2 toggle(s), 2 fire(s))`. Hotkeys are consumed
+  only while the Workbench runs with the exchange enabled and no other text
+  consumer owns the keyboard.
+- `make test-workbench-cx` is the 55th gate:
+  `scripts/run-workbench-cx.py` boots with
+  `wb.enable=1 wb.wait=30 wb.cx=1 wb.acts=4`, hot-plugs a `usb-mouse` and a
+  `usb-kbd` over QMP, clicks the Mute row at screen (600,235), presses F4 while
+  the commodity is off (blocked) and again when it is on (fired), presses F6 for
+  the Clock and takes a `screendump` whose Exchange body (700,250) must be
+  (8,16,24) and whose active title bar (600,130) must be (255,176,0).
+  `scripts/boot-check.py --expect-cx=yes` (a flag, not an extra positional, so
+  the argv layout is unchanged) then checks the markers and the run ends with a
+  clean `e2fsck`.
+- `tests/host/test_commodity.c` covers the registry (registration limits,
+  duplicate name and hotkey, the toggle, the blocked and fired counters, the row
+  hit test and the key names), and `tests/host/test_input.c` /
+  `tests/host/test_usb.c` cover both function-key mappings.
+  `make test-host` reports 8102 checks.
+- Limits: four commodities at most in a fixed table, no persistence across
+  boots, hotkeys global to the desktop rather than per window, the exchange
+  exists only while the Workbench runs, the actions are fixed built-ins with no
+  plugin loading, the manager window is not resizable, and the exchange is off
+  unless `wb.cx=1`.
+- docs: `docs/workbench.md` (the registry and API, the built-in table, the
+  manager geometry, the dispatch rule, the function-key plumbing, the markers,
+  the gate and the limits) plus README, roadmap, versioning, boot, build, input
+  and gfx.
+- All 55 gates pass at `v0.42.0`.
 
 ## Bootable media - hybrid UEFI ISO (done, `v0.23.1`)
 

@@ -133,6 +133,26 @@ A hotplugged keyboard therefore types into the passphrase prompt, the shell or
 any later consumer without changing the consumer at all. See [usb.md](usb.md) for
 the controller, enumeration, report layouts and gate details.
 
+## Function keys
+
+Phase 6J adds the twelve function keys to the decoder. `include/crug/input.h`
+defines them above the arrow keys -- `INPUT_KEY_F1` is `0x94u` and
+`INPUT_KEY_F12` is `0x9Fu` -- so a consumer switches on one byte whether the
+source was PS/2 or USB:
+
+- PS/2 set-1 make codes `0x3B`..`0x44` become F1..F10, `0x57` becomes F11 and
+  `0x58` becomes F12; a break code (`scan & 0x80`) yields nothing, and Shift or
+  Ctrl do not change the byte. The keys are not in `g_unshifted`, so the
+  character path never sees them.
+- A USB HID boot keyboard maps usage `0x3A`..`0x45` to F1..F12; `0x46` (F13)
+  yields nothing.
+- `input_try_getc()` returns the `INPUT_KEY_F*` byte unchanged, so a Workbench
+  consumer can match `INPUT_KEY_F4` without caring which keyboard produced it.
+
+`tests/host/test_input.c` covers the PS/2 make/break pair for every function key,
+Shift/Ctrl neutrality, and the USB decode matrix in `tests/host/test_usb.c`
+covers the HID usages.
+
 ## Console merge (`kernel/core/console.c`)
 
 `console_try_getc()` is the single read path for console input:
@@ -204,7 +224,7 @@ keys, held-key suppression) and the mouse decode matrix (idle report, positive
 and negative deltas, button baseline versus edge, wheel, reserved bits).
 `tests/host/test_gfx.c` then drives `gfx.device` from the real pointer state
 against a fake framebuffer (motion, clamping, buttons, self-test outcomes).
-`make test-host` reports 2426 checks including these.
+`make test-host` reports 8102 checks including these.
 
 ## Gates
 
@@ -261,8 +281,9 @@ console for the prompt.
 
 - Polled only: no IRQ1 handler, no key repeat, no LED state, no Num Lock.
 - US layout only, one keyboard, no remapping.
-- Extended keys are decoded as modifiers only; arrow keys and editing keys are
-  not delivered yet.
+- Extended arrows are delivered as `INPUT_KEY_*` bytes (phase 6D) and the
+  function keys as `INPUT_KEY_F1`..`INPUT_KEY_F12` (phase 6J); Home, End,
+  Insert and Delete are still ignored.
 - No framebuffer/GOP input and no VT switching. The phase 5D cursor consumes the
   pointer events, but it has no acceleration, no click handling beyond the button
   mask and no scrolling; phase 5C audio consumes the PCM ring rather than the

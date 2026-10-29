@@ -131,6 +131,34 @@ void test_input_functions(void)
     expect_char(INPUT_KEY_UP);
     expect_empty();
 
+    /* Phase 6J: set-1 function keys become INPUT_KEY_F1..F12.  Their break
+       codes (0xBB..0xC4, 0xD7, 0xD8) carry no character. */
+    input_init();
+    for (i = 0; i < 10; i++) {
+        input_scancode((u8)(0x3B + i));
+        expect_char(INPUT_KEY_F1 + i);
+    }
+    input_scancode(0xBB);
+    input_scancode(0xC4);
+    expect_empty();
+    input_scancode(0x57);
+    expect_char(INPUT_KEY_F11);
+    input_scancode(0x58);
+    expect_char(INPUT_KEY_F12);
+    input_scancode(0xD7);
+    input_scancode(0xD8);
+    expect_empty();
+    /* Shift does not change a function key, and ctrl does not fold it. */
+    input_scancode(0x2A);
+    input_scancode(0x3E);
+    expect_char(INPUT_KEY_F4);
+    input_scancode(0xAA);
+    input_scancode(0x1D);
+    input_scancode(0x3E);
+    expect_char(INPUT_KEY_F4);
+    input_scancode(0x9D);
+    expect_empty();
+
     /* ACK/echo, release-only and unmapped codes produce nothing. */
     input_init();
     input_scancode(0xFA);

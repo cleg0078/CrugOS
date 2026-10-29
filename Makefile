@@ -45,6 +45,7 @@
 #   make test-workbench-drawer  scroll, refresh and resize the System: drawer
 #   make test-workbench-select  select a drawer row and drag its scrollbar
 #   make test-workbench-screens  switch screens and move a window between them
+#   make test-workbench-cx       toggle commodity hotkeys and fire two of them
 #   make crypt-disk  build the AES-256-XTS crypt test disk
 #   make test-crypt  boot from an encrypted root and verify the disk
 #   make test-crypt-recovery  unlock the encrypted root with the recovery keyslot
@@ -181,6 +182,12 @@ WB_SELECT_RUN_TIMEOUT_SEC ?= 240
 WB_SCREEN_WAIT ?= 30
 WB_SCREEN_ACTS ?= 4
 WB_SCREEN_RUN_TIMEOUT_SEC ?= 240
+
+# Exchange gate (make test-workbench-cx): wb.cx=1 registers the hotkey
+# commodities and opens the manager window.
+WB_CX_WAIT ?= 30
+WB_CX_ACTS ?= 4
+WB_CX_RUN_TIMEOUT_SEC ?= 240
 
 # Hardening gate (make test-hardening): how long each crafted image may boot.
 HARDEN_TIMEOUT_SEC ?= 120
@@ -381,7 +388,7 @@ HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
         test-net-dns test-usb-hotplug test-usb-mouse test-audio test-gfx \
         test-workbench test-workbench-menu test-workbench-shell test-workbench-keys \
         test-workbench-desk test-workbench-icons test-workbench-drawer \
-        test-workbench-select test-workbench-screens \
+        test-workbench-select test-workbench-screens test-workbench-cx \
         iso check-iso test-iso usb \
         crash-disk \
         check-disk size check-efi repro test-host preflight version options clean distclean help
@@ -834,6 +841,20 @@ test-workbench-screens: esp
 		--run-timeout $(WB_SCREEN_RUN_TIMEOUT_SEC) \
 		--qemu-extra "$(WB_QEMU_EXTRA)"
 	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no --expect-screen=yes
+
+# Exchange gate (phase 6J): wb.cx=1 registers four hotkey commodities and
+# opens the manager window.  A row click switches a hotkey off and on again,
+# a press while it is off is reported as blocked, and two fires run the mute
+# and clock utilities.
+test-workbench-cx: esp
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(PYTHON) scripts/run-workbench-cx.py --repo $(CURDIR) \
+		--disk $(abspath $(DISK_IMG)) --serial-log $(abspath $(SERIAL_LOG)) \
+		--exit-code $(abspath $(QEMU_EXIT)) --acts $(WB_CX_ACTS) \
+		--wb-wait $(WB_CX_WAIT) \
+		--run-timeout $(WB_CX_RUN_TIMEOUT_SEC) \
+		--qemu-extra "$(WB_QEMU_EXTRA)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no --expect-cx=yes
 	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 
 test:
@@ -1224,6 +1245,9 @@ options:
 	@printf '  %-16s %s\n' WB_SCREEN_WAIT "$(WB_SCREEN_WAIT) (seconds)"
 	@printf '  %-16s %s\n' WB_SCREEN_ACTS "$(WB_SCREEN_ACTS)"
 	@printf '  %-16s %s\n' WB_SCREEN_RUN_TIMEOUT_SEC "$(WB_SCREEN_RUN_TIMEOUT_SEC)"
+	@printf '  %-16s %s\n' WB_CX_WAIT "$(WB_CX_WAIT) (seconds)"
+	@printf '  %-16s %s\n' WB_CX_ACTS "$(WB_CX_ACTS)"
+	@printf '  %-16s %s\n' WB_CX_RUN_TIMEOUT_SEC "$(WB_CX_RUN_TIMEOUT_SEC)"
 	@printf '  %-16s %s\n' HARDEN_TIMEOUT_SEC "$(HARDEN_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' EXPECT_HEAP "$(EXPECT_HEAP)"
 	@printf '  %-16s %s\n' HEAP_STRESS_OPS "$(HEAP_STRESS_OPS)"

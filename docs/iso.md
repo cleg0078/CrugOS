@@ -34,7 +34,7 @@ ISO 9660 volume CRUGOS (level 3)
 | Volume identifier | `ISO_VOLID`, default `CRUGOS` |
 | El Torito | no emulation, platform EFI, boot image `/boot/efi.img` |
 | FAT image | FAT16, 512-byte sectors, 8 sectors per cluster, 2 FATs, 512 root entries, label `CRUGOS` |
-| FAT image size | `ISO_SIZE_MB`, default 24 MiB (6133 clusters, 79 used) |
+| FAT image size | `ISO_SIZE_MB`, default 24 MiB (6133 clusters, 80 used) |
 | Partition table | protective MBR with one type-`0xEF` partition that starts at the El Torito image |
 | Guest command line | `ISO_CMDLINE`, default `storage=none` |
 
@@ -152,13 +152,13 @@ marker, exit status 33) still has to hold. The gate prints
 `ok: iso boots from a USB stick (exit 33)` and `ok: iso boots from a CD-ROM (exit 33)`.
 
 ```
-  FAT   build/x86_64/iso/tree/boot/efi.img (24 MiB, 6133 clusters, 79 used)
-  ISO   build/x86_64/crugos.iso (25847808 bytes, FAT16 ESP 24 MiB)
+  FAT   build/x86_64/iso/tree/boot/efi.img (24 MiB, 6133 clusters, 80 used)
+  ISO   build/x86_64/crugos.iso (25849856 bytes, FAT16 ESP 24 MiB)
 ok: iso hybrid UEFI boot (volume CRUGOS, ... fsck clean)
 run-qemu: booting build/x86_64/usb-stick.img ... usb build/x86_64/usb-stick.img, net none
 run-qemu: guest exited successfully (isa-debug-exit 0x10 -> status 33)
-ok: boot markers found, version 0.41.0 ... heap no user no isolated no ushell no spawn no fork no forkbig no storage none QEMU exit status 33
-  boot   : pmm=28742 us cpu=407 us vm=706 us traps=322 us timer=65337 us heap=411 us storage=111773 us sched=649 us syscall=153 us total=208505 us
+ok: boot markers found, version 0.42.0 ... heap no user no isolated no ushell no spawn no fork no forkbig no storage none QEMU exit status 33
+  boot   : pmm=31847 us cpu=439 us vm=718 us traps=365 us timer=65395 us heap=440 us storage=113965 us sched=766 us syscall=187 us total=214126 us
   OK    iso boots from a USB stick (exit 33)
   OK    iso boots from a CD-ROM (exit 33)
 ```
@@ -173,7 +173,7 @@ CRUGOS: usb device 46f4:0001 on port 1 (speed 4)
 CRUGOS: usb device class 8 on port 1 (unsupported)
 CRUGOS: storage skipped (storage=none)
 CRUGOS: selftest ok
-CRUGOS: phase 6i boot ok
+CRUGOS: phase 6j boot ok
 ```
 
 Class 8 is mass storage: the firmware read the FAT image, the kernel's xHCI

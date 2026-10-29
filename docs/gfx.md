@@ -159,7 +159,9 @@ both self-test outcomes.
   with its own name, background colour, windows and desktop icons, with a screen
   strip at the right end of the menu bar and a gadget that moves a window from
   one screen to another, which `make test-workbench-screens` checks in
-  `screendump`s).
+  `screendump`s, and since phase 6J four commodity hotkey utilities with an
+  Exchange manager window whose rows toggle state, which
+  `make test-workbench-cx` checks in `screendump`s).
 - Relative motion only, no acceleration curve, no wheel scrolling of the
   console, no click handling beyond recording the button mask.
 - The sprite is clipped at the screen edge; there is no wrap-around.

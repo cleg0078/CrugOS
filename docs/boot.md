@@ -51,7 +51,8 @@ adds `wb.shell=1` / `wb.sh=` for the shell window, phase 6D adds
 for drawer scrolling and refresh plus `wb.fill=<n>` to fill the root first, and
 phase 6H adds `wb.dsel=1` for click-selected drawer rows and a draggable
 scrollbar, phase 6I adds `wb.screens=1` for a retained `Tools` screen with its
-window, gadget and self-test, and phase H2 adds `heap.stress=<1..200000>` and `heap.guard=1`,
+window, gadget and self-test, phase 6J adds `wb.cx=1` for the Commodities
+Exchange (four built-in hotkey utilities and a manager window), and phase H2 adds `heap.stress=<1..200000>` and `heap.guard=1`,
 parsed by `heap_cmdline()` right after `heap_init()`, and phase H3 adds
 `trap.test=<recipe>` (`de`, `ud`, `gp`, `pf`, `df`, `nmi`, `mc`, `db`) for the
 fault injector, parsed by `trap_cmdline()` right after `heap_cmdline()`, and
@@ -157,7 +158,9 @@ post-snapshot allocations cannot push it over capacity.
    `wb.dsel=<0|1>` (parsed before `wb.shell=`: it gives the drawer body the
    click-and-drag handler, and the drawer must be opened for it to matter) and
    `wb.screens=<0|1>` (a second `Tools` screen with a window, a gadget that
-   moves it to screen 0, and the screens self-test), and
+   moves it to screen 0, and the screens self-test) and `wb.cx=<0|1>` (a
+   Commodities Exchange registry; only 0 disables it, and it needs
+   `wb.enable=1`), and
    `wb_init` builds the desktop only when
    the token was supplied: it takes
    the framebuffer away from the text console and prints `CRUGOS: wb desktop
@@ -171,7 +174,8 @@ post-snapshot allocations cannot push it over capacity.
    the scrollbar)` when `wb.dsel=1` installed the body-input handler after the
    desktop-ready line, and by `CRUGOS: wb screens ready (N screen(s), front 0)`
    when `wb.screens=1` added the retained Tools screen with its window, menus
-   and Send to Workbench gadget; a screen switch prints `CRUGOS: wb screen N
+   and Send to Workbench gadget, and by `CRUGOS: wb cx ready (N commodity(ies))`
+   when `wb.cx=1` registered the four built-in commodities; a screen switch prints `CRUGOS: wb screen N
    front (K window(s))` and a move between screens `CRUGOS: wb window N moved
    to screen M`. Without the token the framebuffer console keeps
    its text mode and no Workbench line appears.
@@ -262,7 +266,9 @@ post-snapshot allocations cannot push it over capacity.
     `CRUGOS: wb select selftest ok (N select(s), M scrollbar drag(s))`, or
     `CRUGOS: wb select timeout (N/M)`. With `wb.screens=1` it switches the
     strip twice and moves the `Tools` window once, printing
-    `CRUGOS: wb screens selftest ok (N switch(es), M move(s))`. The whole
+    `CRUGOS: wb screens selftest ok (N switch(es), M move(s))`; with `wb.cx=1`
+    it waits for two row toggles and two hotkey fires and prints
+    `CRUGOS: wb cx selftest ok (N toggle(s), M fire(s))`. The whole
     check is silent unless `wb.enable=` enabled it. `heap_selftest()` prints
     `CRUGOS: heap check ok (S slab(s), O object(s), L large block(s))` and,
     when `heap.stress=` or `heap.guard=` was supplied, runs those passes too.
@@ -288,7 +294,7 @@ post-snapshot allocations cannot push it over capacity.
     printed.
 14. The user self-test of step 13, when it ran, has already joined its threads;
     then `report_boot`, `storage_lock` (wipes the passphrase, the volume keys
-    and the bounce buffer), `CRUGOS: phase 6i boot ok`, then
+    and the bounce buffer), `CRUGOS: phase 6j boot ok`, then
     `wb_hold` (only when
     `wb.hold=` was given: the guest stays alive with the desktop on screen until
     the deadline), `trap_test_run()` (only when `trap.test=` was given, so the
@@ -463,6 +469,7 @@ CRUGOS: wb icons ready (1 object(s), keyboard focus)  # only with wb.ikeys=1
 CRUGOS: wb drawer mode (arrow keys scroll, r refreshes)  # only with wb.dr=1
 CRUGOS: wb select mode (click a row, drag the scrollbar)   # only with wb.dsel=1
 CRUGOS: wb screens ready (2 screen(s), front 0)  # only with wb.screens=1
+CRUGOS: wb cx ready (4 commodity(ies))     # only with wb.cx=1
 CRUGOS: usb keyboard ready (endpoint 0x81, 8 byte reports)  # USB keyboard attached
 CRUGOS: usb key 'a'                       # one per decoded key while usb.wait= is set
 CRUGOS: usb mouse ready (endpoint 0x81, 4 byte reports)     # USB mouse attached
@@ -564,12 +571,18 @@ CRUGOS: wb window 1 sent to front
 CRUGOS: wb action 6 front window 1
 CRUGOS: wb icons selftest ok (1 move(s), 1 front(s))
 CRUGOS: sh run 'ver'
-CRUGOS: sh out CrugOS 0.41.0 (phase 6i), x86_64
+CRUGOS: sh out CrugOS 0.42.0 (phase 6j), x86_64
 CRUGOS: wb selftest ok (1 drag(s), 1 action(s))
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb drawer selftest ok (3 scroll(s), 1 refresh(es))
 CRUGOS: wb select selftest ok (2 select(s), 1 scrollbar drag(s))
 CRUGOS: wb screens selftest ok (2 switch(es), 1 move(s))  # only with wb.screens=1
+CRUGOS: wb action 1 commodity Mute off      # only with wb.cx=1
+CRUGOS: wb commodity Mute blocked (hotkey off)
+CRUGOS: wb action 2 commodity Mute on
+CRUGOS: wb action 3 commodity Mute fired (muted)
+CRUGOS: wb action 4 commodity Clock fired (uptime 1 s)
+CRUGOS: wb cx selftest ok (2 toggle(s), 2 fire(s))
 CRUGOS: sh selftest ok (1 command(s))
 CRUGOS: selftest ok
 CRUGOS: user selftest start                  # only with user.test=
@@ -606,11 +619,11 @@ CRUGOS: sh exit 7
 CRUGOS: user shell finished (exit 7)
 CRUGOS: user selftest ok (3 program(s), 1 fault(s))
 boot   : pmm=28663 us cpu=400 us vm=689 us traps=326 us timer=65383 us heap=419 us storage=133465 us sched=306 us syscall=85 us total=229739 us
-CRUGOS: phase 6i boot ok
+CRUGOS: phase 6j boot ok
 ```
 
 With `trap.test=<recipe>` the same boot ends differently: the injector runs after
-`CRUGOS: phase 6i boot ok`, injects exactly one fault and the guest exits 35
+`CRUGOS: phase 6j boot ok`, injects exactly one fault and the guest exits 35
 instead of 33. A `trap.test=de` boot ends:
 
 ```
@@ -683,7 +696,7 @@ CRUGOS: sh exit 7
 CRUGOS: user shell finished (exit 7)
 CRUGOS: user selftest ok (3 program(s), 1 fault(s))
 boot   : pmm=28663 us cpu=400 us vm=689 us traps=326 us timer=65383 us heap=419 us storage=133465 us sched=306 us syscall=85 us total=229739 us
-CRUGOS: phase 6i boot ok
+CRUGOS: phase 6j boot ok
 ```
 
 Both user excerpts keep the lines the check asserts; a real boot also prints the
@@ -854,7 +867,13 @@ then the `Workbench` box, and checks the Tools background, the vanished
 Workbench window and the moved window's amber title bar in screendumps; the run
 then calls `scripts/boot-check.py --expect-screen=yes` (a flag, not a positional
 argument, so the argument order and the argc range are unchanged) before its
-usual check-disk pass. See [workbench.md](workbench.md)
+usual check-disk pass. `make test-workbench-cx` sets `wb.cx=1` (with
+`wb.acts=4`) on that same desktop line, clicks the Mute row at screen
+(600,235), presses F4 while the commodity is disabled and then twice more with
+it enabled, presses F6 for the Clock, and checks the Exchange body and active
+title bar in a screendump; the run then calls
+`scripts/boot-check.py --expect-cx=yes` (again a flag, so the argv layout is
+unchanged) before its check-disk pass. See [workbench.md](workbench.md)
 and [build.md](build.md).
 
 The `audio` lines appear only on machines with a USB audio function: a default
@@ -890,14 +909,14 @@ replaced by the skip marker, and the USB device the firmware booted from shows
 up in the USB lines as an unsupported mass-storage function:
 
 ```
-CRUGOS: version 0.41.0
+CRUGOS: version 0.42.0
 CRUGOS: usb controller ready (xhci, 8 port(s))
 CRUGOS: usb device 46f4:0001 on port 1 (speed 4)
 CRUGOS: usb device class 8 on port 1 (unsupported)
 CRUGOS: storage skipped (storage=none)
 CRUGOS: heap check ok (6 slab(s), 8 object(s), 1 large block(s))
 CRUGOS: selftest ok
-CRUGOS: phase 6i boot ok
+CRUGOS: phase 6j boot ok
 ```
 
 `kernel/core/report.c` prints the machine description between them: kernel

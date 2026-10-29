@@ -200,6 +200,19 @@ static void input_key_make(u8 code)
     default:
         break;
     }
+    /* Set-1 scancodes: F1..F10 are 0x3B..0x44, F11 is 0x57, F12 is 0x58. */
+    if (code >= 0x3B && code <= 0x44) {
+        input_push((u8)(INPUT_KEY_F1 + (u8)(code - 0x3B)));
+        return;
+    }
+    if (code == 0x57) {
+        input_push((u8)INPUT_KEY_F11);
+        return;
+    }
+    if (code == 0x58) {
+        input_push((u8)INPUT_KEY_F12);
+        return;
+    }
     c = input_ascii(code);
     if (c != 0)
         input_push((u8)c);

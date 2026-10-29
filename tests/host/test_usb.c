@@ -267,6 +267,21 @@ void test_usb_functions(void)
     CHECK(decode_report(0, 0x50, 0) == INPUT_KEY_LEFT);
     CHECK(decode_report(0, 0, 0) == 0);
 
+    /* Phase 6J: HID usage 0x3A..0x45 is F1..F12, and neither Shift nor a
+       report that also holds ctrl changes the byte. */
+    usb_hid_reset();
+    CHECK(decode_report(0, 0x3A, 0) == INPUT_KEY_F1);
+    CHECK(decode_report(0, 0, 0) == 0);
+    CHECK(decode_report(0, 0x3D, 0) == INPUT_KEY_F4);
+    CHECK(decode_report(0, 0, 0) == 0);
+    CHECK(decode_report(0x02, 0x3D, 0) == INPUT_KEY_F4);
+    CHECK(decode_report(0, 0, 0) == 0);
+    CHECK(decode_report(0, 0x45, 0) == INPUT_KEY_F12);
+    CHECK(decode_report(0, 0, 0) == 0);
+    CHECK(decode_report(0, 0x46, 0) == 0);   /* F13 keeps no byte */
+    CHECK(decode_report(0, 0x3B, 0) == INPUT_KEY_F2);
+    CHECK(decode_report(0, 0, 0) == 0);
+
     /* Modifier usages in the key array are ignored, and a report with two new
        keys reports the first one only. */
     usb_hid_reset();

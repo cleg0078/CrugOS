@@ -22,6 +22,21 @@ void input_char(u8 c);
 #define INPUT_KEY_LEFT 0x92u
 #define INPUT_KEY_RIGHT 0x93u
 
+/* Function keys (phase 6J).  They sit above the arrows so the existing
+   "special key" tests (ch >= INPUT_KEY_UP) also cover them. */
+#define INPUT_KEY_F1 0x94u
+#define INPUT_KEY_F2 0x95u
+#define INPUT_KEY_F3 0x96u
+#define INPUT_KEY_F4 0x97u
+#define INPUT_KEY_F5 0x98u
+#define INPUT_KEY_F6 0x99u
+#define INPUT_KEY_F7 0x9Au
+#define INPUT_KEY_F8 0x9Bu
+#define INPUT_KEY_F9 0x9Cu
+#define INPUT_KEY_F10 0x9Du
+#define INPUT_KEY_F11 0x9Eu
+#define INPUT_KEY_F12 0x9Fu
+
 /* Pointer device: relative motion and buttons from a HID mouse. Motion is
    accumulated between reads; a read consumes the accumulated deltas and the
    pending button-change mask. */

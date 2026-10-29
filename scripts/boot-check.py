@@ -43,7 +43,7 @@ REQUIRED_MARKERS = (
     "CRUGOS: selftest ok",
     "CRUGOS: nvme ready",
     "CRUGOS: ahci ready",
-    "CRUGOS: phase 6i boot ok",
+    "CRUGOS: phase 6j boot ok",
 )
 # A rejected unlock stops before scheduling, storage mounting and self-tests.
 WRONG_CRYPT_MARKERS = (
@@ -105,6 +105,7 @@ def main() -> int:
     # and keep every existing positional call site unchanged.
     storage_mode = "disk"
     screen_mode = "no"
+    cx_mode = "no"
     argv = []
     for arg in sys.argv[1:]:
         if arg == "--storage=none":
@@ -116,6 +117,11 @@ def main() -> int:
             screen_mode = "yes"
         elif arg.startswith("--expect-screen="):
             print(f"FAIL: invalid screen expectation {arg!r}", file=sys.stderr)
+            return 2
+        elif arg == "--expect-cx=yes":
+            cx_mode = "yes"
+        elif arg.startswith("--expect-cx="):
+            print(f"FAIL: invalid exchange expectation {arg!r}", file=sys.stderr)
             return 2
         else:
             argv.append(arg)
@@ -131,7 +137,7 @@ def main() -> int:
               "[EXPECT_ICONS [EXPECT_DRAWER [EXPECT_SELECT [EXPECT_HEAP "
               "[EXPECT_USER [EXPECT_USERS [EXPECT_USHELL [EXPECT_SPAWN [EXPECT_FORK "
               "[EXPECT_FORKBIG]]]]]]]]]]]]]]]]]]]]]]]]]] "
-              "[--storage=none] [--expect-screen=yes]",
+              "[--storage=none] [--expect-screen=yes] [--expect-cx=yes]",
               file=sys.stderr)
         return 2
 
@@ -227,6 +233,8 @@ def main() -> int:
         return fail(f"invalid EXPECT_FORK {expect_fork!r}", text)
     if screen_mode not in ("no", "yes"):
         return fail(f"invalid screen mode {screen_mode!r}", text)
+    if cx_mode not in ("no", "yes"):
+        return fail(f"invalid exchange mode {cx_mode!r}", text)
 
     required = list(REQUIRED_MARKERS)
     if storage_mode == "none":
@@ -599,6 +607,29 @@ def main() -> int:
         if not re.search(r"CRUGOS: wb screens selftest ok \([1-9]\d* switch\(es\), [1-9]\d* move\(s\)\)", text):
             return fail("expected the desktop to count screen switches and moves", text)
 
+    if cx_mode == "yes":
+        for marker in (
+            "CRUGOS: wb desktop ready",
+            "CRUGOS: wb cx ready",
+            "CRUGOS: wb commodity",
+            "CRUGOS: wb cx selftest ok",
+            "CRUGOS: wb selftest ok",
+        ):
+            if marker not in text:
+                return fail(f"missing serial marker: {marker!r}", text)
+        if not re.search(r"CRUGOS: wb cx ready \(([1-9]\d*) commodity\(ies\)\)", text):
+            return fail("expected the exchange to register at least one commodity", text)
+        if not re.search(r"CRUGOS: wb action \d+ commodity Mute off", text):
+            return fail("expected a manager row click to switch a commodity off", text)
+        if not re.search(r"CRUGOS: wb commodity Mute blocked \(hotkey off\)", text):
+            return fail("expected a disabled hotkey to be reported as blocked", text)
+        if not re.search(r"CRUGOS: wb action \d+ commodity Mute fired \(muted\)", text):
+            return fail("expected the Mute hotkey to fire once re-enabled", text)
+        if not re.search(r"CRUGOS: wb action \d+ commodity Clock fired \(uptime [0-9]+ s\)", text):
+            return fail("expected the Clock hotkey to report the uptime", text)
+        if not re.search(r"CRUGOS: wb cx selftest ok \(2 toggle\(s\), 2 fire\(s\)\)", text):
+            return fail("expected the exchange to count two toggles and two fires", text)
+
     if expect_heap == "yes":
         for marker in (
             "CRUGOS: heap ready",
@@ -799,7 +830,7 @@ def main() -> int:
           "gfx", expect_gfx, "wb", expect_wb, "menu", expect_menu,
           "shell", expect_shell, "keys", expect_keys, "desk", expect_desk,
           "icons", expect_icons, "drawer", expect_drawer,
-          "select", expect_select, "screen", screen_mode,
+          "select", expect_select, "screen", screen_mode, "cx", cx_mode,
           "heap", expect_heap, "user", expect_user,
           "isolated", expect_users, "ushell", expect_ushell,
           "spawn", expect_spawn, "fork", expect_fork,

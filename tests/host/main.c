@@ -29,6 +29,7 @@ void test_usb_functions(void);
 void test_audio_functions(void);
 void test_gfx_functions(void);
 void test_intuition_functions(void);
+void test_commodity_functions(void);
 void test_textgrid_functions(void);
 void test_shell_functions(void);
 void test_harden_functions(void);
@@ -65,6 +66,7 @@ int main(void)
     RUN(test_audio_functions);
     RUN(test_gfx_functions);
     RUN(test_intuition_functions);
+    RUN(test_commodity_functions);
     RUN(test_textgrid_functions);
     RUN(test_shell_functions);
     RUN(test_harden_functions);

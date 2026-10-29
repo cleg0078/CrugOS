@@ -14,7 +14,10 @@
    and wb.fill=<n> creates files first so there is something to scroll.
    Phase 6I adds a second screen: wb.screens=1 asks intuition.device for a
    'Tools' screen with its own window, and the gate swaps the front screen and
-   moves that window back to the Workbench screen. */
+   moves that window back to the Workbench screen.  Phase 6J adds the
+   Commodities Exchange: wb.cx=1 registers four hotkey utilities (volume up,
+   volume down, mute, clock) on F2/F3/F4/F6 and opens a manager window whose
+   rows switch them on and off. */
 #include <crug/types.h>
 #include <crug/string.h>
 #include <crug/kernel.h>
@@ -29,6 +32,8 @@
 #include <crug/textgrid.h>
 #include <crug/storage.h>
 #include <crug/workbench.h>
+#include <crug/commodity.h>
+#include <crug/audio.h>
 
 static int g_enabled;
 static int g_ready;
@@ -83,6 +88,13 @@ static u32 g_drawer_body_h;
    gadget moves the window back to the Workbench screen. */
 static int g_screens_mode;
 static int g_tools_window = -1;
+
+/* Phase 6J: the Commodities Exchange manager window and its counters. */
+static int g_cx_mode;
+static int g_cx_window = -1;
+static u32 g_cx_toggles;
+static u32 g_cx_fires;
+static u32 g_cx_ops;
 
 static void wb_open_drawer(void);
 static void wb_icon_keyboard_activate(void);
@@ -235,6 +247,13 @@ static void wb_cmdline_token(const char *tok, usize len)
         }
         return;
     }
+    used = wb_prefix(tok, len, "wb.cx=");
+    if (used >= 0) {
+        if (wb_parse_u32(tok + used, len - (usize)used, &value) == 0) {
+            g_cx_mode = value ? 1 : 0;
+        }
+        return;
+    }
     used = wb_prefix(tok, len, "wb.shell=");
     if (used >= 0) {
         if (wb_parse_u32(tok + used, len - (usize)used, &value) == 0) {
@@ -303,6 +322,186 @@ static void wb_console_poll(void)
 {
     usb_poll();
     gfx_pointer_poll();
+}
+
+/* ---- phase 6J: the Commodities Exchange ---------------------------- */
+
+/* Fixed registration order: the dispatch below switches on these indices. */
+#define WB_CX_VOL_UP 0
+#define WB_CX_VOL_DOWN 1
+#define WB_CX_MUTE 2
+#define WB_CX_CLOCK 3
+#define WB_CX_COUNT 4u
+#define WB_CX_VOLUME_STEP 600 /* 1/256 dB units, a little over 2 dB */
+
+static const struct {
+    const char *name;
+    u8 hotkey;
+} g_cx_defs[WB_CX_COUNT] = {
+    { "Volume up", (u8)INPUT_KEY_F2 },
+    { "Volume down", (u8)INPUT_KEY_F3 },
+    { "Mute", (u8)INPUT_KEY_F4 },
+    { "Clock", (u8)INPUT_KEY_F6 },
+};
+
+/* Body painter: one row per commodity, with its hotkey and its live state. */
+static void wb_cx_paint(int id, i32 x, i32 y, u32 w, u32 h, void *ctx)
+{
+    u32 i;
+    u32 row_x = (u32)x + COMMODITY_ROW_X;
+    u32 key_x = (u32)x + (w > 96u ? w - 96u : 0u);
+    u32 state_x = (u32)x + (w > 44u ? w - 44u : 0u);
+
+    (void)id;
+    (void)ctx;
+    fb_fill_rect((u32)x, (u32)y, w, h, INTUITION_WINDOW_RGB);
+    fb_draw_text((u32)x + COMMODITY_ROW_X, (u32)y + 6u,
+                 "Commodities Exchange", INTUITION_BODY_TEXT_RGB,
+                 INTUITION_WINDOW_RGB);
+    for (i = 0; i < commodity_count(); i++) {
+        const struct commodity *c = commodity_at(i);
+        u32 row_y = (u32)y + COMMODITY_ROW_TOP + i * COMMODITY_ROW_H;
+        const char *key = commodity_key_name(c->hotkey);
+        u32 fg = c->enabled ? INTUITION_BODY_TEXT_RGB
+                            : INTUITION_TITLE_IDLE_RGB;
+
+        if (row_y + 8u > (u32)y + h) {
+            break;
+        }
+        fb_draw_text(row_x, row_y, c->name, fg, INTUITION_WINDOW_RGB);
+        if (key != 0) {
+            fb_draw_text(key_x, row_y, key, fg, INTUITION_WINDOW_RGB);
+        }
+        fb_draw_text(state_x, row_y, c->enabled ? "[on]" : "[off]",
+                     c->enabled ? INTUITION_MENU_HIGHLIGHT_RGB
+                                : INTUITION_TITLE_IDLE_RGB,
+                     INTUITION_WINDOW_RGB);
+    }
+}
+
+/* Click a row to turn its hotkey on or off. */
+static void wb_cx_body(int id, u32 kind, i32 x, i32 y, void *ctx)
+{
+    const struct commodity *c;
+    int index;
+    int on;
+
+    (void)id;
+    (void)x;
+    (void)ctx;
+    if (kind != INTUITION_BODY_PRESS) {
+        return;
+    }
+    index = commodity_row_at(y);
+    if (index < 0) {
+        return;
+    }
+    on = commodity_toggle((u32)index);
+    if (on < 0) {
+        return;
+    }
+    g_cx_toggles++;
+    g_cx_ops++;
+    c = commodity_at((u32)index);
+    kprintf("CRUGOS: wb action %u commodity %s %s\n", (unsigned)g_cx_ops,
+            c ? c->name : "commodity", on ? "on" : "off");
+    if (g_cx_window > 0) {
+        intuition_redraw_window(g_cx_window);
+    }
+}
+
+/* Run one commodity action and report it.  Nothing here needs an audio
+   device: the mixer is pure state, so the utilities work in a gate booted
+   without usb-audio. */
+static void wb_cx_dispatch(int index, int fired)
+{
+    const struct commodity *c = commodity_at((u32)index);
+    const char *name = c ? c->name : "commodity";
+
+    if (!fired) {
+        kprintf("CRUGOS: wb commodity %s blocked (hotkey off)\n", name);
+        return;
+    }
+    g_cx_fires++;
+    g_cx_ops++;
+    switch (index) {
+    case WB_CX_VOL_UP: {
+        i32 volume = audio_mixer_volume(0u) + WB_CX_VOLUME_STEP;
+
+        if (volume > AUDIO_VOLUME_MAX) {
+            volume = AUDIO_VOLUME_MAX;
+        }
+        (void)audio_mixer_set_volume(0u, volume);
+        kprintf("CRUGOS: wb action %u commodity %s fired (volume %d units)\n",
+                (unsigned)g_cx_ops, name, (int)volume);
+        break;
+    }
+    case WB_CX_VOL_DOWN: {
+        i32 volume = audio_mixer_volume(0u) - WB_CX_VOLUME_STEP;
+
+        if (volume < AUDIO_VOLUME_MIN) {
+            volume = AUDIO_VOLUME_MIN;
+        }
+        (void)audio_mixer_set_volume(0u, volume);
+        kprintf("CRUGOS: wb action %u commodity %s fired (volume %d units)\n",
+                (unsigned)g_cx_ops, name, (int)volume);
+        break;
+    }
+    case WB_CX_MUTE: {
+        u32 muted = audio_mixer_mute(0u) ? 0u : 1u;
+
+        (void)audio_mixer_set_mute(0u, muted);
+        kprintf("CRUGOS: wb action %u commodity %s fired (%s)\n",
+                (unsigned)g_cx_ops, name, muted ? "muted" : "unmuted");
+        break;
+    }
+    case WB_CX_CLOCK:
+        kprintf("CRUGOS: wb action %u commodity %s fired (uptime %u s)\n",
+                (unsigned)g_cx_ops, name,
+                (unsigned)(timer_monotonic_ns() / 1000000000ull));
+        break;
+    default:
+        kprintf("CRUGOS: wb action %u commodity %s fired\n",
+                (unsigned)g_cx_ops, name);
+        break;
+    }
+    if (g_cx_window > 0) {
+        intuition_redraw_window(g_cx_window);
+    }
+}
+
+/* Every key pump reads through here: in exchange mode a commodity hotkey is
+   consumed and dispatched, and the pumps keep the rest of the keyboard. */
+static int wb_take_key(void)
+{
+    int ch = input_try_getc();
+    int fired = 0;
+    int index;
+
+    if (ch < 0 || !g_cx_mode || !g_ready) {
+        return ch;
+    }
+    index = commodity_hotkey((u8)ch, &fired);
+    if (index < 0) {
+        return ch;
+    }
+    wb_cx_dispatch(index, fired);
+    return -2;
+}
+
+/* Exchange-only mode has no other owner of the keyboard, so it drains the
+   queue itself and drops whatever is not a hotkey. */
+static void wb_cx_pump(void)
+{
+    if (!g_cx_mode || !g_ready) {
+        return;
+    }
+    if (g_keys_mode || g_icon_keys_mode || g_shell_mode || g_drawer_mode) {
+        return;
+    }
+    while (wb_take_key() >= 0) {
+        /* not a hotkey: nothing owns it in exchange-only mode */
+    }
 }
 
 /* Drain what intuition.device consumed: the gate counts the same actions the
@@ -797,7 +996,14 @@ static void wb_drawer_pump(void)
     if (!g_drawer_mode || g_shell_mode || !g_ready) {
         return;
     }
-    while ((ch = input_try_getc()) >= 0) {
+    for (;;) {
+        ch = wb_take_key();
+        if (ch == -2) {
+            continue;
+        }
+        if (ch < 0) {
+            break;
+        }
         if (g_drawer_window > 0) {
             if (ch == (int)INPUT_KEY_UP) {
                 wb_drawer_scroll(-1);
@@ -857,7 +1063,14 @@ static int wb_shell_pump(void)
     if (!g_shell_mode || !g_ready) {
         return 0;
     }
-    while ((ch = input_try_getc()) >= 0) {
+    for (;;) {
+        ch = wb_take_key();
+        if (ch == -2) {
+            continue;
+        }
+        if (ch < 0) {
+            break;
+        }
         if (shell_feed(&g_shell, (u8)ch) == 1) {
             g_commands_seen++;
             executed = 1;
@@ -896,7 +1109,14 @@ static void wb_key_pump(void)
         !g_ready) {
         return;
     }
-    while ((ch = input_try_getc()) >= 0) {
+    for (;;) {
+        ch = wb_take_key();
+        if (ch == -2) {
+            continue;
+        }
+        if (ch < 0) {
+            break;
+        }
         if (g_icon_keys_mode) {
             if (ch >= (int)INPUT_KEY_UP || ch == '\t' || ch == '\n' ||
                 ch == '\r' || ch == 0x1b) {
@@ -929,14 +1149,15 @@ int wb_init(void)
     }
     g_reporting = (g_want_drags > 0u || g_menu_mode || g_keys_mode ||
                    g_shell_mode || g_desk_mode || g_icon_keys_mode ||
-                   g_drawer_mode || g_select_mode || g_screens_mode)
+                   g_drawer_mode || g_select_mode || g_screens_mode ||
+                   g_cx_mode)
                       ? 1
                       : 0;
     fb_set_text_enabled(0);
     intuition_init();
     intuition_set_reporting(g_reporting);
     top = intuition_open(80, 90, 360, 220, "Workbench",
-                         "CrugOS Workbench\nphase 6i\nsoftware rendered");
+                         "CrugOS Workbench\nphase 6j\nsoftware rendered");
     shell_id = intuition_open(480, 300, 320, 200, "Shell", "4.OS\ncrugos>");
     intuition_set_menus(top, wb_menus_top, 2u);
     intuition_add_gadget(top, 12, 60, 96, 22, "Run");
@@ -954,13 +1175,27 @@ int wb_init(void)
         } else {
             (void)intuition_set_screen((u32)screen);
             g_tools_window = intuition_open(160, 140, 340, 200, "Tools",
-                                            "CrugOS Tools\nphase 6i\nsecond screen");
+                                            "CrugOS Tools\nphase 6j\nsecond screen");
             if (g_tools_window > 0) {
                 intuition_set_menus(g_tools_window, wb_menus_tools, 2u);
                 intuition_add_gadget(g_tools_window, 12, 60, 160, 22,
                                      "Send to Workbench");
             }
             (void)intuition_set_screen(0u);
+        }
+    }
+    if (g_cx_mode) {
+        u32 i;
+
+        commodity_reset();
+        for (i = 0; i < WB_CX_COUNT; i++) {
+            (void)commodity_register(g_cx_defs[i].name, g_cx_defs[i].hotkey);
+        }
+        g_cx_window = intuition_open(560, 120, 344, 196, "Exchange",
+                                     "Commodities Exchange");
+        if (g_cx_window > 0) {
+            intuition_set_paint(g_cx_window, wb_cx_paint, 0);
+            intuition_set_body_input(g_cx_window, wb_cx_body, 0);
         }
     }
     intuition_set_menus(shell_id, wb_menus_shell, 2u);
@@ -1007,6 +1242,10 @@ int wb_init(void)
         kprintf("CRUGOS: wb screens ready (%u screen(s), front %d)\n",
                 (unsigned)intuition_screen_count(), intuition_screen_front());
     }
+    if (g_cx_mode) {
+        kprintf("CRUGOS: wb cx ready (%u commodity(ies))\n",
+                (unsigned)commodity_count());
+    }
     return 0;
 }
 
@@ -1016,6 +1255,7 @@ void wb_poll(void)
         return;
     }
     gfx_pointer_poll();
+    wb_cx_pump();
     wb_key_pump();
     wb_drawer_pump();
     wb_shell_pump();
@@ -1029,6 +1269,7 @@ int wb_selftest(void)
     u32 want_commands;
     u32 want_drawer;
     u32 want_select;
+    u32 want_cx;
 
     if (!g_enabled) {
         return 1;
@@ -1055,18 +1296,23 @@ int wb_selftest(void)
                       ? (g_want_actions ? g_want_actions : 1u)
                       : 0u;
     want_select = g_select_mode ? (g_want_actions ? g_want_actions : 1u) : 0u;
+    /* Exchange mode counts its own commodity actions, so pointer events that
+       raise a window do not satisfy the gate early. */
+    want_cx = g_cx_mode ? (g_want_actions ? g_want_actions : 1u) : 0u;
     deadline = timer_monotonic_ns() +
                (u64)(g_wait_seconds ? g_wait_seconds : 5u) * 1000000000ull;
     while (intuition_drag_count() < (u64)want ||
            g_actions_seen < want_actions ||
            g_drawer_ops_seen < want_drawer ||
            g_select_ops < want_select ||
+           g_cx_ops < want_cx ||
            g_commands_seen < want_commands) {
         /* input_poll() runs the console hook, which pumps the USB mouse and
            then drains the pointer state into intuition.device; the shell pump
            then feeds whatever the keyboard queued into the Shell window. */
         input_poll();
         wb_drain_events();
+        wb_cx_pump();
         wb_key_pump();
         wb_drawer_pump();
         wb_shell_pump();
@@ -1083,6 +1329,9 @@ int wb_selftest(void)
             } else if (g_select_ops < want_select) {
                 kprintf("CRUGOS: wb select timeout (%u/%u)\n",
                         (unsigned)g_select_ops, (unsigned)want_select);
+            } else if (g_cx_ops < want_cx) {
+                kprintf("CRUGOS: wb cx timeout (%u/%u)\n",
+                        (unsigned)g_cx_ops, (unsigned)want_cx);
             } else {
                 kprintf("CRUGOS: sh command timeout (%u/%u)\n",
                         (unsigned)g_commands_seen, (unsigned)want_commands);
@@ -1092,6 +1341,7 @@ int wb_selftest(void)
         cpu_wait_for_irq();
     }
     wb_drain_events();
+    wb_cx_pump();
     wb_key_pump();
     wb_shell_pump();
     kprintf("CRUGOS: wb selftest ok (%u drag(s), %u action(s))\n",
@@ -1121,6 +1371,10 @@ int wb_selftest(void)
         kprintf("CRUGOS: wb screens selftest ok (%u switch(es), %u move(s))\n",
                 (unsigned)intuition_screen_switches(),
                 (unsigned)intuition_screen_moves());
+    }
+    if (g_cx_mode) {
+        kprintf("CRUGOS: wb cx selftest ok (%u toggle(s), %u fire(s))\n",
+                (unsigned)g_cx_toggles, (unsigned)g_cx_fires);
     }
     /* Keep the finished desktop on screen for a moment so the gate's last
        screendump does not race the rest of the boot to the exit. */
@@ -1152,6 +1406,7 @@ void wb_hold(void)
     while (timer_monotonic_ns() < deadline) {
         input_poll();
         wb_drain_events();
+        wb_cx_pump();
         wb_key_pump();
         wb_drawer_pump();
         wb_shell_pump();

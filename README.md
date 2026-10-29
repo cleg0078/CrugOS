@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 6I screens (`v0.41.0`)
+## Status: phase 6J commodities exchange (`v0.42.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -73,7 +73,11 @@ with the child read-only and copied on the first store, so a fork of 300 pages
 costs a handful of frames, and `make test-user6` is the 53rd gate. Phase 6I
 gives the Workbench three retained screens with a strip in the menu bar,
 per-screen windows and desktop icons, and a window move between screens;
-`make test-workbench-screens` is the 54th gate.
+`make test-workbench-screens` is the 54th gate. Phase 6J adds the Commodities
+Exchange: a fixed registry of four global hotkey utilities (`Volume up`,
+`Volume down`, `Mute` and `Clock`), an `Exchange` manager window whose rows
+toggle them, and function keys decoded from both the PS/2 and the USB HID
+keyboard, with `make test-workbench-cx` as the 55th gate.
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -1298,7 +1302,7 @@ Phase 6I gives Intuition full screens, so the desktop is no longer one surface:
   `Send to Workbench` gadget at body-relative (12,60,160,22), returns to
   screen 0 and prints `CRUGOS: wb screens ready (N screen(s), front 0)`; a press
   on that gadget moves the Tools window to screen 0 and the Workbench body
-  reads `phase 6i`;
+  reads `phase 6j`;
 - `scripts/boot-check.py` gains the phase marker and a new `--expect-screen=yes`
   flag (a flag, not a positional argument, so the argument order and the argc
   range are unchanged) which requires the screens markers, the switch, the
@@ -1318,6 +1322,60 @@ Phase 6I gives Intuition full screens, so the desktop is no longer one surface:
   load image (`.text` 197958 B, `.rodata` 30144 B, `.bss` 688128 B), and all
   54 gates pass.
 
+Phase 6J gives the Workbench a Commodities Exchange, a small table of global
+hotkey utilities with a manager window:
+
+- `include/crug/commodity.h` + `kernel/gfx/commodities.c` are a pure,
+  framebuffer-free registry: `COMMODITY_MAX` 4, `COMMODITY_NAME_MAX` 16,
+  `COMMODITY_HEADER_H` 24, `COMMODITY_ROW_TOP` 28, `COMMODITY_ROW_H` 26 and
+  `COMMODITY_ROW_X` 6, with `struct commodity` holding `name`, `hotkey`,
+  `enabled`, `fires` and `blocked`;
+- the API is `commodity_reset()`, `commodity_register(name, hotkey)` (the new
+  index, or -1 for a bad name, a hotkey outside F1..F12 or a duplicate name or
+  hotkey), `commodity_toggle()` (the new state or -1),
+  `commodity_set_enabled()`, `commodity_hotkey(key, &fired)` (the owning index
+  or -1; `fired` is 1 when the action ran and 0 when it was blocked),
+  `commodity_count()`, `commodity_at()`, `commodity_index_of_hotkey()`,
+  `commodity_fires()`/`commodity_blocked()`, `commodity_enabled_count()`,
+  `commodity_key_name()` (`"F1"`..`"F12"`) and `commodity_row_at()`;
+- `include/crug/input.h` adds `INPUT_KEY_F1` `0x94u`..`INPUT_KEY_F12`
+  `0x9Fu` above the arrows: PS/2 set-1 make codes `0x3B`..`0x44` map to F1..F10,
+  `0x57` to F11 and `0x58` to F12 (break codes yield nothing and Shift/Ctrl do
+  not change the byte), and USB HID boot usages `0x3A`..`0x45` map to F1..F12
+  (F13 is ignored);
+- `kernel/gfx/workbench.c` registers `Volume up` F2, `Volume down` F3, `Mute`
+  F4 and `Clock` F6 and opens an `Exchange` window at (560,120), size 344x196,
+  last so it starts on top: rows are 26 pixels high from 28 pixels below the body
+  top, the name sits at `x+6`, the key name at `x+w-96` and `[on]`/`[off]`
+  at `x+w-44` in amber when on, and a row click toggles the commodity;
+- a disabled commodity's key is refused, bumps its `blocked` count and prints
+  `CRUGOS: wb commodity NAME blocked (hotkey off)` without running; an enabled
+  one bumps `fires` and runs, printing
+  `CRUGOS: wb action N commodity NAME fired (...)`. Volume up/down move the
+  mixer by `WB_CX_VOLUME_STEP` 600 within 0..`AUDIO_VOLUME_MIN` -7680, Mute
+  toggles the mixer mute and Clock prints the monotonic uptime; a key no
+  commodity owns stays with the desktop;
+- `wb.cx=<0|1>` (only 0 disables, and it needs `wb.enable=1`) enables the
+  exchange and prints `CRUGOS: wb cx ready (N commodity(ies))`; the self-test
+  waits for two row toggles and two fires and ends with
+  `CRUGOS: wb cx selftest ok (2 toggle(s), 2 fire(s))`;
+- `make test-workbench-cx` is the 55th gate: `scripts/run-workbench-cx.py`
+  boots with `wb.enable=1 wb.wait=30 wb.cx=1 wb.acts=4`, hot-plugs a
+  `usb-mouse` and a `usb-kbd` over QMP, clicks the Mute row at (600,235),
+  presses F4 while the commodity is off and again when it is on, presses F6 for
+  the Clock, and takes a `screendump` whose Exchange body (700,250) must be
+  (8,16,24) and whose active title bar (600,130) must be (255,176,0);
+  `scripts/boot-check.py` gains `--expect-cx=yes` (a flag, not a positional
+  argument, so the argument order and the argc range are unchanged), and the run
+  ends with a clean `e2fsck`;
+- `tests/host/test_commodity.c` covers the registry (registration limits,
+  duplicate name and hotkey, toggle, blocked and fired counters, the row hit
+  test, the key names) and `test_input.c`/`test_usb.c` cover both function-key
+  mappings, so `make test-host` reports 8102 checks; `make size` reports a
+  283088 B (276 KiB) kernel file and a 919594 B (898 KiB) load image (`.text`
+  200518 B, `.rodata` 30880 B, `.data` 68 B, `.bss` 688128 B), and all 55
+  gates pass.
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -1326,9 +1384,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.41.0 (phase 6i) -- Amiga-inspired microkernel bring-up
+CrugOS 0.42.0 (phase 6j) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.41.0
+CRUGOS: version 0.42.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -1377,7 +1435,7 @@ CRUGOS: tcp http served (72 bytes)
 CRUGOS: net selftest ok
 CRUGOS: gfx ready (1024x768, cursor at 512,384)
 CRUGOS: selftest ok
-kernel : 0x0000000000100000 size=275 KiB
+kernel : 0x0000000000100000 size=276 KiB
 boot   : cpu=0 acpi_rsdp=0x1f77e000 fdt=0x0 initrd=0x0
 memory : 36 regions, usable 474080 KiB (462 MiB)
 pmm    : total=118520 free=118462 bitmap=131072 B
@@ -1389,7 +1447,7 @@ heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
 boot   : pmm=28663 us cpu=400 us vm=689 us traps=326 us timer=65383 us heap=419 us storage=133465 us sched=306 us syscall=85 us total=229739 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase 6i boot ok
+CRUGOS: phase 6j boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -1594,6 +1652,7 @@ make test-workbench-icons  # drag a desktop icon, raise a window by its front ga
 make test-workbench-drawer  # scroll, refresh and resize the System: drawer
 make test-workbench-select  # click drawer rows and drag its scrollbar
 make test-workbench-screens  # switch screens and move a window between them
+make test-workbench-cx  # drive commodity hotkeys and toggle rows in the Exchange manager
 make test-hardening  # craft hostile superblock/inode/crypt images and boot them
 make test-heap   # corrupt the kernel heap and prove the integrity checker catches it
 make test-trap   # inject eight crafted faults and check the report, IST and panic
@@ -1609,7 +1668,7 @@ make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
 make usb         # write the ISO to a USB block device (USB_DEV=/dev/sdX)
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
-make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows/menus/gadgets, resize grips, keyboard focus and keys, icon dragging, the send-to-front gadget and keyboard icon focus, the body input handler, the text grid and the shell, the user-window and uaccess validators, the per-space page-table tests, the ELF exec mapper, the argv predicates, the fork clone, the copy-on-write table and the screen model)
+make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows/menus/gadgets, resize grips, keyboard focus and keys, icon dragging, the send-to-front gadget and keyboard icon focus, the body input handler, the text grid and the shell, the user-window and uaccess validators, the per-space page-table tests, the ELF exec mapper, the argv predicates, the fork clone, the copy-on-write table, the screen model and the commodity registry)
 make check-disk  # e2fsck + persisted-file checks on the latest test disk
 make user        # build the nine ring-3 programs the disk image carries
 make disk        # generate the GPT/ext4 test disk
@@ -1647,7 +1706,8 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `WB_ICONS_RUN_TIMEOUT_SEC`, `WB_DRAWER_WAIT`, `WB_DRAWER_ACTS`, `WB_DRAWER_FILL`,
 `WB_DRAWER_RUN_TIMEOUT_SEC`, `WB_SELECT_WAIT`, `WB_SELECT_ACTS`,
 `WB_SELECT_FILL`, `WB_SELECT_RUN_TIMEOUT_SEC`, `WB_SCREEN_WAIT`,
-`WB_SCREEN_ACTS`, `WB_SCREEN_RUN_TIMEOUT_SEC`, `HARDEN_TIMEOUT_SEC`,
+`WB_SCREEN_ACTS`, `WB_SCREEN_RUN_TIMEOUT_SEC`, `WB_CX_WAIT`, `WB_CX_ACTS`,
+`WB_CX_RUN_TIMEOUT_SEC`, `HARDEN_TIMEOUT_SEC`,
 `HEAP_STRESS_OPS`, `HEAP_RUN_TIMEOUT_SEC`, `TRAP_TIMEOUT_SEC`, `FUZZ_CASES`,
 `FUZZ_CRYPT_CASES`, `FUZZ_SEED`, `FUZZ_TIMEOUT_SEC`, `USER_RUN_TIMEOUT_SEC`,
 `USER2_RUN_TIMEOUT_SEC`, `SHELL_RUN_TIMEOUT_SEC`, `SPAWN_RUN_TIMEOUT_SEC`,

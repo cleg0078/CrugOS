@@ -21,7 +21,10 @@ Phase 6G turns the `System:` drawer into a scrolling list: the arrow keys move
 the viewport, `r` re-reads the volume, a 4-pixel scrollbar tracks the position
 and a resize reflows the rows. Phase 6H adds a generic body-input hook to
 `intuition.device`, which the drawer uses to select a row on a click and to drag
-its scrollbar thumb. There are no application tasks behind the
+its scrollbar thumb. Phase 6J adds the Commodities Exchange: a fixed table of
+global hotkey utilities, an `Exchange` manager window whose rows toggle them,
+and F1..F12 decoded from both the PS/2 and the USB HID keyboard. There are no
+application tasks behind the
 desktop yet -- the kernel-side device is what the Workbench userspace will sit
 on -- so the only residents are the
 bring-up module and its shell, which appear when the loader command line asks
@@ -553,8 +556,93 @@ a body-relative (12,60,160,22) `Send to Workbench` gadget, return to screen 0 an
 print `CRUGOS: wb screens ready (%u screen(s), front %d)`. A press on the gadget
 moves the Tools window to screen 0, which is the programmatic way to show a move
 without dragging the window's title bar across a screen edge. In screens mode the
-Workbench window body reads `phase 6i` and the self-test ends with
+Workbench window body reads `phase 6j` and the self-test ends with
 `CRUGOS: wb screens selftest ok (%u switch(es), %u move(s))`.
+
+## Commodities Exchange
+
+Phase 6J adds a global hotkey registry and a manager window for it. A
+*commodity* is a small named utility with one function key attached; pressing
+the key runs it from anywhere on the desktop, and the `Exchange` window lists
+the registered commodities so a row click can toggle one on or off.
+
+`include/crug/commodity.h` and `kernel/gfx/commodities.c` are pure: no
+framebuffer, no block I/O and no timers, so `tests/host/test_commodity.c` links
+the real code and drives it directly. The table is fixed at `COMMODITY_MAX`
+entries; space is reserved up front, and a registered commodity starts enabled
+with zero counters.
+
+| constant | value | meaning |
+| --- | --- | --- |
+| `COMMODITY_MAX` | 4 | registry slots |
+| `COMMODITY_NAME_MAX` | 16 | bytes in a name, including the NUL |
+| `COMMODITY_HEADER_H` | 24 | height of the Exchange header |
+| `COMMODITY_ROW_TOP` | 28 | offset of the first row from the body top |
+| `COMMODITY_ROW_H` | 26 | row height |
+| `COMMODITY_ROW_X` | 6 | left inset of a row's text |
+
+`struct commodity` carries the state: `char name[COMMODITY_NAME_MAX]`,
+`u8 hotkey`, `u8 enabled`, `u32 fires` and `u32 blocked`. The API in
+`include/crug/commodity.h`:
+
+| function | result |
+| --- | --- |
+| `commodity_reset()` | clears every slot, the two counters and the enabled state |
+| `commodity_register(name, hotkey)` | the new index, or -1 for a NULL, empty or 16-byte name, a hotkey outside `INPUT_KEY_F1`..`INPUT_KEY_F12`, a duplicate name or a duplicate hotkey |
+| `commodity_toggle(index)` | the new enabled state, or -1 for an out-of-range index |
+| `commodity_set_enabled(index, on)` | 0, or -1 for an out-of-range index |
+| `commodity_hotkey(key, &fired)` | the owning index or -1; `*fired` is 1 when the action ran and 0 when the commodity was disabled |
+| `commodity_count()`, `commodity_at(i)` | the registered count and one slot |
+| `commodity_index_of_hotkey(key)` | the owning index without running anything, or -1 |
+| `commodity_fires()`, `commodity_blocked()`, `commodity_enabled_count()` | the two global counters and the number of enabled slots |
+| `commodity_key_name(key)` | `"F1"`..`"F12"`, or NULL for any other byte |
+| `commodity_row_at(body_relative_y)` | the row under a body-relative y, or -1 above the first row or past the last |
+
+Four built-ins are registered by `kernel/gfx/workbench.c`:
+
+| commodity | key | action |
+| --- | --- | --- |
+| `Volume up` | F2 | raise the audio mixer by `WB_CX_VOLUME_STEP` (600), clamped at `AUDIO_VOLUME_MAX` (0) |
+| `Volume down` | F3 | lower the mixer by the same step, clamped at `AUDIO_VOLUME_MIN` (-7680) |
+| `Mute` | F4 | toggle the mixer mute |
+| `Clock` | F6 | report the monotonic uptime |
+
+A key is dispatched only while the Workbench runs with the exchange enabled and
+no other text consumer owns the keyboard. `commodity_hotkey()` finds the owner
+first: a disabled commodity bumps its `blocked` count and prints
+`CRUGOS: wb commodity %s blocked (hotkey off)` without running anything, while
+an enabled one bumps `fires`, runs the action and prints
+`CRUGOS: wb action %u commodity %s fired (...)`. A key no commodity owns is
+handed to the desktop, so F2..F6 keep their old meaning when the exchange is
+off. Volume up and Volume down print the new mixer value in units, Mute prints
+`fired (muted)` or `fired (unmuted)`, and Clock prints `fired (uptime %u s)`.
+
+The manager is the `Exchange` window at (560,120), size 344x196. It is opened
+last, so it starts on top of the desktop. Its header is
+`COMMODITY_HEADER_H` (24) pixels high; rows start `COMMODITY_ROW_TOP` (28)
+pixels below the body top and are `COMMODITY_ROW_H` (26) pixels apart. A row
+paints its name at `x + COMMODITY_ROW_X`, the key name right-aligned at
+`x + w - 96` and `[on]`/`[off]` at `x + w - 44`, amber when the commodity is
+enabled and grey when it is not. `commodity_row_at()` maps a body-relative y to
+a row, and a click on a row toggles it and prints
+`CRUGOS: wb action %u commodity %s on|off`.
+
+The keys themselves are decoded in `include/crug/input.h` and the two drivers:
+`INPUT_KEY_F1` `0x94u` through `INPUT_KEY_F12` `0x9Fu` sit above the arrow
+keys. PS/2 set-1 make codes `0x3B`..`0x44` map to F1..F10, `0x57` to F11 and
+`0x58` to F12; break codes yield no byte and Shift/Ctrl do not change the make
+code. USB HID boot usages `0x3A`..`0x45` map to F1..F12, and `0x46` (F13) is
+ignored.
+
+`wb.cx=<0|1>` (default 0, only 0 disables) turns the exchange on, and it
+requires `wb.enable=1`. It prints
+`CRUGOS: wb cx ready (%u commodity(ies))` once the four built-ins are
+registered. With `wb.acts=` set, the self-test also waits for two row toggles and
+two fires and ends with
+`CRUGOS: wb cx selftest ok (%u toggle(s), %u fire(s))`; a missing action prints
+`CRUGOS: wb cx timeout (%u/%u)` and panics the boot. The exchange pump keeps
+running while `wb_hold()` has the desktop open, so the demo boots react to
+F2..F6 as well.
 
 ## The event queue
 
@@ -601,7 +689,7 @@ index and the new tile origin.
 
    | id | rectangle | title | body |
    | --- | --- | --- | --- |
-   | 1 | (80, 90) 360x220 | `Workbench` | `CrugOS Workbench` / `phase 6i` / `software rendered` |
+   | 1 | (80, 90) 360x220 | `Workbench` | `CrugOS Workbench` / `phase 6j` / `software rendered` |
    | 2 | (480, 300) 320x200 | `Shell` | `4.OS` / `crugos>`, or the shell grid when `wb.shell=1` |
 
    Window 1 carries the `Workbench` (About/Info/Quit) and `Window`
@@ -653,6 +741,7 @@ tokens do. Values are decimal, capped, and ignored when malformed:
 | `wb.dsel=1` | 0/1 | give the drawer body the click-and-drag handler: a row click selects, the scrollbar thumb can be dragged (parsed before `wb.shell=`, and the drawer must be opened too) |
 | `wb.hold=S` | 0..3600 | seconds `wb_hold()` keeps the desktop on screen after the boot marker |
 | `wb.screens=1` | 0/1 | add a `Tools` screen, the `Send to Workbench` gadget and the screens self-test |
+| `wb.cx=1` | 0/1 | register the four commodity hotkey utilities, open the `Exchange` manager and run the cx self-test (needs `wb.enable=1`) |
 
 `make test-workbench` boots with `wb.enable=1 wb.wait=30 wb.drag=1`,
 `make test-workbench-menu` with `wb.enable=1 wb.wait=30 wb.menu=1 wb.acts=4`,
@@ -663,7 +752,8 @@ wb.wait=30 wb.desk=1 wb.ikeys=1 wb.acts=5`, and `make test-workbench-drawer`
 with `wb.enable=1 wb.wait=30 wb.desk=1 wb.dr=1 wb.fill=24 wb.acts=4`, and
 `make test-workbench-select` with `wb.enable=1 wb.wait=30 wb.desk=1 wb.dr=1
 wb.dsel=1 wb.fill=24 wb.acts=3`, and `make test-workbench-screens` with
-`wb.enable=1 wb.wait=30 wb.screens=1 wb.acts=4`. `make demo` boots
+`wb.enable=1 wb.wait=30 wb.screens=1 wb.acts=4`, and `make test-workbench-cx` with
+`wb.enable=1 wb.wait=30 wb.cx=1 wb.acts=4`. `make demo` boots
 `wb.enable=1 wb.wait=0 wb.hold=<seconds>` instead: `wb.wait=0` turns both
 self-tests into no-ops, so the interactive desktop needs neither a drag nor an
 action before the boot marker, and `wb.hold=` keeps the guest alive
@@ -688,7 +778,7 @@ CRUGOS: wb window 2 drag start (512, 312)
 CRUGOS: wb window 2 drag to (557, 337)
 CRUGOS: wb window 2 moved to (570, 350)
 CRUGOS: wb selftest ok (1 drag(s), 0 action(s))
-CRUGOS: phase 6i boot ok
+CRUGOS: phase 6j boot ok
 ```
 
 The menu gate is a second boot and adds the action lines:
@@ -706,7 +796,7 @@ CRUGOS: wb menu 'Workbench' open (window 1)
 CRUGOS: wb menu 'Workbench' selected ('Quit')
 CRUGOS: wb action 4 menu window 1 item 2
 CRUGOS: wb selftest ok (0 drag(s), 4 action(s))
-CRUGOS: phase 6i boot ok
+CRUGOS: phase 6j boot ok
 ```
 
 The shell gate is a third boot: it adds `CRUGOS: wb shell ready (window 2,
@@ -733,7 +823,7 @@ CRUGOS: wb menu 'Workbench' item 1 highlighted ('Info')
 CRUGOS: wb menu 'Workbench' selected ('Info')
 CRUGOS: wb action 2 menu window 1 item 1
 CRUGOS: wb selftest ok (0 drag(s), 2 action(s))
-CRUGOS: phase 6i boot ok
+CRUGOS: phase 6j boot ok
 ```
 
 The desktop gate is a fifth boot: it selects the `System:` object, opens its
@@ -751,7 +841,7 @@ CRUGOS: wb window 3 sent to back
 CRUGOS: wb action 3 depth window 3
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb selftest ok (0 drag(s), 3 action(s))
-CRUGOS: phase 6i boot ok
+CRUGOS: phase 6j boot ok
 ```
 
 The icon gate is a sixth boot: it focuses the `System:` object from the
@@ -775,7 +865,7 @@ CRUGOS: wb window 1 sent to front
 CRUGOS: wb action 5 front window 1
 CRUGOS: wb icons selftest ok (1 move(s), 1 front(s))
 CRUGOS: wb selftest ok (0 drag(s), 5 action(s))
-CRUGOS: phase 6i boot ok
+CRUGOS: phase 6j boot ok
 ```
 
 The drawer gate is a seventh boot, the only one that fills the volume first:
@@ -801,7 +891,7 @@ CRUGOS: wb drawer refreshed (29 entries)
 CRUGOS: wb selftest ok (0 drag(s), 0 action(s))
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb drawer selftest ok (3 scroll(s), 1 refresh(es))
-CRUGOS: phase 6i boot ok
+CRUGOS: phase 6j boot ok
 ```
 
 The select gate is an eighth boot: same filled drawer, but the pointer now
@@ -824,7 +914,7 @@ CRUGOS: wb drawer scrollbar to (top 18 of 29)
 CRUGOS: wb drawer selected '<name>' (index 18 of 29)
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb select selftest ok (2 select(s), 1 scrollbar drag(s))
-CRUGOS: phase 6i boot ok
+CRUGOS: phase 6j boot ok
 ```
 
 The screens gate is a ninth boot: two screens, a switch and a move between them:
@@ -839,7 +929,23 @@ CRUGOS: wb action 3 screen-move window 3 to 0
 CRUGOS: wb screen 0 front (3 window(s))
 CRUGOS: wb action 4 screen 0 front
 CRUGOS: wb screens selftest ok (2 switch(es), 1 move(s))
-CRUGOS: phase 6i boot ok
+CRUGOS: phase 6j boot ok
+```
+
+The commodities gate is a tenth boot: four registered utilities, a manager
+window whose rows toggle them, and the F4/F6 hotkeys:
+
+```
+CRUGOS: wb desktop ready (1024x768, 2 window(s))
+CRUGOS: wb cx ready (4 commodity(ies))
+CRUGOS: wb action 1 commodity Mute off
+CRUGOS: wb commodity Mute blocked (hotkey off)
+CRUGOS: wb action 2 commodity Mute on
+CRUGOS: wb action 3 commodity Mute fired (muted)
+CRUGOS: wb action 4 commodity Clock fired (uptime 1 s)
+CRUGOS: wb cx selftest ok (2 toggle(s), 2 fire(s))
+CRUGOS: wb selftest ok (0 drag(s), 4 action(s))
+CRUGOS: phase 6j boot ok
 ```
 
 | marker | when |
@@ -872,6 +978,12 @@ CRUGOS: phase 6i boot ok
 | `CRUGOS: wb action N screen N front` | a strip switch counted one action |
 | `CRUGOS: wb action N screen-move window W to S` | a screen move counted one action |
 | `CRUGOS: wb screens selftest ok (N switch(es), M move(s))` | screens mode saw its switches and moves |
+| `CRUGOS: wb cx ready (N commodity(ies))` | `wb.cx=1` registered the four commodity utilities |
+| `CRUGOS: wb action N commodity '<name>' on\|off` | a manager row click toggled a commodity |
+| `CRUGOS: wb commodity '<name>' blocked (hotkey off)` | a disabled commodity's key was pressed and refused |
+| `CRUGOS: wb action N commodity '<name>' fired (...)` | an enabled commodity's key ran its action |
+| `CRUGOS: wb cx selftest ok (N toggle(s), M fire(s))` | the exchange self-test saw its toggles and fires |
+| `CRUGOS: wb cx timeout (N/M)` | the wait expired with toggles or fires missing |
 | `CRUGOS: wb window N sent to back` | the depth gadget was pressed |
 | `CRUGOS: wb icons ready (N object(s), keyboard focus)` | `wb.ikeys=1` installed icon focus mode |
 | `CRUGOS: wb icon '<label>' focused` | Tab, an arrow or Enter moved the icon selection |
@@ -1044,7 +1156,8 @@ there is no keyboard text entry, only focus, movement and menu selection.
 ## Host tests
 
 `make test-host` links the real `kernel/gfx/intuition.c`,
-`kernel/lib/textgrid.c` and `kernel/shell/shell.c` and reports 7961 checks.
+`kernel/gfx/commodities.c`, `kernel/lib/textgrid.c` and
+`kernel/shell/shell.c` and reports 8102 checks.
 `tests/host/test_intuition.c` replaces the framebuffer primitives with counting
 stubs and the cursor accessors with a settable fake (`test_fb_fake_reset()` /
 `test_fb_cursor_set()` from `tests/host/test_gfx.c`), then checks:
@@ -1130,6 +1243,11 @@ stubs and the cursor accessors with a settable fake (`test_fb_fake_reset()` /
 - the shell: help/ver/echo/ls/cat/write/sync/mem/uptime/ps, unknown and empty
   lines, the 79-character overflow, Ctrl-U, Ctrl-C, the eight-entry
   Ctrl-P/Ctrl-N history and the fold of extra arguments into the last one.
+- the commodity registry: registration limits (NULL, empty and 16-byte
+  names, a hotkey outside F1..F12, duplicate names and hotkeys), the toggle and
+  the enabled count, a disabled commodity's key refused with `blocked` rising
+  and no action, an enabled one running with `fires` rising, the row hit test
+  below the header and past the last row, and the key names.
 
 ## Gate
 
@@ -1167,7 +1285,7 @@ anything else. The script then:
    `ok: workbench title-bar drag (N drag(s), window 2 at (x, y), exit 33)`.
 
 `make test-workbench` then runs `scripts/boot-check.py` with `EXPECT_WB=yes`
-(the phase 6i boot marker, the desktop marker, a `wb selftest ok`, at least one
+(the phase 6j boot marker, the desktop marker, a `wb selftest ok`, at least one
 `wb window N opened`, one `wb window N moved to`, and one `wb cursor at` with
 numeric coordinates) and `scripts/check-disk.py` for the ext4 root.
 
@@ -1202,7 +1320,7 @@ larger relative motion into several 8-bit HID reports and the guest drops some
 of them, so a single jump of 644 pixels landed 136 pixels short when the gate
 was first written.
 
-`boot-check.py` then runs with `EXPECT_MENU=yes`, which requires the phase 6i
+`boot-check.py` then runs with `EXPECT_MENU=yes`, which requires the phase 6j
 marker, the desktop marker, the menu open and selected markers, the gadget
 click marker, the close marker, at least one `wb action N ...` line and a
 `wb selftest ok (N drag(s), M action(s))` with at least one action, and
@@ -1248,7 +1366,7 @@ wb.acts=$(WB_KEYS_ACTS)`:
    and Enter to select it, requiring the highlight marker, the selection marker
    and `wb action 2 menu window 1 item 1`.
 5. waits for exit status 33, then runs `scripts/boot-check.py` with
-   `EXPECT_KEYS=yes` (the phase 6i marker, the desktop and keys markers, the
+   `EXPECT_KEYS=yes` (the phase 6j marker, the desktop and keys markers, the
    resize and key-move markers, the menu markers and a two-action
    `wb selftest ok`) and `scripts/check-disk.py`, and prints
    `ok: workbench resize and keyboard navigation (exit 33)`.
@@ -1280,7 +1398,7 @@ wb.acts=$(WB_DESK_ACTS)`:
    back: the drawer title bar turns idle grey `(128,128,128)` and the Shell
    title bar behind it becomes amber at the same point.
 6. waits for exit status 33, then runs `scripts/boot-check.py` with
-   `EXPECT_DESK=yes` (the phase 6i marker, the desktop and icon markers, the
+   `EXPECT_DESK=yes` (the phase 6j marker, the desktop and icon markers, the
    drawer marker, the icon and depth action lines, the desk self-test line and
    a three-action `wb selftest ok`) and `scripts/check-disk.py`, and prints
    `ok: workbench desktop objects and depth (exit 33)`.
@@ -1307,7 +1425,7 @@ wb.ikeys=1 wb.acts=$(WB_ICONS_ACTS)`:
 5. presses the front gadget at (394,102): the same title bar turns amber
    `(255,176,0)` again and the log carries
    `CRUGOS: wb window 1 sent to front`.
-6. waits for exit status 33, then `scripts/boot-check.py` requires the phase 6i
+6. waits for exit status 33, then `scripts/boot-check.py` requires the phase 6j
    marker, the icons-ready, focus, drag, drop, front and action markers, the
    icon self-test line and `EXPECT_ICONS=yes` (its ok line reads `desk no icons
    yes storage disk`), and `scripts/check-disk.py` still runs a clean `e2fsck`.
@@ -1415,6 +1533,40 @@ Its knobs are `WB_SCREEN_WAIT` (30), `WB_SCREEN_ACTS` (4) and
 `WB_SCREEN_RUN_TIMEOUT_SEC` (240), plus the shared `WB_QEMU_EXTRA`; see
 [build.md](build.md).
 
+### Commodities gate
+
+`make test-workbench-cx` is gate 55 and drives
+`scripts/run-workbench-cx.py` on the same machine setup (an `xhci` controller,
+`usb=off,i8042=off`, a hot-plugged `usb-mouse` and a hot-plugged `usb-kbd`)
+through six steps:
+
+1. boots with `wb.enable=1 wb.wait=$(WB_CX_WAIT) wb.cx=1 wb.acts=$(WB_CX_ACTS)`
+   and requires `CRUGOS: wb cx ready (4 commodity(ies))` before anything is
+   clicked.
+2. hot-plugs `mouse0` and `kbd0` on `xhci.0`, reads the starting cursor from
+   `CRUGOS: gfx ready` and moves the pointer to the `Mute` row of the manager
+   (the window is at (560,120) and its body starts at (562,142), so row 2
+   centres on (600,235)).
+3. clicks the row and requires `CRUGOS: wb action 1 commodity Mute off`, then
+   presses F4 and requires `CRUGOS: wb commodity Mute blocked (hotkey off)`:
+   a disabled commodity must not run.
+4. clicks the same row again (`CRUGOS: wb action 2 commodity Mute on`), presses
+   F4 for `CRUGOS: wb action 3 commodity Mute fired (muted)` and F6 for
+   `CRUGOS: wb action 4 commodity Clock fired (uptime ...)`.
+5. takes a `screendump` and requires the Exchange body at (700,250) to be
+   (8,16,24) and its active title bar at (600,130) to be (255,176,0).
+6. waits for `CRUGOS: wb cx selftest ok (2 toggle(s), 2 fire(s))`, guest exit
+   status 33 and the line
+   `ok: workbench commodities exchange (exit 33)`, then runs
+   `scripts/boot-check.py --expect-cx=yes` (a flag, not a positional argument,
+   so the argument order and the argc range are unchanged; its ok line reads
+   `cx yes`) and `scripts/check-disk.py`.
+
+Its knobs are `WB_CX_WAIT` (30), `WB_CX_ACTS` (4) and
+`WB_CX_RUN_TIMEOUT_SEC` (240), plus the shared `WB_QEMU_EXTRA`; the script
+refuses any `--acts` other than 4 because its sequence performs exactly four
+actions. See [build.md](build.md).
+
 ## Interactive demo
 
 `make demo` boots the same desktop in a real QEMU window instead of a headless
@@ -1441,6 +1593,12 @@ guest prints `CRUGOS: wb hold finished`, exits with status 33 and leaves
   Workbench process: a crash or a block in the Workbench takes down or stalls
   every screen, and per-screen processes are future work. Icons are per screen
   but, like windows, they live in global tables.
+- Four commodities at most in a fixed table, with no persistence across
+  boots: the registry is rebuilt every boot and a commodity stays enabled until
+  a row click disables it. Hotkeys are global to the desktop rather than per
+  window, the exchange exists only while the Workbench runs, the four built-in
+  actions are fixed (no plugin loading), and there is no way to add, remove or
+  rename a commodity from the desktop. The exchange is off unless `wb.cx=1`.
 - Four windows, two menus of six items, four gadgets and eight desktop objects,
   one open popup at a time. No sub-menus and no clipboard; a menu selection,
   gadget click, close, resize, icon press, icon move, depth press or front

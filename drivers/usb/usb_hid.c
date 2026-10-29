@@ -201,6 +201,11 @@ static int hid_map_usage(u8 usage)
             code = (u8)INPUT_KEY_RIGHT;
             break;
         default:
+            /* Function keys: HID usage 0x3A..0x45 is F1..F12. */
+            if (usage >= 0x3Au && usage <= 0x45u) {
+                code = (u8)(INPUT_KEY_F1 + (u8)(usage - 0x3Au));
+                break;
+            }
             return 0;
         }
     }
