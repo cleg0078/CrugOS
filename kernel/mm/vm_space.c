@@ -12,6 +12,7 @@
  */
 #include <crug/vm.h>
 #include <crug/mm.h>
+#include <crug/cow.h>
 #include <crug/string.h>
 #include <crug/kernel.h>
 
@@ -105,6 +106,25 @@ static u64 *space_find_pte(const vm_space *s, u64 va)
     return &pt[vm_pt_index(va)];
 }
 
+/* Map an existing frame at VA inside S (phase U6): the fork shares the
+   parent's frames rather than allocating new ones. */
+static int space_map_shared(vm_space *s, u64 va, u64 pa, u64 flags)
+{
+    u64 *pte;
+
+    if (!s || !s->pml4 || (va & PAGE_MASK) != 0)
+        return -1;
+    if (va < USER_BASE || va >= USER_TOP)
+        return -1;
+    pte = space_pte(s, va);
+    if (!pte || (*pte & VM_PRESENT))
+        return -1;
+    *pte = (pa & VM_ADDR_MASK) |
+           ((flags | VM_USER) & ~VM_GLOBAL & VM_PTE_FLAG_MASK);
+    s->user_pages++;
+    return 0;
+}
+
 int vm_space_create(vm_space *s)
 {
     u64 *root;
@@ -155,7 +175,11 @@ void vm_space_destroy(vm_space *s)
                 for (k = 0; k < 512; k++) {
                     u64 e3 = pt[k];
 
-                    if (e3 & VM_PRESENT)
+                    if (!(e3 & VM_PRESENT))
+                        continue;
+                    /* A frame shared with a forked child survives until its
+                       last owner goes away (phase U6). */
+                    if (cow_release(e3 & VM_ADDR_MASK))
                         pmm_free_page(e3 & VM_ADDR_MASK);
                 }
                 space_free_table(pt);
@@ -220,13 +244,14 @@ void vm_space_unmap_user_pages(vm_space *s, u64 va, u64 pages)
             continue;
         pa = *pte & VM_ADDR_MASK;
         *pte = 0;
-        pmm_free_page(pa);
+        if (cow_release(pa))
+            pmm_free_page(pa);
         if (s->user_pages != 0)
             s->user_pages--;
     }
 }
 
-int vm_space_clone(vm_space *dst, const vm_space *src)
+int vm_space_clone(vm_space *dst, vm_space *src)
 {
     u64 *pdpt;
     u64 *pd;
@@ -269,24 +294,38 @@ int vm_space_clone(vm_space *dst, const vm_space *src)
             for (k = 0; k < 512; k++) {
                 u64 e3 = pt[k];
                 u64 va;
-                u64 dst_pa;
+                u64 pa;
+                u64 flags;
+                int writable;
+                int shared;
 
                 if (!(e3 & VM_PRESENT))
                     continue;
                 va = ((u64)SPACE_SLOT << 39) | (i << 30) | (j << 21) | (k << 12);
-                /* Keep only the protection bits a user leaf may carry; the
-                   allocator gives DST its own frame. */
-                /* Keep PRESENT: vm_space_map_user_pages() only ORs in the
-                   protection bits the caller passes and VM_USER, so a
-                   PRESENT-less flag word would map an invisible leaf. */
-                if (vm_space_map_user_pages(dst, va, 1,
-                                            e3 & (VM_PRESENT | VM_WRITE | VM_NX)) != 0)
+                pa = e3 & VM_ADDR_MASK;
+                writable = (e3 & VM_WRITE) != 0;
+                shared = (e3 & VM_COW) != 0;
+                /* Phase U6: the child keeps the parent's frame, mapped
+                   read-only. A writable leaf takes VM_COW on both sides, and
+                   so does a leaf that a previous fork already shared (a
+                   nested fork may not hand out a read-only non-COW leaf: the
+                   first store would be a fatal user fault instead of a
+                   copy). Text pages stay plain read-only shares. */
+                flags = e3 & (VM_PRESENT | VM_USER | VM_NX | VM_PWT | VM_PCD);
+                if (writable || shared)
+                    flags |= VM_COW;
+                if (cow_share(pa) != 0)
                     goto fail;
-                dst_pa = vm_space_translate(dst, va);
-                if (dst_pa == 0)
+                if (space_map_shared(dst, va, pa, flags) != 0) {
+                    (void)cow_release(pa);
                     goto fail;
-                memcpy(pmm_phys_to_virt(dst_pa),
-                       pmm_phys_to_virt(e3 & VM_ADDR_MASK), CRUG_PAGE_SIZE);
+                }
+                if (writable) {
+                    /* Write-protect the parent: its next store faults and
+                       takes a copy, so the frame is never writable on both
+                       sides. */
+                    pt[k] = (e3 & ~VM_WRITE) | VM_COW;
+                }
             }
         }
     }
@@ -308,4 +347,42 @@ u64 vm_space_translate(const vm_space *s, u64 va)
     if (!pte || !(*pte & VM_PRESENT))
         return 0;
     return (*pte & VM_ADDR_MASK) + (va & PAGE_MASK);
+}
+
+int vm_space_cow_fault(vm_space *s, u64 va)
+{
+    u64 *pte;
+    u64 e;
+    u64 pa;
+    u64 flags;
+    u64 fresh;
+    u32 refs;
+
+    if (!s || !s->pml4)
+        return 0;
+    pte = space_find_pte(s, va);
+    if (!pte)
+        return 0;
+    e = *pte;
+    if (!(e & VM_PRESENT) || !(e & VM_COW))
+        return 0;
+    pa = e & VM_ADDR_MASK;
+    flags = e & (VM_PRESENT | VM_USER | VM_NX | VM_PWT | VM_PCD);
+    refs = cow_refs(pa);
+    if (refs <= 1u) {
+        /* Nobody else maps the frame any more (the child exited, or the
+           fork failed): give the leaf its write bit back rather than copy
+           a page that would stay identical. */
+        (void)cow_release(pa);
+        *pte = pa | flags | VM_WRITE;
+        return 2;
+    }
+    fresh = pmm_alloc_page();
+    if (fresh == 0)
+        return -1;
+    memcpy(pmm_phys_to_virt(fresh), pmm_phys_to_virt(pa), CRUG_PAGE_SIZE);
+    *pte = fresh | flags | VM_WRITE;
+    if (cow_release(pa))
+        pmm_free_page(pa);
+    return 1;
 }

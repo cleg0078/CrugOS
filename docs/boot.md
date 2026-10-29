@@ -60,10 +60,12 @@ kernel self-test, phase U2's `user.test=2` also runs the two-instance
 isolation pair, phase U3's `user.test=3` adds the scripted ring-3 shell
 (`/bin/sh` reading `/etc/sh.rc`), phase U4's `user.test=4` adds
 `/bin/spawn`, which spawns `/bin/child`, waits for its exit code and then
-execs the same child in place, and phase U5's `user.test=5` adds `/bin/fork`,
-which copies the calling program into a second address space so the child can
-write its own pages without the parent seeing the write. Without the token the
-user level is 0 and the self-test is silent. A boot
+execs the same child in place, phase U5's `user.test=5` adds `/bin/fork`, which
+copies the calling program into a second address space so the child can write
+its own pages without the parent seeing the write, and phase U6's
+`user.test=6` adds `/bin/forkbig`, which forks 300 shared pages and proves the
+child's writes never reach the parent's copy. Without the token the user level
+is 0 and the self-test is silent. A boot
 medium that ships no block device (the hybrid
 ISO) passes `storage=none`, which is the one token that changes the storage
 contract instead of adding work to it. The
@@ -269,11 +271,15 @@ post-snapshot allocations cannot push it over capacity.
     `/bin/fork`, joins it and requires exit 0; the fork program copies itself
     with `SYS_FORK`, the child overwrites a word the parent had set to `0x1111`
     and exits 3, and the parent must still read its own `0x1111` after the wait.
-    A mismatch exits 35 before the report. Without the token the user
-    level is 0 and nothing is printed.
+    `user.test=6` runs level 5 and then `user_forkbig()`, which runs
+    `/bin/forkbig`, joins it and requires exit 0; the program maps 300 pages,
+    forks them copy-on-write, has the child write both ends and exit 7, and then
+    checks that its own sentinel and trailing byte survived. A mismatch exits 35
+    before the report. Without the token the user level is 0 and nothing is
+    printed.
 14. The user self-test of step 13, when it ran, has already joined its threads;
     then `report_boot`, `storage_lock` (wipes the passphrase, the volume keys
-    and the bounce buffer), `CRUGOS: phase u5 boot ok`, then
+    and the bounce buffer), `CRUGOS: phase u6 boot ok`, then
     `wb_hold` (only when
     `wb.hold=` was given: the guest stays alive with the desktop on screen until
     the deadline), `trap_test_run()` (only when `trap.test=` was given, so the
@@ -542,7 +548,7 @@ CRUGOS: wb window 1 sent to front
 CRUGOS: wb action 6 front window 1
 CRUGOS: wb icons selftest ok (1 move(s), 1 front(s))
 CRUGOS: sh run 'ver'
-CRUGOS: sh out CrugOS 0.39.0 (phase u5), x86_64
+CRUGOS: sh out CrugOS 0.40.0 (phase u6), x86_64
 CRUGOS: wb selftest ok (1 drag(s), 1 action(s))
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb drawer selftest ok (3 scroll(s), 1 refresh(es))
@@ -582,12 +588,12 @@ CRUGOS: sh cmd exit
 CRUGOS: sh exit 7
 CRUGOS: user shell finished (exit 7)
 CRUGOS: user selftest ok (3 program(s), 1 fault(s))
-boot   : pmm=27755 us cpu=397 us vm=663 us traps=321 us timer=65329 us heap=477 us storage=95269 us sched=373 us syscall=129 us total=190716 us
-CRUGOS: phase u5 boot ok
+boot   : pmm=27755 us cpu=397 us vm=663 us traps=321 us timer=65329 us heap=477 us storage=95269 us sched=373 us syscall=129 us total=189132 us
+CRUGOS: phase u6 boot ok
 ```
 
 With `trap.test=<recipe>` the same boot ends differently: the injector runs after
-`CRUGOS: phase u5 boot ok`, injects exactly one fault and the guest exits 35
+`CRUGOS: phase u6 boot ok`, injects exactly one fault and the guest exits 35
 instead of 33. A `trap.test=de` boot ends:
 
 ```
@@ -621,9 +627,9 @@ three plus the two-instance isolation pair, whose five lines sit between the
 fault program and the summary, and `user.test=3` then runs `/bin/sh` on
 `/etc/sh.rc`, whose shell lines sit between the isolation summary and the
 `user selftest ok` line; `user.test=4` continues after the shell with
-`/bin/spawn`, whose lines are shown below, and `user.test=5` then runs
-`/bin/fork`, whose lines follow the spawn stage. A `make test-user3` boot
-ends:
+`/bin/spawn`, whose lines are shown below, `user.test=5` then runs
+`/bin/fork`, whose lines follow the spawn stage, and `user.test=6` adds the
+large-fork probe `/bin/forkbig`. A `make test-user3` boot ends:
 
 ```
 CRUGOS: user selftest start
@@ -659,8 +665,8 @@ CRUGOS: sh cmd exit
 CRUGOS: sh exit 7
 CRUGOS: user shell finished (exit 7)
 CRUGOS: user selftest ok (3 program(s), 1 fault(s))
-boot   : pmm=27755 us cpu=397 us vm=663 us traps=321 us timer=65329 us heap=477 us storage=95269 us sched=373 us syscall=129 us total=190716 us
-CRUGOS: phase u5 boot ok
+boot   : pmm=27755 us cpu=397 us vm=663 us traps=321 us timer=65329 us heap=477 us storage=95269 us sched=373 us syscall=129 us total=189132 us
+CRUGOS: phase u6 boot ok
 ```
 
 Both user excerpts keep the lines the check asserts; a real boot also prints the
@@ -697,20 +703,45 @@ between `user spawn test ok` and `user selftest ok`:
 ```
 CRUGOS: user fork test start
 CRUGOS: user fork start
-CRUGOS: user fork tid 16 -> 17 (6 page(s))
+CRUGOS: user fork tid 16 -> 17 (7 page(s) shared, COW)
+CRUGOS: user cow fault tid 16 va=0x000000803fffffc8 (copy)
+CRUGOS: user cow fault tid 17 va=0x0000008000011000 (copy)
 CRUGOS: user fork tid 17
 CRUGOS: user fork child word 8738
 CRUGOS: user fork reap exit 3
+CRUGOS: user cow fault tid 16 va=0x0000008000011000 (sole owner)
 CRUGOS: user fork parent word 4369
-CRUGOS: user fork ok (child exit 3, memory isolated)
+CRUGOS: user fork parent write 17476
+CRUGOS: user fork ok (child exit 3, memory isolated, 2 COW page(s))
 CRUGOS: user fork test ok (child exit 3, memory isolated)
 ```
 
-The parent (tid 16) forks, the child (tid 17) reports how many pages the clone
-copied, writes `0x2222` (8738) into the word the parent had set to `0x1111`
-and exits 3, the parent reaps it, and its own word still reads `0x1111`
-(4369) - the last two lines are printed by `/bin/fork` and by the kernel
-self-test respectively, and both require the isolated read.
+The parent (tid 16) forks, the clone shares seven pages and marks them
+copy-on-write, the child (tid 17) reports the shared count and the copy it takes
+when it writes `0x2222` (8738) into the word the parent had set to `0x1111`,
+and the parent reaps it and still reads `0x1111` (4369) from its own copy. The
+parent's own store then takes the sole-owner path because the child is gone, so
+the `(sole owner)` fault flushes without copying, and `user fork parent write
+17476` proves the write landed. The last two lines are printed by `/bin/fork`
+and by the kernel self-test respectively, and both require the isolated read.
+
+`make test-user6` adds the large-fork stage after the fork stage, and its lines
+sit between `user fork test ok` and `user selftest ok`:
+
+```
+CRUGOS: user forkbig start
+CRUGOS: user forkbig tid 16
+CRUGOS: user forkbig child tid 17
+CRUGOS: user cow fault tid 17 va=0x... (copy)
+CRUGOS: user forkbig reap exit 7
+CRUGOS: user forkbig ok (child exit 7, 300 page(s) isolated)
+```
+
+`/bin/forkbig` maps 300 pages of `.bss` (1.2 MiB), plants `0xA5` in the first
+byte, forks, and the child writes `0x5A` to the first and last byte and exits 7.
+The parent reaps exit 7 and checks that its sentinel survived and that its last
+byte is still 0, which only holds if every one of the 300 pages was shared
+copy-on-write instead of aliased. The fault address varies by run.
 
 `/bin/hello` writes one line through `SYS_WRITE` and exits 0. `/bin/badptr`
 passes an address above `USER_TOP`, gets `SYS_EFAULT` and still exits 0, which
@@ -729,18 +760,25 @@ bytes after a clean umount. `/bin/spawn` is the process proof: it starts
 `/bin/child` with `from-spawn`, prints the new tid, waits for its exit code
 through `SYS_WAIT` and then execs the same program with `from-exec`, so one
 thread id appears before and after the image swap. `/bin/fork` is the memory
-proof: it calls `SYS_FORK`, the child overwrites a word the parent had set to
-`0x1111` and exits 3, and the parent's own word must still read `0x1111` after
-the wait, which only holds if the clone copied the pages instead of aliasing
-them. No other gate may print a `CRUGOS: user` line: `scripts/boot-check.py`
-takes the user expectation as `EXPECT_USER` (argv[27]), the isolation
+proof: it calls `SYS_FORK`, which shares the parent's writable pages with the
+child copy-on-write, the child overwrites a word the parent had set to `0x1111`
+and exits 3, and the parent's own word must still read `0x1111` after the wait,
+which only holds if the child's store copied its frame instead of aliasing the
+parent's. `/bin/forkbig` is the large-fork proof: it maps 300 pages, forks
+them, lets the child dirty both ends and exits 7, and checks that its own
+sentinel and trailing byte survived. No other gate may print a `CRUGOS: user`
+line: `scripts/boot-check.py` takes the user expectation as `EXPECT_USER`
+(argv[27]), the isolation
 expectation as `EXPECT_USERS` (argv[28]), the shell expectation as
 `EXPECT_USHELL` (argv[29]), the spawn expectation as `EXPECT_SPAWN`
-(argv[30]) and the fork expectation as `EXPECT_FORK` (argv[31]), so the plain
-boot markers above stay the contract for every gate except `make test-user`
-(gate 48), `make test-user2` (gate 49), `make test-user3` (gate 50),
-`make test-user4` (gate 51) and `make test-user5` (gate 52; see
-[userspace.md](userspace.md)).
+(argv[30]), the fork expectation as `EXPECT_FORK` (argv[31]) and the large-fork
+expectation as `EXPECT_FORKBIG` (argv[32]), so the plain boot markers above stay
+the contract for every gate except `make test-user` (gate 48),
+`make test-user2` (gate 49), `make test-user3` (gate 50),
+`make test-user4` (gate 51), `make test-user5` (gate 52) and
+`make test-user6` (gate 53). Phase U6 widened the argument guard to
+`if len(sys.argv) < 3 or len(sys.argv) > 33:` so argv[32] fits; see
+[userspace.md](userspace.md).
 
 The `virtio : net eth0 mac ...` line, the lease, the ARP resolution, the echo
 reply and `net selftest ok` appear only when a NIC is present and the network
@@ -828,14 +866,14 @@ replaced by the skip marker, and the USB device the firmware booted from shows
 up in the USB lines as an unsupported mass-storage function:
 
 ```
-CRUGOS: version 0.39.0
+CRUGOS: version 0.40.0
 CRUGOS: usb controller ready (xhci, 8 port(s))
 CRUGOS: usb device 46f4:0001 on port 1 (speed 4)
 CRUGOS: usb device class 8 on port 1 (unsupported)
 CRUGOS: storage skipped (storage=none)
 CRUGOS: heap check ok (6 slab(s), 8 object(s), 1 large block(s))
 CRUGOS: selftest ok
-CRUGOS: phase u5 boot ok
+CRUGOS: phase u6 boot ok
 ```
 
 `kernel/core/report.c` prints the machine description between them: kernel
@@ -870,10 +908,14 @@ reading the byte queue. See [input.md](input.md) for the scancode decoder and
   isolation between user programs, not against the kernel: slot 0 is still
   shared. Phase U3 adds file descriptors and an exec-time `argv` block, phase U4
   adds spawn, wait and in-place exec, and phase U5 adds `SYS_FORK`, which copies
-  the calling user window into a new address space up to 256 pages. The copy is
-  eager (there is no copy-on-write), the child inherits memory only (its
-  descriptor table starts empty, so it inherits no open file), and a program
-  with more than the cap is refused rather than cloned. There is still no
+  the calling user window into a new address space. Phase U6 makes that copy
+  lazy: writable leaves are shared with `VM_COW` and copied on the first store
+  on either side, read-only text leaves are shared plainly (still tracked in the
+  reference table, so the last space to drop one frees it), and the cap rises to
+  4096 pages. A fork whose shared frames would overflow the fixed 4096-slot
+  reference table fails with `ENOMEM` instead of falling back to an eager copy,
+  and the child inherits memory only (its descriptor table starts empty, so it
+  inherits no open file). There is still no
   environment, no pipes or seek, no wait-any or signals, and descriptors are per
   thread; there is still no `SYSCALL` MSR gateway, `int 0x80` reaches the same
   dispatcher.

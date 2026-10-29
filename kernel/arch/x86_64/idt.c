@@ -4,6 +4,7 @@
 #include <crug/timer.h>
 #include <crug/syscall.h>
 #include <crug/thread.h>
+#include <crug/vm.h>
 
 typedef struct idt_entry {
     u16 offset_low;
@@ -119,6 +120,26 @@ void trap_dispatch(trap_frame *frame)
         g_int3_seen = 1;
         kprintf("trap   : breakpoint handled at rip=%p\n", (void *)(uintptr)frame->rip);
         return;
+    }
+    /* A copy-on-write store from ring 3 (phase U6): the page is present but
+       mapped read-only because a forked sibling shares the frame. Resolve it
+       here, before the kill path below, and resume the interrupted store. */
+    if (v == 14 && (frame->error & 0x3ull) == 0x3ull &&
+        trap_classify(v, frame->cs) == TRAP_USER) {
+        thread *t = sched_current();
+        u64 va = read_cr2();
+
+        if (t && t->space) {
+            int cow = vm_space_cow_fault(t->space, va);
+
+            if (cow > 0) {
+                vm_flush_page(va & ~(CRUG_PAGE_SIZE - 1ull));
+                kprintf("CRUGOS: user cow fault tid %u va=%p (%s)\n",
+                        (unsigned)t->id, (void *)(uintptr)va,
+                        cow == 1 ? "copy" : "sole owner");
+                return;
+            }
+        }
     }
 
     trap_report(frame);

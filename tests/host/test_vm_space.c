@@ -11,6 +11,7 @@
  */
 #include <crug/vm.h>
 #include <crug/mm.h>
+#include <crug/cow.h>
 #include <crug/string.h>
 #include "test.h"
 
@@ -250,32 +251,36 @@ void test_vm_space_oom(void)
     CHECK(after == before);
 }
 
-/* Phase U5: vm_space_clone() copies a parent's user pages into a brand new
- * address space. The tests here pin the contract the SYS_FORK path relies on:
- * a private copy of every page, identical permissions, a fresh slot-0
- * inheritance, a clean refusal for bad input and for a space past the clone
- * cap, and no leaked frame in any failure path. */
+/* Phase U5/U6: vm_space_clone() forks a parent's user pages into a brand new
+ * address space by sharing the frames read-only (copy-on-write). The tests here
+ * pin the contract the SYS_FORK and user #PF paths rely on: both spaces reach
+ * the same frames, writable leaves come back read-only and tagged VM_COW with a
+ * reference count of two, text leaves keep their permissions untouched, a clean
+ * refusal for bad input and for a space past the fork cap, and no leaked frame
+ * in any failure path. */
 void test_vm_space_clone(void)
 {
     vm_space src;
     vm_space dst;
     vm_space bad;
-    vm_space big;
-    vm_space src2;
+    vm_space over;
     u64 *kroot;
     u64 *pte;
     u64 before;
     u64 after;
     u64 pa;
     u64 pb;
+    u64 pc;
     u8 *p;
     u8 *q;
 
     memset(&src, 0, sizeof(src));
     memset(&dst, 0, sizeof(dst));
     memset(&bad, 0, sizeof(bad));
-    memset(&big, 0, sizeof(big));
-    memset(&src2, 0, sizeof(src2));
+    memset(&over, 0, sizeof(over));
+    /* The table is process-global; start from a clean slate so a count left
+     * behind by an earlier failure cannot mask a leak here. */
+    cow_reset();
 
     kroot = make_kernel_root();
     CHECK(kroot != 0);
@@ -301,7 +306,7 @@ void test_vm_space_clone(void)
     q[16] = 0x3cu;
     q[SPACE_PAGE - 1] = 0xc3u;
 
-    /* The clone succeeds and reports the same page count. */
+    /* The fork succeeds and reports the same page count. */
     CHECK(vm_space_clone(&dst, &src) == 0);
     CHECK(dst.pml4 != 0);
     CHECK(src.pml4 != 0);
@@ -311,19 +316,33 @@ void test_vm_space_clone(void)
     CHECK(dst.pml4[0] == kroot[0]);
     CHECK((dst.pml4[0] & VM_USER) == 0);
 
-    /* Every virtual address maps to a different frame holding the same bytes;
-     * a shallow copy would alias the parent's frame here. */
-    CHECK(vm_space_translate(&dst, USER_BASE) != 0);
-    CHECK(vm_space_translate(&dst, USER_BASE) != pa);
-    p = (u8 *)pmm_phys_to_virt(vm_space_translate(&dst, USER_BASE));
-    q = (u8 *)pmm_phys_to_virt(vm_space_translate(&dst, USER_BASE + 2 * SPACE_PAGE));
-    CHECK(p[0] == 0x5au);
-    CHECK(p[SPACE_PAGE - 1] == 0xa5u);
-    CHECK(q[16] == 0x3cu);
-    CHECK(q[SPACE_PAGE - 1] == 0xc3u);
+    /* Copy-on-write shares the frames instead of copying them: a shallow copy
+     * without the VM_COW tag would leave the child writing into its parent. */
+    CHECK(vm_space_translate(&dst, USER_BASE) == pa);
+    CHECK(vm_space_translate(&dst, USER_BASE + 2 * SPACE_PAGE) == pb);
+    CHECK(cow_refs(pa) == 2);
+    CHECK(cow_refs(pb) == 2);
+    CHECK(cow_tracked() == 2);
+
+    /* The parent's writable leaf lost VM_WRITE and gained VM_COW, so its next
+     * store faults into the copy path. */
+    pte = leaf_pte(&src, USER_BASE + 2 * SPACE_PAGE);
+    CHECK(pte != 0);
+    if (pte) {
+        CHECK((*pte & VM_PRESENT) != 0);
+        CHECK((*pte & VM_WRITE) == 0);
+        CHECK((*pte & VM_COW) != 0);
+    }
+    /* Text was already read-only, so it is shared without a COW tag. */
+    pte = leaf_pte(&src, USER_BASE);
+    CHECK(pte != 0);
+    if (pte) {
+        CHECK((*pte & VM_WRITE) == 0);
+        CHECK((*pte & VM_COW) == 0);
+    }
 
     /* Permissions travel with the pages: text stays read only and executable,
-     * data stays writable and non-executable, nothing is global. */
+     * data comes back read only and non-executable with the COW tag. */
     pte = leaf_pte(&dst, USER_BASE);
     CHECK(pte != 0);
     if (pte) {
@@ -332,26 +351,93 @@ void test_vm_space_clone(void)
         CHECK((*pte & VM_GLOBAL) == 0);
         CHECK((*pte & VM_WRITE) == 0);
         CHECK((*pte & VM_NX) == 0);
+        CHECK((*pte & VM_COW) == 0);
     }
     pte = leaf_pte(&dst, USER_BASE + 2 * SPACE_PAGE);
     CHECK(pte != 0);
     if (pte) {
         CHECK((*pte & VM_USER) != 0);
         CHECK((*pte & VM_GLOBAL) == 0);
-        CHECK((*pte & VM_WRITE) != 0);
+        CHECK((*pte & VM_WRITE) == 0);
         CHECK((*pte & VM_NX) != 0);
+        CHECK((*pte & VM_COW) != 0);
     }
-    /* The hole between the two pages stays unmapped in the clone. */
+    /* The hole between the two pages stays unmapped in the child. */
     CHECK(vm_space_translate(&dst, USER_BASE + SPACE_PAGE) == 0);
 
-    /* A write in the parent must not show up in the child. */
-    ((u8 *)pmm_phys_to_virt(pa))[0] = 0x11u;
-    CHECK(((u8 *)pmm_phys_to_virt(vm_space_translate(&dst, USER_BASE)))[0] == 0x5au);
-    /* ... and destroying the parent leaves the child intact. */
+    /* A child store fault copies the shared data page: a fresh frame, writable,
+     * untagged, holding the parent's bytes, and the parent keeps its frame. */
+    CHECK(vm_space_cow_fault(&dst, USER_BASE + 2 * SPACE_PAGE) == 1);
+    pc = vm_space_translate(&dst, USER_BASE + 2 * SPACE_PAGE);
+    CHECK(pc != 0);
+    CHECK(pc != pb);
+    CHECK(cow_refs(pb) == 1);
+    CHECK(cow_refs(pc) == 0);
+    pte = leaf_pte(&dst, USER_BASE + 2 * SPACE_PAGE);
+    CHECK(pte != 0);
+    if (pte) {
+        CHECK((*pte & VM_WRITE) != 0);
+        CHECK((*pte & VM_COW) == 0);
+    }
+    q = (u8 *)pmm_phys_to_virt(pc);
+    CHECK(q[16] == 0x3cu);
+    CHECK(q[SPACE_PAGE - 1] == 0xc3u);
+    /* The parent's frame is untouched, and a store there no longer shows up in
+     * the child. */
+    ((u8 *)pmm_phys_to_virt(pb))[16] = 0x99u;
+    CHECK(((u8 *)pmm_phys_to_virt(pc))[16] == 0x3cu);
+
+    /* Faults that are not COW writes resolve to nothing. */
+    CHECK(vm_space_cow_fault(&dst, USER_BASE) == 0);
+    CHECK(vm_space_cow_fault(&dst, USER_BASE + SPACE_PAGE) == 0);
+    CHECK(vm_space_cow_fault(&dst, USER_BASE + 2 * SPACE_PAGE) == 0);
+    CHECK(vm_space_cow_fault(0, USER_BASE) == 0);
+
+    /* Destroying one side keeps the other's shared frames alive; the last
+     * owner frees them. */
     vm_space_destroy(&src);
-    CHECK(vm_space_translate(&dst, USER_BASE) != 0);
-    CHECK(((u8 *)pmm_phys_to_virt(vm_space_translate(&dst, USER_BASE)))[0] == 0x5au);
+    CHECK(vm_space_translate(&dst, USER_BASE) == pa);
+    CHECK(((u8 *)pmm_phys_to_virt(pa))[0] == 0x5au);
+    CHECK(cow_refs(pa) == 1);
     vm_space_destroy(&dst);
+    CHECK(cow_tracked() == 0);
+
+    /* A leaf that is the last owner is repaired in place: the fault reports 2
+     * and the address keeps its frame instead of copying it. */
+    CHECK(vm_space_create(&src) == 0);
+    CHECK(vm_space_map_user_pages(&src, USER_BASE, 1, SPACE_DATA) == 0);
+    pa = vm_space_translate(&src, USER_BASE);
+    CHECK(pa != 0);
+    CHECK(vm_space_clone(&dst, &src) == 0);
+    vm_space_destroy(&src);
+    CHECK(cow_refs(pa) == 1);
+    CHECK(vm_space_cow_fault(&dst, USER_BASE) == 2);
+    CHECK(vm_space_translate(&dst, USER_BASE) == pa);
+    pte = leaf_pte(&dst, USER_BASE);
+    CHECK(pte != 0);
+    if (pte) {
+        CHECK((*pte & VM_WRITE) != 0);
+        CHECK((*pte & VM_COW) == 0);
+    }
+    CHECK(cow_refs(pa) == 0);
+    vm_space_destroy(&dst);
+    CHECK(cow_tracked() == 0);
+
+    /* A grandchild shares the same frames, so the count chains and a fault in
+     * the grandchild still leaves the other two spaces sharing. */
+    CHECK(vm_space_create(&src) == 0);
+    CHECK(vm_space_map_user_pages(&src, USER_BASE, 1, SPACE_DATA) == 0);
+    pa = vm_space_translate(&src, USER_BASE);
+    CHECK(vm_space_clone(&dst, &src) == 0);
+    CHECK(vm_space_clone(&bad, &dst) == 0);
+    CHECK(cow_refs(pa) == 3);
+    CHECK(vm_space_cow_fault(&bad, USER_BASE) == 1);
+    CHECK(cow_refs(pa) == 2);
+    CHECK(vm_space_translate(&bad, USER_BASE) != pa);
+    vm_space_destroy(&bad);
+    vm_space_destroy(&dst);
+    vm_space_destroy(&src);
+    CHECK(cow_tracked() == 0);
 
     /* Bad arguments are refused before anything is allocated. */
     CHECK(vm_space_create(&src) == 0);
@@ -369,23 +455,88 @@ void test_vm_space_clone(void)
     CHECK(bad.user_pages == 0);
     vm_space_set_kernel_root(kroot);
 
-    /* One page is fine; the cap is VM_SPACE_FORK_MAX_PAGES. */
+    /* One page is fine; a space past VM_SPACE_FORK_MAX_PAGES is refused. The
+     * host arena is 8 MiB, too small for 4096 real frames, so the counter is
+     * driven directly: clone() must refuse before it allocates anything. */
     CHECK(vm_space_clone(&bad, &src) == 0);
     CHECK(bad.user_pages == 1);
     vm_space_destroy(&bad);
+    /* The parent still maps the frame, so the entry survives with one owner. */
+    CHECK(cow_tracked() == 1);
+    src.user_pages = (u32)VM_SPACE_FORK_MAX_PAGES + 1u;
+    CHECK(vm_space_clone(&over, &src) == -1);
+    CHECK(over.pml4 == 0);
+    CHECK(over.user_pages == 0);
+    src.user_pages = 1;
     vm_space_destroy(&src);
-
-    /* A parent past the cap is refused, and the half-built child is released. */
-    CHECK(vm_space_create(&src2) == 0);
-    CHECK(vm_space_map_user_pages(&src2, USER_BASE,
-                                  (u64)VM_SPACE_FORK_MAX_PAGES + 1ull,
-                                  SPACE_DATA) == 0);
-    CHECK(src2.user_pages == (u32)VM_SPACE_FORK_MAX_PAGES + 1u);
-    CHECK(vm_space_clone(&big, &src2) == -1);
-    CHECK(big.pml4 == 0);
-    CHECK(big.user_pages == 0);
-    vm_space_destroy(&src2);
+    CHECK(cow_tracked() == 0);
 
     after = host_pmm_free_pages_count();
     CHECK(after == before);
+}
+
+/* Phase U6: the frame reference table behind copy-on-write. Exercised directly
+ * so the accounting is pinned without a page fault: an untracked frame keeps
+ * the old free-on-release behaviour, shares chain, the last release reports
+ * ownership, unaligned addresses fold onto their frame, and a full table
+ * refuses a new share instead of losing an owner. */
+void test_vm_space_cow(void)
+{
+    u32 i;
+    int rc;
+    u64 pa;
+
+    cow_reset();
+
+    /* Untracked frames behave exactly as they did before phase U6. */
+    pa = 0x2000;
+    CHECK(cow_refs(pa) == 0);
+    CHECK(cow_release(pa) == 1);
+
+    /* A share records two owners (the space that already maps the frame plus
+     * the caller); further owners chain and each release drops one. */
+    CHECK(cow_share(pa) == 0);
+    CHECK(cow_refs(pa) == 2);
+    CHECK(cow_tracked() == 1);
+    CHECK(cow_share(pa) == 0);
+    CHECK(cow_refs(pa) == 3);
+    CHECK(cow_release(pa) == 0);
+    CHECK(cow_refs(pa) == 2);
+    CHECK(cow_release(pa) == 0);
+    CHECK(cow_refs(pa) == 1);
+    CHECK(cow_release(pa) == 1);
+    CHECK(cow_refs(pa) == 0);
+    CHECK(cow_tracked() == 0);
+
+    /* The released slot is reusable (tombstone probing). */
+    CHECK(cow_share(pa) == 0);
+    CHECK(cow_refs(pa) == 2);
+    CHECK(cow_release(pa) == 0);
+    CHECK(cow_release(pa) == 1);
+    CHECK(cow_tracked() == 0);
+
+    /* An unaligned address is folded onto its frame. */
+    CHECK(cow_share(pa + 0x123ull) == 0);
+    CHECK(cow_refs(pa) == 2);
+    CHECK(cow_release(pa) == 0);
+    CHECK(cow_release(pa) == 1);
+    CHECK(cow_tracked() == 0);
+
+    /* Frame 0 is the null address, never a real frame. */
+    CHECK(cow_share(0) == -1);
+    CHECK(cow_refs(0) == 0);
+
+    /* A full table refuses a new share rather than losing an owner. */
+    cow_reset();
+    for (i = 1; i <= COW_TABLE_SLOTS; i++) {
+        rc = cow_share((u64)i << 12);
+        CHECK(rc == 0);
+        if (rc != 0)
+            break;
+    }
+    CHECK(cow_tracked() == COW_TABLE_SLOTS);
+    CHECK(cow_share(((u64)COW_TABLE_SLOTS + 1ull) << 12) == -1);
+    CHECK(cow_tracked() == COW_TABLE_SLOTS);
+    cow_reset();
+    CHECK(cow_tracked() == 0);
 }

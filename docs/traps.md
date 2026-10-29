@@ -101,7 +101,18 @@ CRUGOS: trap fault present=no write=yes user=no reserved=no instruction=no cr2=0
 A ring-3 page fault has the same shape with `from=user`; the `user` bit in the
 error code is set, and the report is followed by the U1 kill lines instead of a
 panic. The excerpt keeps only the policy-relevant lines; the report's
-`trap rip=` and two `trap regs` lines are elided:
+`trap rip=` and two `trap regs` lines are elided. One class of user faults
+never reaches the report: since phase U6, `idt.c` checks a user page fault
+(vector 14 with the `U/S` and `W/R` error bits set that
+`trap_classify()` calls `TRAP_USER`) against the current thread's space first
+and runs `vm_space_cow_fault()`. A positive answer flushes the page with
+`vm_flush_page()`, prints
+`CRUGOS: user cow fault tid <tid> va=<va> (copy)` for a frame it copied or
+`(sole owner)` for one it merely re-wrote, and returns to CPL3 without printing
+a report at all. Zero or a negative answer falls through to the report and the
+kill path below. [userspace.md](userspace.md) describes the copy-on-write
+mechanism itself. The excerpt below is the ring-3 fault path the COW check
+falls through to:
 
 ```
 CRUGOS: user fault writing above the window

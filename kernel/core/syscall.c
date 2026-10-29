@@ -821,7 +821,12 @@ void syscall_dispatch(trap_frame *frame)
             break;
         }
         ret = (i64)child->id;
-        kprintf("CRUGOS: user fork tid %u -> %u (%u page(s))\n",
+        /* The parent's own TLB may still hold the writable translation of a
+           leaf this clone just write-protected (phase U6): reload CR3 before
+           returning to ring 3, or the parent's next store would bypass the
+           copy. */
+        vm_flush_all();
+        kprintf("CRUGOS: user fork tid %u -> %u (%u page(s) shared, COW)\n",
                 cur->id, child->id, space->user_pages);
         break;
     }

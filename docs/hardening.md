@@ -136,14 +136,21 @@ the `harden_range_ok()` identity path, so the `SYS_EXEC` selftests behave as
 before. The block is then built at the top of the new stack by
 `exec_args_build()`, never by trusting a user pointer directly.
 
-Phase U5 keeps a forked child inside the same window. `vm_space_clone()` in
-`kernel/mm/vm_space.c` copies the parent's slot-1 leaves by calling
-`vm_space_map_user_pages()` for every present page, so each destination frame is
-re-validated (page aligned, inside `USER_BASE`..`USER_TOP`, not already
-present) before it is mapped - the clone never writes a page-table entry
-directly. The copy is capped at `VM_SPACE_FORK_MAX_PAGES` (256 pages), and any
-allocation or mapping failure destroys the half-built space instead of leaving
-it reachable.
+Phase U5 keeps a forked child inside the same window, and phase U6 keeps that
+property while making the fork lazy. `vm_space_clone()` in
+`kernel/mm/vm_space.c` still maps the parent's slot-1 leaves through
+`space_map_shared()`, which re-checks alignment, the
+`USER_BASE`..`USER_TOP` range and the not-already-present rule for every
+shared leaf, so the clone never writes a page-table entry directly and a child
+cannot acquire a mapping outside the window. A writable leaf is shared with
+`VM_COW` in both spaces and the parent's entry loses `VM_WRITE`; a read-only
+text leaf is shared plainly but is still entered in the 4096-slot frame
+reference table, so the frame is freed only when the last space that maps it is
+destroyed. The cap rises to
+`VM_SPACE_FORK_MAX_PAGES` (4096 pages), and two failure paths both destroy the
+half-built space instead of leaving it reachable: a mapping or allocation
+failure, and a full reference table, where `cow_share()` returns -1 and the
+fork fails with `ENOMEM` rather than falling back to an eager copy.
 
 ## Image gate
 
@@ -162,7 +169,7 @@ must print.
 
 | Case | Patch | Required marker | Exit |
 | --- | --- | --- | --- |
-| `control` | none | `CRUGOS: phase u5 boot ok` (any phase id matches), `CRUGOS: ext4 ready`, `CRUGOS: storage ready`, `CRUGOS: writable storage ok`, `CRUGOS: selftest ok` | 33 |
+| `control` | none | `CRUGOS: phase u6 boot ok` (any phase id matches), `CRUGOS: ext4 ready`, `CRUGOS: storage ready`, `CRUGOS: writable storage ok`, `CRUGOS: selftest ok` | 33 |
 | `geometry-bpg` | superblock `+0x20` (`s_blocks_per_group`) = 100000 | `CRUGOS: ext4 mount rejected (geometry)` | 35 |
 | `geometry-ipg` | superblock `+0x28` (`s_inodes_per_group`) = 100000 | `CRUGOS: ext4 mount rejected (geometry)` | 35 |
 | `root-extent` | root inode `eh_max` (`inode + 44`) = 5, inode checksum recomputed | `CRUGOS: ext4 mount rejected (root extent)` | 35 |
@@ -330,9 +337,12 @@ ok: hardening pass 1 rejected 6 crafted image(s) (control boot exit 33)
   program start another image and wait for its exit code, but the child still
   starts from an empty address space and inherits no memory, so nothing crosses
   via spawn that the copy boundary has not checked. Phase U5 forks a copy of the
-  calling window instead: the child shares no frames with the parent, but it
-  inherits memory only (its descriptor table starts empty), and the clone passes
-  every page back through the same `vm_space_map_user_pages()` validator. What
-  remains is that slot 0 of every space is still the shared kernel identity map:
+  calling window, and phase U6 makes that copy copy-on-write: the child gets its
+  own page tables but shares the parent's frames as read-only until either side
+  stores, so the memory is still private in effect while the fork is cheap. The
+  child inherits memory only (its descriptor table starts empty), and the clone
+  passes every leaf back through `space_map_shared()` so the window bound holds.
+  What remains is that slot 0 of every space is still the shared kernel identity
+  map:
   this is isolation between user programs, not kernel-address isolation, and
   there is no per-process resource accounting.

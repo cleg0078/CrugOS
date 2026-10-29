@@ -43,7 +43,7 @@ REQUIRED_MARKERS = (
     "CRUGOS: selftest ok",
     "CRUGOS: nvme ready",
     "CRUGOS: ahci ready",
-    "CRUGOS: phase u5 boot ok",
+    "CRUGOS: phase u6 boot ok",
 )
 # A rejected unlock stops before scheduling, storage mounting and self-tests.
 WRONG_CRYPT_MARKERS = (
@@ -115,7 +115,7 @@ def main() -> int:
             argv.append(arg)
     sys.argv = [sys.argv[0]] + argv
 
-    if len(sys.argv) not in tuple(range(3, 33)):
+    if len(sys.argv) < 3 or len(sys.argv) > 33:
         print("usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE "
               "[VERSION_FILE [EXPECT_AVX2 [EXPECT_RAID [EXPECT_NVME "
               "[EXPECT_REBUILD [EXPECT_AHCI [EXPECT_CRYPT [EXPECT_AES "
@@ -123,7 +123,8 @@ def main() -> int:
               "[EXPECT_MOUSE [EXPECT_AUDIO [EXPECT_GFX [EXPECT_WB "
               "[EXPECT_MENU [EXPECT_SHELL [EXPECT_KEYS [EXPECT_DESK "
               "[EXPECT_ICONS [EXPECT_DRAWER [EXPECT_SELECT [EXPECT_HEAP "
-              "[EXPECT_USER [EXPECT_USERS [EXPECT_USHELL [EXPECT_SPAWN [EXPECT_FORK]]]]]]]]]]]]]]]]]]]]]]]]]] "
+              "[EXPECT_USER [EXPECT_USERS [EXPECT_USHELL [EXPECT_SPAWN [EXPECT_FORK "
+              "[EXPECT_FORKBIG]]]]]]]]]]]]]]]]]]]]]]]]]] "
               "[--storage=none]",
               file=sys.stderr)
         return 2
@@ -159,6 +160,7 @@ def main() -> int:
     expect_ushell = sys.argv[29] if len(sys.argv) >= 30 else "no"
     expect_spawn = sys.argv[30] if len(sys.argv) >= 31 else "no"
     expect_fork = sys.argv[31] if len(sys.argv) >= 32 else "no"
+    expect_forkbig = sys.argv[32] if len(sys.argv) >= 33 else "no"
 
     if not serial_path.exists():
         return fail(f"missing serial log {serial_path}", "")
@@ -669,23 +671,70 @@ def main() -> int:
         for marker in (
             "CRUGOS: user fork test start",
             "CRUGOS: user fork child word 8738",
+            "CRUGOS: user fork child second 21845",
             "CRUGOS: user fork parent word 4369",
+            "CRUGOS: user fork parent second 13107",
+            "CRUGOS: user fork parent write 17476",
             "CRUGOS: user fork test ok (child exit 3, memory isolated)",
         ):
             if marker not in text:
                 return fail(f"missing serial marker: {marker!r}", text)
-        if not re.search(r"CRUGOS: user fork tid \d+ -> \d+", text):
-            return fail("expected the kernel to report the fork parent and child tid",
+        fork_line = re.search(
+            r"CRUGOS: user fork tid \d+ -> \d+ \(([0-9]+) page\(s\) shared, COW\)",
+            text)
+        if not fork_line:
+            return fail("expected the kernel to report a shared copy-on-write fork",
+                        text)
+        shared_pages = int(fork_line.group(1))
+        if shared_pages < 2:
+            return fail(f"the fork shared {shared_pages} page(s), expected at least 2",
                         text)
         if not re.search(r"CRUGOS: user fork tid \d+", text):
             return fail("expected the forking program to report the child tid", text)
+        copies = re.findall(
+            r"CRUGOS: user cow fault tid \d+ va=0x[0-9a-f]+ \((copy)\)", text)
+        if len(copies) < 2:
+            return fail(f"expected two copy-on-write copies, saw {len(copies)}", text)
+        if not re.search(
+            r"CRUGOS: user cow fault tid \d+ va=0x[0-9a-f]+ \((sole owner)\)",
+            text):
+            return fail("expected the parent's post-reap store to keep its frame",
+                        text)
         for marker in ("CRUGOS: user fork failed",
                        "CRUGOS: user fork wrong child exit",
-                       "CRUGOS: user fork memory not isolated"):
+                       "CRUGOS: user fork memory not isolated",
+                       "CRUGOS: user fork parent write lost"):
             if marker in text:
                 return fail(f"the fork program reported {marker!r}", text)
     elif "CRUGOS: user fork test start" in text:
         return fail("unexpected fork selftest without EXPECT_FORK=yes", text)
+
+    if expect_forkbig == "yes":
+        for marker in (
+            "CRUGOS: user forkbig test start",
+            "CRUGOS: user forkbig test ok (child exit 7, 300 page(s) isolated)",
+        ):
+            if marker not in text:
+                return fail(f"missing serial marker: {marker!r}", text)
+        if not re.search(r"CRUGOS: user forkbig tid \d+", text):
+            return fail("expected the large fork to report the child tid", text)
+        big_pages = [int(n) for n in re.findall(
+            r"CRUGOS: user fork tid \d+ -> \d+ \(([0-9]+) page\(s\) shared, COW\)",
+            text)]
+        if not big_pages or max(big_pages) < 300:
+            return fail(f"the large fork shared {big_pages} page(s), expected >= 300",
+                        text)
+        if not re.search(
+            r"CRUGOS: user cow fault tid \d+ va=0x[0-9a-f]+ \((copy)\)",
+            text):
+            return fail("expected the large fork's child stores to copy", text)
+        for marker in ("CRUGOS: user forkbig failed",
+                       "CRUGOS: user forkbig memory not isolated"):
+            if marker in text:
+                return fail(f"the large fork program reported {marker!r}", text)
+    elif "CRUGOS: user forkbig test start" in text:
+        return fail("unexpected large-fork selftest without EXPECT_FORKBIG=yes",
+                    text)
 
     if expect_rebuild == "no" and "CRUGOS: raid rebuilt" in text:
         return fail("unexpected RAID member rebuild during boot", text)
@@ -725,6 +774,7 @@ def main() -> int:
           "select", expect_select, "heap", expect_heap, "user", expect_user,
           "isolated", expect_users, "ushell", expect_ushell,
           "spawn", expect_spawn, "fork", expect_fork,
+          "forkbig", expect_forkbig,
           "storage", storage_mode,
           "QEMU exit status", status)
     for line in boot_report:

@@ -52,6 +52,35 @@ static int uaccess_pages_mapped(u64 addr, u64 len)
     }
     return 1;
 }
+
+/* A write demands one more thing than a read (phase U6): a leaf shared with a
+   forked child is mapped read-only in every space, and CR0.WP turns a ring-0
+   store to it into a fatal fault. Give such a leaf a private copy first and
+   flush the stale writable-less translation; the copy holds identical bytes,
+   so the store below still sees exactly what the caller wrote. */
+static int uaccess_pages_writable(u64 addr, u64 len)
+{
+    const u64 mask = CRUG_PAGE_SIZE - 1ull;
+    u64 end = addr + len;
+    u64 page;
+    vm_space *space = vm_active_space();
+
+    if (end < addr)
+        return 0;
+    for (page = addr & ~mask; page < end; page += CRUG_PAGE_SIZE) {
+        if (vm_translate(page) == 0)
+            return 0;
+        if (space) {
+            int r = vm_space_cow_fault(space, page);
+
+            if (r < 0)
+                return 0;
+            if (r > 0)
+                vm_flush_page(page);
+        }
+    }
+    return 1;
+}
 #endif
 
 int uaccess_user_read(void *kdst, u64 uaddr, u64 len)
@@ -81,7 +110,7 @@ int uaccess_user_write(u64 uaddr, const void *ksrc, u64 len)
     if (len == 0)
         return 0;
 #ifndef CRUG_HOST_TEST
-    if (!uaccess_pages_mapped(uaddr, len))
+    if (!uaccess_pages_writable(uaddr, len))
         return UACCESS_EFAULT;
 #endif
     uaccess_begin();

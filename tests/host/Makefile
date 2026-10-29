@@ -22,6 +22,7 @@ SOURCES := main.c test_string.c test_printf.c test_elf.c test_bitmap.c test_vm_m
            ../../kernel/lib/textgrid.c ../../kernel/shell/shell.c \
            ../../kernel/lib/harden.c ../../kernel/lib/trapfmt.c \
            ../../kernel/mm/heap.c ../../kernel/mm/uaccess.c ../../kernel/mm/vm_space.c \
+           ../../kernel/mm/cow.c \
            ../../kernel/crypto/blake2b.c \
            ../../kernel/crypto/aes.c ../../kernel/crypto/xts.c ../../kernel/crypto/aesni.S \
            ../../kernel/crypto/argon2id.c ../../kernel/block/crypt_meta.c \

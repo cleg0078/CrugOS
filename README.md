@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase U5 fork (`v0.39.0`)
+## Status: phase U6 copy-on-write fork (`v0.40.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -68,6 +68,9 @@ in place while keeping its tid; `make test-user4` is the 51st gate. Phase U5
 adds fork: `SYS_FORK` copies the caller's whole user window into a fresh address
 space and resumes the child immediately after the `int 0x80`, so the child sees
 its own pages rather than the parent's, and `make test-user5` is the 52nd gate.
+Phase U6 makes that fork copy-on-write: the parent's writable pages are shared
+with the child read-only and copied on the first store, so a fork of 300 pages
+costs a handful of frames, and `make test-user6` is the 53rd gate.
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -1206,6 +1209,63 @@ the parent's. `make test-user5` is the 52nd gate.
   and 846206 B (826 KiB) loaded (`.text` 194310 B, `.rodata` 29248 B, `.bss`
   622592 B), and all 52 gates pass.
 
+Phase U6 turns that eager copy into copy-on-write: a fork now shares the
+parent's writable frames read-only with the child and copies a page only when
+one side stores to it, so the 300-page probe forks for the price of a fork
+frame. `make test-user6` is the 53rd gate.
+
+- `include/crug/cow.h` and `kernel/mm/cow.c` add a per-frame reference table:
+  `COW_TABLE_SLOTS` (4096) open-addressing slots with tombstones, keyed by
+  `(pa >> 12) * 2654435761` folded with `x ^= x >> 16`. `cow_share(pa)` opens a
+  share (first call sets two references) and returns -1 when the table is full,
+  `cow_refs(pa)` reports zero for an untracked frame, `cow_release(pa)` returns
+  1 when the caller may free the frame and 0 when another space still maps it,
+  and `cow_reset()`/`cow_tracked()` reset and count the table;
+- `include/crug/vm.h` adds the `VM_COW` software PTE bit (`1ull << 9`, part of
+  `VM_PTE_FLAG_MASK`), raises `VM_SPACE_FORK_MAX_PAGES` from 256 to 4096,
+  makes `vm_space_clone()` non-const and adds `vm_space_cow_fault()` (0 = nothing
+  to resolve, 1 = the frame was copied, 2 = the caller was the sole owner and
+  the leaf was repaired in place) plus `vm_active_space()`;
+- `kernel/mm/vm_space.c` shares every writable or already-`VM_COW` leaf in the
+  clone: the child leaf gains `VM_COW`, the parent leaf loses `VM_WRITE`, and a
+  read-only text leaf is shared as a plain read-only mapping - it never takes
+  `VM_COW` and never faults, but it is still entered in the refcount table, so
+  the frame is freed only when the last space that maps it is destroyed. Every
+  present leaf calls `cow_share()`, and a table-full (-1) destroys the
+  half-built child and fails the fork with `ENOMEM` instead of falling back to
+  an eager copy; `vm_space_unmap_pages()` and `vm_space_destroy()` free a frame
+  only when `cow_release()` says it is the last reference;
+- `kernel/mm/vm.c` tracks the active space beside the active page table, so the
+  fault path and the copy-out path can find the space a user pointer belongs to;
+- `kernel/mm/uaccess.c` resolves `VM_COW` leaves in `uaccess_pages_writable()`
+  (a `vm_space_cow_fault()` plus `vm_flush_page()`) before a kernel copy-out
+  writes through a user pointer;
+- `kernel/arch/x86_64/idt.c` handles the user page fault before the ordinary
+  report: vector 14 with the U/S and W/R bits set and `trap_classify()` =
+  `TRAP_USER` calls `vm_space_cow_fault()` on the current thread's space, and a
+  positive answer flushes the page and returns, printing
+  `CRUGOS: user cow fault tid N va=... (copy)` or `(sole owner)`;
+- `SYS_FORK` flushes the parent's TLB after the child exists (`vm_flush_all()`)
+  and prints `CRUGOS: user fork tid N -> M (K page(s) shared, COW)`;
+- `user/fork.c` now covers two data pages: the child writes `0x2222` and
+  `0x5555`, the parent reaps exit 3 and still reads `0x1111` (4369) and
+  `0x3333` (13107), then stores `0x4444` (17476) into the first page - the child
+  is gone, so that store takes the sole-owner path - and `user/forkbig.c` maps
+  300 pages (1.2 MiB) of `.bss`, sets a sentinel, forks, and requires the child's
+  writes to `0x5A` to leave the parent's copy untouched;
+- `user.test=6` adds the large-fork probe after the two-page one, and
+  `scripts/mkdisk.sh` installs `/bin/forkbig` (nine programs);
+- `make test-user6` is the 53rd gate: it rebuilds the disk with all nine
+  programs, boots with `user.test=6` under `FORKBIG_RUN_TIMEOUT_SEC` (300),
+  passes boot-check the new `EXPECT_FORKBIG` argument (`argv[32]`, argument
+  guard now `len(sys.argv) < 3 or > 33`) together with the five earlier
+  expectations, so the boot line ends `fork yes forkbig yes`, and runs the plain
+  check-disk pass;
+- `make test-host` reports 7893 checks (the COW table, the rewritten
+  `test_vm_space_clone` and the new `test_vm_space_cow`), the kernel is
+  277040 B (270 KiB) on disk and 913790 B (892 KiB) loaded (`.text` 196038 B,
+  `.rodata` 29568 B, `.bss` 688128 B), and all 53 gates pass.
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -1214,9 +1274,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.39.0 (phase u5) -- Amiga-inspired microkernel bring-up
+CrugOS 0.40.0 (phase u6) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.39.0
+CRUGOS: version 0.40.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -1275,9 +1335,9 @@ entropy: ca02033c50b53413
 wx     : audit ok, identity map 0..4 GiB, guard unmapped
 heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
-boot   : pmm=27755 us cpu=397 us vm=663 us traps=321 us timer=65329 us heap=477 us storage=95269 us sched=373 us syscall=129 us total=190716 us
+boot   : pmm=27755 us cpu=397 us vm=663 us traps=321 us timer=65329 us heap=477 us storage=95269 us sched=373 us syscall=129 us total=189132 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase u5 boot ok
+CRUGOS: phase u6 boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -1490,14 +1550,15 @@ make test-user2  # boot with user.test=2, run the three programs and the isolati
 make test-user3  # boot with user.test=3 and run the scripted ring-3 shell
 make test-user4  # spawn and exec ring-3 programs and wait for their exit codes
 make test-user5  # fork a ring-3 program and prove the child gets its own pages
+make test-user6  # fork copy-on-write and prove 300 shared pages are isolated
 make iso         # build a bootable hybrid UEFI ISO (build/x86_64/crugos.iso)
 make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
 make usb         # write the ISO to a USB block device (USB_DEV=/dev/sdX)
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
-make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows/menus/gadgets, resize grips, keyboard focus and keys, icon dragging, the send-to-front gadget and keyboard icon focus, the body input handler, the text grid and the shell, the user-window and uaccess validators, the per-space page-table tests, the ELF exec mapper, the argv predicates and the fork clone)
+make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows/menus/gadgets, resize grips, keyboard focus and keys, icon dragging, the send-to-front gadget and keyboard icon focus, the body input handler, the text grid and the shell, the user-window and uaccess validators, the per-space page-table tests, the ELF exec mapper, the argv predicates, the fork clone and the copy-on-write table)
 make check-disk  # e2fsck + persisted-file checks on the latest test disk
-make user        # build the eight ring-3 programs the disk image carries
+make user        # build the nine ring-3 programs the disk image carries
 make disk        # generate the GPT/ext4 test disk
 make raid-disks  # generate the two RAID1 member disks
 make raid10-disks  # generate the four RAID10 member disks
@@ -1522,7 +1583,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `EXPECT_USB`, `EXPECT_MOUSE`, `EXPECT_AUDIO`, `EXPECT_GFX`, `EXPECT_WB`,
 `EXPECT_MENU`, `EXPECT_SHELL`, `EXPECT_KEYS`, `EXPECT_DESK`, `EXPECT_ICONS`,
 `EXPECT_DRAWER`, `EXPECT_SELECT`, `EXPECT_HEAP`, `EXPECT_USER`, `EXPECT_USERS`,
-`EXPECT_USHELL`, `EXPECT_SPAWN`, `EXPECT_FORK`,
+`EXPECT_USHELL`, `EXPECT_SPAWN`, `EXPECT_FORK`, `EXPECT_FORKBIG`,
 `AUDIO_RUN_TIMEOUT_SEC`, `AUDIO_QEMU_EXTRA`, `GFX_WAIT`, `GFX_MOVES`,
 `GFX_RUN_TIMEOUT_SEC`, `GFX_QEMU_EXTRA`, `WB_WAIT`, `WB_DRAG`,
 `WB_RUN_TIMEOUT_SEC`, `WB_QEMU_EXTRA`, `WB_MENU_WAIT`, `WB_MENU_ACTS`,
@@ -1536,7 +1597,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `HEAP_STRESS_OPS`, `HEAP_RUN_TIMEOUT_SEC`, `TRAP_TIMEOUT_SEC`, `FUZZ_CASES`,
 `FUZZ_CRYPT_CASES`, `FUZZ_SEED`, `FUZZ_TIMEOUT_SEC`, `USER_RUN_TIMEOUT_SEC`,
 `USER2_RUN_TIMEOUT_SEC`, `SHELL_RUN_TIMEOUT_SEC`, `SPAWN_RUN_TIMEOUT_SEC`,
-`FORK_RUN_TIMEOUT_SEC`,
+`FORK_RUN_TIMEOUT_SEC`, `FORKBIG_RUN_TIMEOUT_SEC`,
 `DEMO_DISPLAY`, `DEMO_HOLD_SEC`,
 `DEMO_TIMEOUT_SEC`, `DEMO_CMDLINE`, `DEMO_MACHINE_EXTRA`, `DEMO_QEMU_EXTRA`,
 `ISO_IMAGE`, `ISO_STAGE`, `ISO_FAT_IMG`, `ISO_SIZE_MB`, `ISO_VOLID`,
@@ -1568,7 +1629,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/net/` | `net.device`, Ethernet/ARP/IPv4/ICMP/UDP, TCP, the DHCP client and the DNS resolver |
 | `kernel/gfx/` | `gfx.device` (the pointer-driven framebuffer cursor) and `intuition.device` with the phase 6A desktop, its phase 6B menus, gadgets and event queue, and the phase 6C body painter the shell window uses, the phase 6D resize grips and keyboard navigation, the phase 6E desktop objects, depth gadget and drawer, the phase 6F icon dragging, send-to-front gadget and keyboard icon focus, the phase 6G scrolling drawer with its scrollbar, refresh and reflow, and the phase 6H drawer row selection with its draggable scrollbar and body-input hook |
 | `kernel/shell/` | the Workbench shell: line editor, history, the command table and the `shell_io` binding to the mounted ext4 root |
-| `kernel/mm/` | physical allocator, W^X page tables, the user-window mapper and uaccess copy boundary, kernel heap |
+| `kernel/mm/` | physical allocator, W^X page tables, the user-window mapper and uaccess copy boundary, copy-on-write frame references, kernel heap |
 | `kernel/block/` | block-device registry, partitions, bounds checks, RAID1/RAID10, boot-time rebuild and the AES-256-XTS `crypt.device` |
 | `kernel/fs/` | GPT, writable checksummed ext4, checksummed JBD2 journal and the storage boot policy (including the console passphrase prompt) |
 | `kernel/crypto/` | AES, XTS, AES-NI, BLAKE2b and Argon2id (shared with the host tools) |

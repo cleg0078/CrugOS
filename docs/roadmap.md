@@ -1,6 +1,6 @@
 # Roadmap
 
-The specification defines 52 phases/gates. Phase 0 established the smallest
+The specification defines 53 phases/gates. Phase 0 established the smallest
 end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
 phase 1 makes the kernel own physical memory, page tables, exceptions and
 timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
@@ -973,10 +973,12 @@ file descriptors and an exec-time `argv` block, and phase U4 let a user program
 start another one, wait for its exit code and replace its own image in place.
 Phase U5 then added `fork`: `SYS_FORK` copies the caller's user window into a
 new address space, so a child owns its pages and neither side sees the other's
-writes. What remains is copy-on-write (fork still copies every page eagerly, up
-to 256 of them), a populated environment, weak EFI entropy, and the AHCI timeout
-bounce reuse. Those are the prerequisites for a shell that builds process trees,
-and several of the remaining Mediums stay reachable until then.
+writes. Phase U6 made that copy lazy: the parent's writable frames are shared
+read-only and copied on the first store from either side, so a fork of 300 pages
+costs a page table and a few reference counts, and the page cap rose from 256 to
+4096. What remains is a populated environment, weak EFI entropy, and the AHCI
+timeout bounce reuse. Those are the prerequisites for a shell that builds process
+trees, and several of the remaining Mediums stay reachable until then.
 
 ## Phase H2 - hardened kernel heap (done)
 
@@ -1457,6 +1459,86 @@ and several of the remaining Mediums stay reachable until then.
   descriptor table) plus README, roadmap, versioning, build, boot, traps,
   hardening, iso, workbench, fuzzing and heap.
 - All 52 gates pass at `v0.39.0`.
+
+## Phase U6 - copy-on-write fork (done)
+
+- Phase U6 makes `fork` cheap: instead of duplicating every user page, the child
+  shares the parent's frames as read-only mappings and either side takes a
+  private copy on its first store. The page cap rises from 256 to 4096, and a
+  fork of a 300-page program now costs a page table plus a few reference counts.
+  The kernel image layout, the `BootInfo` v1 handoff and every boot path are
+  unchanged.
+- `include/crug/cow.h` and `kernel/mm/cow.c` keep one reference count per shared
+  physical frame in a flat open-addressing table: `COW_TABLE_SLOTS` 4096 slots,
+  index `(pa >> 12) * 2654435761` folded with `x ^= x >> 16`, forward probing and
+  tombstones. `cow_share()` records one more owner (the first share sets two) and
+  returns -1 when the table has no free slot or tombstone; `cow_refs()` reports
+  the owners or 0 for an untracked frame; `cow_release()` returns 1 when the
+  caller is now the last owner and must free the frame, 0 when another address
+  space still maps it. The module needs only `<crug/types.h>`, so the host tests
+  link it directly.
+- `include/crug/vm.h` adds the software PTE bit `VM_COW` (`1ull << 9`, part of
+  `VM_PTE_FLAG_MASK`), raises `VM_SPACE_FORK_MAX_PAGES` to 4096, makes
+  `vm_space_clone()` non-const and adds `vm_space_cow_fault()` (0 = nothing to
+  resolve, 1 = frame copied, 2 = sole-owner repair, -1 = allocation failure) plus
+  `vm_active_space()`.
+- `kernel/mm/vm_space.c` shares instead of copying: every present slot-1 leaf
+  calls `cow_share()`, the child maps the parent's frame read-only through
+  `space_map_shared()` with the parent's `PRESENT`/`USER`/`NX`/`PWT`/`PCD` bits and
+  `VM_COW` when the leaf is writable or already `VM_COW`, and a writable parent
+  leaf loses `VM_WRITE` and gains `VM_COW`. A read-only text leaf is shared as a
+  plain read-only mapping: it never takes `VM_COW` and never faults, but it is
+  still entered in the refcount table, so the frame is freed only when the last
+  space that maps it is destroyed. A full table (-1) or a mapping failure
+  destroys the half-built child, so the fork fails with `ENOMEM` rather than
+  falling back to an eager copy; a parent above the cap is refused outright.
+- `vm_space_cow_fault()` repairs a leaf in place when `cow_refs()` is at most one
+  (the sole-owner case, after the child exits) and otherwise allocates a fresh
+  frame, `memcpy`s one page, maps it writable without `VM_COW` and releases the
+  old frame, freeing it when that release was the last reference.
+  `vm_space_unmap_pages()` and `vm_space_destroy()` free a frame only when
+  `cow_release()` says it is the last reference.
+- `kernel/mm/vm.c` tracks the active space beside the active page table, and
+  `kernel/mm/uaccess.c`'s `uaccess_pages_writable()` resolves a `VM_COW` leaf
+  before a kernel copy-out, so a syscall write through a user pointer never
+  stores into a still-shared frame. `uaccess_user_read()` keeps the plain mapped
+  check because a read cannot break a share.
+- `kernel/arch/x86_64/idt.c` resolves the user page-fault path before the ordinary
+  trap report: for vector 14 with the error code's U/S and W/R bits set and
+  `trap_classify()` = `TRAP_USER`, a positive `vm_space_cow_fault()` flushes the
+  page and returns to CPL3, printing `CRUGOS: user cow fault tid N va=0x...
+  (copy)` or `(sole owner)`. A non-resolvable fault falls through to the normal
+  report and the kill-only-that-thread policy.
+- `SYS_FORK` (24, unchanged ABI) calls `vm_flush_all()` after the child exists,
+  because the parent's TLB may still cache the pre-fork writable leaf, and prints
+  `CRUGOS: user fork tid 16 -> 17 (7 page(s) shared, COW)`.
+- `user/fork.c` holds two data pages (`0x1111` and `0x3333`): the child writes
+  `0x2222`/`0x5555` and exits 3, the parent reaps it, must still read `0x1111` and
+  `0x3333`, then stores `0x4444` into the first page - the sole-owner path - and
+  prints `CRUGOS: user fork parent write 17476`. `user/forkbig.c` maps 300 pages
+  of `.bss`, plants an `0xA5` sentinel, forks, and the child writes `0x5A` to the
+  first and last byte and exits 7; the parent verifies its own copy and prints
+  `CRUGOS: user forkbig ok (child exit 7, 300 page(s) isolated)`.
+  `scripts/mkdisk.sh` now installs nine programs, and `user.test=6` adds
+  `user_forkbig()` on top of the two-page probe.
+- `make test-user6` is the 53rd gate: it rebuilds the disk with all nine programs,
+  boots with `user.test=6` under `FORKBIG_RUN_TIMEOUT_SEC` (300 s), and passes
+  boot-check `EXPECT_USER`, `EXPECT_USERS`, `EXPECT_USHELL`, `EXPECT_SPAWN`,
+  `EXPECT_FORK` and the new `EXPECT_FORKBIG` (`argv[32]`, guard
+  `if len(sys.argv) < 3 or len(sys.argv) > 33:`), so the line reports
+  `user yes isolated yes ushell yes spawn yes fork yes forkbig yes`. It then runs
+  the plain check-disk pass. `make test-user5` stays green with
+  `forkbig no`.
+- `make test-host` reports 7893 checks (`test_vm_space_clone` was rewritten for
+  copy-on-write and `test_vm_space_cow` covers the table's share chains,
+  tombstones, unaligned fold, full-table refusal and reset); the kernel is
+  277040 B (270 KiB) on disk and 913790 B (892 KiB) loaded (`.text` 196038 B,
+  `.rodata` 29568 B, `.data` 56 B, `.bss` 688128 B), inside the 1 MiB stretch
+  and 2 MiB hard budgets.
+- docs: `docs/userspace.md` (the `VM_COW` bit, the reference table, the clone, the
+  fault taxonomy and the probes) plus README, roadmap, versioning, build, boot,
+  traps, hardening, iso, workbench, fuzzing and heap.
+- All 53 gates pass at `v0.40.0`.
 
 ## Bootable media - hybrid UEFI ISO (done, `v0.23.1`)
 

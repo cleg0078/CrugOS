@@ -23,6 +23,11 @@ static u64 *g_pd[4];
    and the uaccess page checks always see the address space of the caller. */
 static u64 *g_root;
 
+/* The space that owns g_root, or 0 while the kernel root is active. The uaccess
+   write path gives a shared copy-on-write leaf a private copy before a ring-0
+   store, and it needs the owning space to do that (phase U6). */
+static vm_space *g_active_space;
+
 static void *alloc_table(void)
 {
     u64 pa = pmm_alloc_page();
@@ -157,6 +162,7 @@ int vm_init(void)
     /* Publish the root before anything walks it: pte_for and vm_map_page
        follow g_root, and the kernel sections are mapped below. */
     g_root = g_pml4;
+    g_active_space = 0;
     vm_space_set_kernel_root(g_pml4);
     g_pml4[0] = pmm_virt_to_phys(g_pdpt) | VM_PRESENT | VM_WRITE;
     for (i = 0; i < 4; i++) {
@@ -286,10 +292,18 @@ void vm_space_activate(vm_space *s)
 {
     u64 *root = (s && s->pml4) ? s->pml4 : g_pml4;
 
-    if (root == g_root)
+    if (root == g_root) {
+        g_active_space = s;
         return;
+    }
     g_root = root;
+    g_active_space = s;
     write_cr3(pmm_virt_to_phys(root));
+}
+
+vm_space *vm_active_space(void)
+{
+    return g_active_space;
 }
 
 int vm_audit_wx(void)

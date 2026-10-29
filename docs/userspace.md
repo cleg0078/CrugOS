@@ -14,14 +14,18 @@ process model to ring 3: `SYS_SPAWN` starts a program image as a child thread,
 in place while keeping its tid. Phase U5 adds the other half of the process
 model: `SYS_FORK` copies the caller's whole user window into a new address
 space and resumes the child immediately after the `int 0x80`, so a program can
-duplicate itself and the two copies stop sharing memory.
+duplicate itself and the two copies stop sharing memory. Phase U6 makes that
+copy lazy: the parent's writable frames are shared read-only and copied on the
+first store on either side, so a fork costs a page table and a few reference
+counts rather than one frame per page.
 
-The current gate is `make test-user5` (gate 52): it boots with `user.test=5`,
-runs the U1 trio, the U2 isolation pair, the U3 shell, the U4 spawn/exec probe
-and then `/bin/fork`, which forks itself, overwrites a global in the child and
-proves the parent still reads its own copy. The earlier gates keep their levels:
-`make test-user4` (gate 51) stops after the spawn/exec probe, `make test-user3`
-(gate 50) at the shell, `make test-user2` (gate 49) at the isolation pair.
+The current gate is `make test-user6` (gate 53): it boots with `user.test=6`,
+runs the U1 trio, the U2 isolation pair, the U3 shell, the U4 spawn/exec probe,
+the U5 two-page fork and then `/bin/forkbig`, which forks 300 pages and proves
+the two sides never share a writable frame. The earlier gates keep their levels:
+`make test-user5` (gate 52) stops after the two-page fork, `make test-user4`
+(gate 51) after the spawn/exec probe, `make test-user3` (gate 50) at the shell,
+`make test-user2` (gate 49) at the isolation pair.
 
 Nothing in these phases changes the boot paths, the disk image format or the
 loaded program ABI the UEFI loader uses. The kernel gains `SYS_WRITE`, the file
@@ -452,7 +456,7 @@ path. It executes one command per line:
 
 | Command | Effect |
 | --- | --- |
-| `ver` | print `CrugOS ring-3 shell (phase u5)` |
+| `ver` | print `CrugOS ring-3 shell (phase u6)` |
 | `echo TEXT` | print `TEXT` |
 | `cat FILE` | read the file and write its bytes to the console |
 | `ls PATH` | list a directory |
@@ -545,7 +549,7 @@ allocate a space. `exec_args_build()` then lays out the strings, `envp[]`,
 `argv[]` and the `argc` word in a 4 KiB block at the top of the new user stack,
 16-byte aligned, and `rsp` points at the `argc` word.
 
-## Fork: copying an address space
+## Fork: the ABI and the trampoline
 
 `SYS_FORK` (24, so `SYS_MAX` is 25) takes no arguments. In the parent it
 returns the new child's tid; in the child it returns 0 and the first user
@@ -553,17 +557,12 @@ instruction is the one right after the `int 0x80`, exactly as if the call had
 returned twice. The child is a new thread with its own `vm_space`, its own
 kernel stack and its own descriptor table.
 
-The copy is `vm_space_clone()` in `kernel/mm/vm_space.c` (declared in
-`include/crug/vm.h` with the cap `VM_SPACE_FORK_MAX_PAGES` = 256 pages):
-
-- the new root gets slot 0 from the shared supervisor identity map, so kernel
-  code, stacks and MMIO stay present;
-- the walk descends the parent's slot-1 page tables and, for every present leaf,
-  allocates a fresh frame, copies the parent's `PRESENT`/`WRITE`/`NX` bits
-  and `memcpy`s exactly one page;
-- any allocation or mapping failure destroys the half-built space, so the
-  destination is either a complete clone or gone - never partial;
-- a parent with more than 256 user pages is refused before anything is copied.
+Phase U5 built the child's space with `vm_space_clone()` in
+`kernel/mm/vm_space.c` by allocating a fresh frame and `memcpy`ing every user
+page, under a `VM_SPACE_FORK_MAX_PAGES` cap of 256 pages. Phase U6 keeps the
+same call and the same cap shape but shares the frames instead of copying them;
+[Copy-on-write fork (U6)](#copy-on-write-fork-u6) below describes the mechanism,
+and the cap is now 4096 pages.
 
 The child does not enter through `thread_entry`. `thread_create_forked()`
 keeps a copy of the parent's `trap_frame` in the thread (`THREAD_FLAG_FORKED`,
@@ -591,13 +590,16 @@ The child's descriptor table is deliberately empty - `thread_create` calls
 threads, and an empty table guarantees a buffered file write is never flushed
 twice.
 
-`user/fork.c` is the ring-3 probe. It holds `static volatile u64 g_word =
-0x1111` as a global; the child stores `0x2222` (8738) into its copy and calls
-`u_exit(3)`; the parent `u_wait()`s the tid, requires exit code 3, and then
-re-reads `g_word` and requires its own `0x1111` (4369). If the child had
-aliased the parent's frame instead of receiving a copy, the parent would read
-`0x2222`. The program returns 0 on success and 1, 2 or 3 when the fork, the
-wait or the word check fails.
+`user/fork.c` was the U5 probe: it held `static volatile u64 g_word = 0x1111`
+as a global, the child stored `0x2222` (8738) into its copy and called
+`u_exit(3)`, and the parent `u_wait()`ed the tid, required exit code 3 and
+re-read `g_word` for its own `0x1111` (4369). If the child had aliased the
+parent's frame instead of receiving a copy, the parent would have read `0x2222`.
+The program returned 0 on success and 1, 2 or 3 when the fork, the wait or the
+word check failed. The U6 version of the probe adds a second page and a parent
+store; [Copy-on-write fork (U6)](#copy-on-write-fork-u6) has its markers.
+
+The U5 markers (gate 52) read:
 
 ```
 CRUGOS: user fork test start
@@ -611,14 +613,182 @@ CRUGOS: user fork ok (child exit 3, memory isolated)
 CRUGOS: user fork test ok (child exit 3, memory isolated)
 ```
 
-One trap is worth recording. `vm_space_map_user_pages()` only ORs `VM_USER`
-into the flag word it is given; it does not add `PRESENT`. A clone that passed
-`VM_WRITE | VM_NX` therefore built a child whose leaf was never present - the
-first version ended with `dst->user_pages` 1 against the parent's 2,
+One trap is worth recording from U5. `vm_space_map_user_pages()` only ORs
+`VM_USER` into the flag word it is given; it does not add `PRESENT`. The first
+clone passed `VM_WRITE | VM_NX` and therefore built a child whose leaf was never
+present - it ended with `dst->user_pages` 1 against the parent's 2,
 `vm_space_translate()` returned 0 for the missing page and the host clone test
-segfaulted afterwards. `vm_space_clone()` must pass
-`VM_PRESENT | VM_WRITE | VM_NX`, keeping the parent leaf's writability and
-`NX` bits, which is what the committed code does.
+segfaulted afterwards. The eager clone had to pass
+`VM_PRESENT | VM_WRITE | VM_NX`; the U6 clone maps a shared leaf through
+`space_map_shared()` with the presence bit always set, which is the same lesson
+in a different place.
+
+## Copy-on-write fork (U6)
+
+A fork that copies every page is expensive, and the U5 cap (256 pages) existed
+only because each fork paid one frame per page. Phase U6 makes the copy lazy:
+the child maps the parent's frames read-only and both sides take a private copy
+on the first store. The cap rises to `VM_SPACE_FORK_MAX_PAGES` = 4096 pages,
+and a fork of a 300-page program now costs a page table and a few reference
+counts instead of 300 fresh frames.
+
+### The `VM_COW` bit and the reference table
+
+`include/crug/vm.h` adds `VM_COW`, a software PTE bit at `1ull << 9` that is
+part of `VM_PTE_FLAG_MASK` (the hardware ignores it). A leaf carries `VM_COW`
+when the frame behind it may be shared, and the bit is cleared once a side owns
+its own copy.
+
+`include/crug/cow.h` and `kernel/mm/cow.c` keep one reference count per shared
+physical frame in a flat open-addressing table:
+
+- `COW_TABLE_SLOTS` is 4096 entries, one per distinct shared frame, so the
+  table also bounds how many pages one fork chain can hold together;
+- the slot index is `(pa >> 12) * 2654435761` folded with `x ^= x >> 16`;
+  collisions probe forward and a released entry becomes a tombstone so probe
+  chains stay intact;
+- `cow_share(pa)` registers one more owner, returning 0 on success and -1 when
+  the table has no free slot or tombstone. The first share of a frame records
+  two owners - the space that already maps it plus the caller;
+- `cow_refs(pa)` reports the recorded owners, or 0 for a frame that was never
+  shared;
+- `cow_release(pa)` drops one owner and returns 1 when the caller is now the
+  last owner and must free the frame, 0 when another address space still maps
+  it. An untracked frame always reports 1, so a space that never forked frees
+  exactly as before;
+- `cow_reset()` and `cow_tracked()` reset and count the table. The module only
+  needs `<crug/types.h>`, so it links into the host tests without CR3 or
+  interrupts.
+
+### What the clone does
+
+`vm_space_clone()` is no longer const and no longer copies pages. It walks the
+parent's slot-1 page tables exactly as before, but for every present leaf it:
+
+- calls `cow_share(pa)`, so every shared frame - including read-only text - has
+  an entry in the table;
+- maps the parent's frame into the child read-only with
+  `space_map_shared()`, copying the parent's `PRESENT`/`USER`/`NX`/`PWT`/`PCD`
+  bits and adding `VM_COW` when the leaf is writable or was already `VM_COW`
+  (a nested fork must not hand out a read-only leaf that can never fault);
+- when the leaf was writable, rewrites the parent's PTE without `VM_WRITE` and
+  with `VM_COW`, so the frame is never writable on both sides at once.
+
+A read-only text leaf is shared as a plain read-only mapping: it never takes
+`VM_COW` and never faults, but it is still entered in the refcount table, so
+the frame is freed only when the last space that maps it is destroyed. A
+`cow_share()` that returns -1 (a full table) destroys the half-built child and
+fails the fork with `ENOMEM` rather than falling back to an eager copy. Any
+mapping failure does the same, and a parent above the 4096-page cap is refused
+before anything is built.
+
+`kernel/mm/vm.c` tracks the active space beside the active page table, and
+`vm_active_space()` returns it after `vm_space_activate()` installed it, so the
+fault path and the copy-out path can find the space a user address belongs to.
+
+### The fault taxonomy
+
+`vm_space_cow_fault(vm_space *s, u64 va)` resolves one leaf and returns:
+
+- 0 - there is nothing to resolve: the space or the PTE is absent, or the leaf
+  is present without `VM_COW`;
+- 1 - the frame was copied: `cow_refs()` was above one, a fresh frame was
+  allocated, `memcpy`ed and mapped writable without `VM_COW`, and the old
+  frame was released (and freed if that release was the last);
+- 2 - the caller was the sole owner: `cow_refs()` was at most one, so the leaf
+  is repaired in place with its write bit back rather than copying a page that
+  would stay identical - this is the path a parent takes after its child has
+  exited;
+- -1 - the fresh frame could not be allocated.
+
+Two callers resolve leaves. The user page-fault path in
+`kernel/arch/x86_64/idt.c` runs before the ordinary trap report: for vector 14
+with the error code's U/S and W/R bits set and `trap_classify()` =
+`TRAP_USER`, it calls `vm_space_cow_fault()` on the current thread's space, and
+a positive answer flushes the page and returns to CPL3, printing
+
+```
+CRUGOS: user cow fault tid 16 va=0x000000803fffffc8 (copy)
+CRUGOS: user cow fault tid 16 va=0x0000008000011000 (sole owner)
+```
+
+A 0 or -1 falls through to the normal report and, for a user frame, the
+kill-only-that-thread path. The other caller is
+`kernel/mm/uaccess.c:uaccess_pages_writable()`, which resolves `VM_COW` leaves
+(a `vm_space_cow_fault()` plus `vm_flush_page()`) before a kernel copy-out
+writes through a user pointer, so a `SYS_WRITE`-style boundary crossing never
+stores into a still-shared frame. `uaccess_user_read()` keeps the plain mapped
+check because a read cannot break a share.
+
+After the child exists, `SYS_FORK` calls `vm_flush_all()`: the parent's TLB may
+still cache the pre-fork writable leaf, and a stale entry would let the parent
+store without faulting. The fork then prints its shared-page count:
+
+```
+CRUGOS: user fork tid 16 -> 17 (7 page(s) shared, COW)
+```
+
+### The probes
+
+`user/fork.c` now holds two data pages, `g_word` (`0x1111`) and `g_word2`
+(`0x3333`). The child writes `0x2222` and `0x5555` (8738, 21845) into its copies
+and exits 3; the parent reaps it and must still read `0x1111` (4369) and
+`0x3333` (13107). It then stores `0x4444` (17476) into the first page - the
+child has exited, so `cow_refs()` is one and that store takes the sole-owner
+path - and prints `CRUGOS: user fork parent write 17476`. The success marker is
+`CRUGOS: user fork ok (child exit 3, memory isolated, 2 COW page(s))`.
+
+`user/forkbig.c` is the large-fork probe: it maps 300 pages (1.2 MiB) of
+`.bss`, sets the first byte to `0xA5`, forks, and the child writes `0x5A` to the
+first and last byte and exits 7. The parent reaps exit 7, checks that its
+sentinel survived and that its last byte is still 0, then prints
+`CRUGOS: user forkbig ok (child exit 7, 300 page(s) isolated)`. Levels other
+than `user.test=6` never run it, and `SYS_FORK` does not grow with the image:
+the cost is one PTE update per page plus one table entry per distinct frame.
+
+`user.test=6` adds the large-fork probe after the two-page one;
+`scripts/mkdisk.sh` installs `/bin/forkbig`, so the disk carries nine programs.
+
+The gate-53 fork markers in order:
+
+```
+CRUGOS: user fork test start
+CRUGOS: user fork start
+CRUGOS: user fork tid 16 -> 17 (7 page(s) shared, COW)
+CRUGOS: user cow fault tid 16 va=0x000000803fffffc8 (copy)
+CRUGOS: user cow fault tid 17 va=0x0000008000011000 (copy)
+CRUGOS: user fork tid 17
+CRUGOS: user fork child word 8738
+CRUGOS: user fork reap exit 3
+CRUGOS: user cow fault tid 16 va=0x0000008000011000 (sole owner)
+CRUGOS: user fork parent word 4369
+CRUGOS: user fork parent write 17476
+CRUGOS: user fork ok (child exit 3, memory isolated, 2 COW page(s))
+CRUGOS: user fork test ok (child exit 3, memory isolated)
+CRUGOS: user forkbig start
+CRUGOS: user forkbig tid 16
+CRUGOS: user forkbig child tid 17
+CRUGOS: user cow fault tid 17 va=0x... (copy)
+CRUGOS: user forkbig reap exit 7
+CRUGOS: user forkbig ok (child exit 7, 300 page(s) isolated)
+```
+
+The exact tid and address values vary by run (the forkbig block's fault line is
+shown with a placeholder address for that reason); boot-check only requires the
+shape: a shared count of at least 2, at least two `(copy)` faults and one
+`(sole owner)` fault for the fork block, and at least 300 shared pages plus one
+`(copy)` fault for the forkbig block.
+
+### What U6 does not do
+
+- There is no copy-on-write `memcpy` avoidance beyond the first store: each
+  written page is copied once, and a page never written is never copied.
+- The 4096-entry table is a hard bound. A fork that needs more distinct shared
+  frames is refused with `ENOMEM`; it does not fall back to eager copying.
+- The 4096-page fork cap still applies, and there is no swap or page cache
+  behind a share.
+- A fork still inherits only the user window: no descriptors, no pending
+  signals, no timers - the child starts with an empty descriptor table.
 
 ## Building a user program
 
@@ -646,7 +816,7 @@ The build rule is a single Makefile target:
 make user
 ```
 
-`USER_PROGRAMS` is `hello badptr fault iso sh spawn child fork`. The common rule
+`USER_PROGRAMS` is `hello badptr fault iso sh spawn child fork forkbig`. The common rule
 compiles `user/*.c` with `-fcrug-kernel -ffreestanding -mcmodel=large -nostdlib
 -no-pie -Wl,-T,user/user.ld` into `build/x86_64/user/<name>`; `iso` and `sh` have
 explicit rules of their own because they link with `user/iso.ld` and
@@ -696,48 +866,59 @@ warning at disk-build time and a "did not start" failure at run time.
 | `CRUGOS: user spawn test ok (child exit 5, exec exit 5)` | end of level 4 | both the child and the exec path behaved |
 | `CRUGOS: user fork test start` | `user.test=5` | the kernel is about to run `/bin/fork` |
 | `CRUGOS: user fork start` | from `/bin/fork` | before `SYS_FORK` |
-| `CRUGOS: user fork tid <n> -> <m> (N page(s))` | from `/bin/fork` | parent tid, child tid and the pages copied |
-| `CRUGOS: user fork tid <n>` | from `/bin/fork` | the child is alive and knows its tid |
+| `CRUGOS: user fork tid <n> -> <m> (N page(s) shared, COW)` | kernel `SYS_FORK` path | parent tid, child tid and how many frames the two spaces share |
+| `CRUGOS: user cow fault tid <n> va=<va> (copy)` | first store to a shared page | the frame was copied and the store retried |
+| `CRUGOS: user cow fault tid <n> va=<va> (sole owner)` | store to a page nothing else maps | the leaf just regained `WRITE` |
+| `CRUGOS: user fork tid <n>` | from `/bin/fork` | the parent prints the child tid `SYS_FORK` returned |
 | `CRUGOS: user fork child word <n>` | from `/bin/fork` | the child's copy holds 8738 |
 | `CRUGOS: user fork reap exit <n>` | from `/bin/fork` | `SYS_WAIT` returned the child's code |
 | `CRUGOS: user fork parent word <n>` | from `/bin/fork` | the parent still reads its own 4369 |
-| `CRUGOS: user fork ok (child exit 3, memory isolated)` | from `/bin/fork` | the child's write did not reach the parent |
-| `CRUGOS: user fork test ok (child exit 3, memory isolated)` | end of level 5 | the whole fork probe behaved |
+| `CRUGOS: user fork parent write <n>` | from `/bin/fork` | the sole-owner store printed 17476 |
+| `CRUGOS: user fork ok (child exit 3, memory isolated, 2 COW page(s))` | from `/bin/fork` | the child's writes did not reach the parent |
+| `CRUGOS: user fork test ok (child exit 3, memory isolated)` | end of level 5 | the whole two-page fork probe behaved |
+| `CRUGOS: user forkbig start` | from `/bin/forkbig` | before `SYS_FORK` |
+| `CRUGOS: user forkbig tid <n>` | from `/bin/forkbig` | the parent's tid before the fork |
+| `CRUGOS: user forkbig child tid <n>` | from `/bin/forkbig` | the child is alive with its own copy |
+| `CRUGOS: user forkbig reap exit <n>` | from `/bin/forkbig` | `SYS_WAIT` returned 7 |
+| `CRUGOS: user forkbig ok (child exit 7, 300 page(s) isolated)` | end of level 6 | the sentinel survived the child's writes |
 | `CRUGOS: user selftest ok (3 program(s), 1 fault(s))` | end | the U1 programs behaved |
 
 The counting line is unchanged: it counts the sequential U1 programs, not the
-isolation pair, the shell, the spawn test or the fork test. The crash report lines
+isolation pair, the shell, the spawn test, the fork test or the large-fork test.
+The crash report lines
 (`CRUGOS: trap report ...`) are documented in [traps.md](traps.md) and appear
 between `user fault writing above the window` and the
 `user fault page fault at rip=...` line.
 
 ## The gate
 
-`make test-user5` is gate 52 and the only gate that sets `EXPECT_FORK=yes`; it
-needs the four earlier user flags as well:
+`make test-user6` is gate 53 and the only gate that sets `EXPECT_FORKBIG=yes`;
+it needs the five earlier user flags as well:
 
 ```sh
-make test-user5
+make test-user6
 ```
 
-It rebuilds the ESP and the disk with all eight programs (`disk` depends on
-`user`), boots with `user.test=5` on the kernel command line under a
-`FORK_RUN_TIMEOUT_SEC` (240) budget, then runs `scripts/boot-check.py` with the
-new final argument `EXPECT_FORK` (`argv[31]`; `EXPECT_USER` is `argv[27]`,
-`EXPECT_USERS` is `argv[28]`, `EXPECT_USHELL` is `argv[29]` and
-`EXPECT_SPAWN` is `argv[30]`). The argument-count guard is now
-`tuple(range(3, 33))`. The gate then runs the plain `check-disk` pass: it does
-not pass `--expect-shell-write`, so its check-disk line has no `/shout.txt`
-clause, and that write proof stays with gate 50. Every other gate keeps all five
-flags at `no`, so boot-check fails a plain boot that prints any user, isolation,
-shell, spawn or fork marker - the feature must be dormant unless the token is
+It rebuilds the ESP and the disk with all nine programs (`disk` depends on
+`user`), boots with `user.test=6` on the kernel command line under a
+`FORKBIG_RUN_TIMEOUT_SEC` (300) budget, then runs `scripts/boot-check.py` with
+the new final argument `EXPECT_FORKBIG` (`argv[32]`; `EXPECT_USER` is
+`argv[27]`, `EXPECT_USERS` is `argv[28]`, `EXPECT_USHELL` is `argv[29]`,
+`EXPECT_SPAWN` is `argv[30]` and `EXPECT_FORK` is `argv[31]`). The
+argument-count guard is now `if len(sys.argv) < 3 or len(sys.argv) > 33:`. The
+gate then runs the plain `check-disk` pass: it does not pass
+`--expect-shell-write`, so its check-disk line has no `/shout.txt` clause, and
+that write proof stays with gate 50. Every other gate keeps all six flags at
+`no`, so boot-check fails a plain boot that prints any user, isolation, shell,
+spawn, fork or forkbig marker - the feature must be dormant unless the token is
 present.
 
 `make test-user` (gate 48), `make test-user2` (gate 49), `make test-user3`
-(gate 50) and `make test-user4` (gate 51) still run their own levels:
-`user.test=1` is the three U1 programs, `user.test=2` adds the isolation pair,
-`user.test=3` adds the shell, `user.test=4` adds `/bin/spawn`, and
-`user.test=5` adds `/bin/fork`.
+(gate 50), `make test-user4` (gate 51) and `make test-user5` (gate 52) still run
+their own levels: `user.test=1` is the three U1 programs, `user.test=2` adds the
+isolation pair, `user.test=3` adds the shell, `user.test=4` adds `/bin/spawn`,
+`user.test=5` adds `/bin/fork`, and `user.test=6` adds `/bin/forkbig` on top
+of the two-page fork.
 
 Captured output from the gate in order (the report's `trap rip=` line and the two
 `trap regs` lines are elided - they carry the same frame the `user fault` line
@@ -752,15 +933,25 @@ CRUGOS: user spawn test start
 CRUGOS: user spawn test ok (child exit 5, exec exit 5)
 CRUGOS: user fork test start
 CRUGOS: user fork start
-CRUGOS: user fork tid 16 -> 17 (6 page(s))
+CRUGOS: user fork tid 16 -> 17 (7 page(s) shared, COW)
+CRUGOS: user cow fault tid 16 va=0x000000803fffffc8 (copy)
+CRUGOS: user cow fault tid 17 va=0x0000008000011000 (copy)
 CRUGOS: user fork tid 17
 CRUGOS: user fork child word 8738
 CRUGOS: user fork reap exit 3
+CRUGOS: user cow fault tid 16 va=0x0000008000011000 (sole owner)
 CRUGOS: user fork parent word 4369
-CRUGOS: user fork ok (child exit 3, memory isolated)
+CRUGOS: user fork parent write 17476
+CRUGOS: user fork ok (child exit 3, memory isolated, 2 COW page(s))
 CRUGOS: user fork test ok (child exit 3, memory isolated)
+CRUGOS: user forkbig start
+CRUGOS: user forkbig tid 16
+CRUGOS: user forkbig child tid 17
+CRUGOS: user cow fault tid 17 va=0x... (copy)
+CRUGOS: user forkbig reap exit 7
+CRUGOS: user forkbig ok (child exit 7, 300 page(s) isolated)
 CRUGOS: user selftest ok (3 program(s), 1 fault(s))
-CRUGOS: phase u5 boot ok
+CRUGOS: phase u6 boot ok
 ```
 
 Between `user fault writing above the window` and the `user fault page fault`
@@ -771,15 +962,16 @@ bits, same `cr2`).
 The boot check that accepts it:
 
 ```
-ok: boot markers found, version 0.39.0 avx2 yes raid no nvme no rebuild no ahci no crypt no aes any net no tcp no dns no usb no mouse no audio no gfx no wb no menu no shell no keys no desk no icons no drawer no select no heap no user yes isolated yes ushell yes spawn yes fork yes storage disk QEMU exit status 33
+ok: boot markers found, version 0.40.0 avx2 yes raid no nvme no rebuild no ahci no crypt no aes any net no tcp no dns no usb no mouse no audio no gfx no wb no menu no shell no keys no desk no icons no drawer no select no heap no user yes isolated yes ushell yes spawn yes fork yes forkbig yes storage disk QEMU exit status 33
 ```
 
-The `user yes`, `isolated yes`, `ushell yes`, `spawn yes` and `fork yes`
-fields are the user fields; all others are the same as the H4 gate. The boot
+The `user yes`, `isolated yes`, `ushell yes`, `spawn yes`, `fork yes` and
+`forkbig yes` fields are the user fields; all others are the same as the H4
+gate. The boot
 timing line has the same shape (values vary by run):
 
 ```
-boot   : pmm=27755 us cpu=397 us vm=663 us traps=321 us timer=65329 us heap=477 us storage=95269 us sched=373 us syscall=129 us total=190716 us
+boot   : pmm=27755 us cpu=397 us vm=663 us traps=321 us timer=65329 us heap=477 us storage=95269 us sched=373 us syscall=129 us total=189132 us
 ```
 
 `check-disk` runs after the boot and reports the root filesystem intact:
@@ -788,7 +980,7 @@ boot   : pmm=27755 us cpu=397 us vm=663 us traps=321 us timer=65329 us heap=477 
 ok: ext4 root is clean, /hello.txt and /selftest/b.txt persisted
 ```
 
-That is the plain pass. Gate 52 does not pass `--expect-shell-write`, so it
+That is the plain pass. Gate 53 does not pass `--expect-shell-write`, so it
 never asserts `/shout.txt`; that clause in the check-disk output belongs to
 gate 50 only.
 
@@ -823,14 +1015,28 @@ Reading a failure:
   `user_test.c`, `/bin/fork` is missing from the disk, or `SYS_FORK` failed
   before the child existed;
 - a missing `user fork tid 16 -> 17` line means `SYS_FORK` returned an error:
-  the parent is over the 256-page cap or a page allocation failed;
+  the parent is over the 4096-page cap, the 4096-slot reference table had no
+  free slot, or a page allocation failed;
 - a child that never prints `user fork child word` means the trampoline did not
   reach CPL3 - check `thread_fork_enter`, `isr_return` and the parked frame;
 - a `user fork parent word` other than 4369 means the child's write reached the
-  parent's frame: the clone aliased pages instead of copying them;
+  parent's frame: the clone aliased pages instead of sharing them read-only, or
+  the fault path repaired the parent leaf instead of copying it;
+- a missing `user fork parent write 17476` line means the sole-owner repair did
+  not restore the writable bit after the child exited;
+- a `user cow fault` line naming a `(copy)` where the leaf was already private,
+  or a fork whose cow faults never appear, means the `VM_COW` bookkeeping is
+  wrong; check that the parent leaf lost `VM_WRITE` and gained `VM_COW`;
+- a missing `user forkbig ...` block means `user.test=6` did not reach
+  `user_test.c`, `/bin/forkbig` is missing from the disk, or the child could not
+  fork 300 pages;
+- a `user forkbig` shared count below 300 means the clone refused or skipped
+  pages - a 300-page fork should share every present writable leaf;
+- a `user forkbig memory not isolated` line means the child's `0x5A` writes
+  reached the parent's 300-page mapping;
 - a `user fork reap exit` other than 3 means the child exited through another
   path or `SYS_WAIT` returned the wrong code;
-- a `check-disk` complaint about `/shout.txt` belongs to gate 50: gate 52 runs
+- a `check-disk` complaint about `/shout.txt` belongs to gate 50: gate 53 runs
   the plain pass and expects only `/hello.txt` and `/selftest/b.txt`.
   A missing `/hello.txt` or `/selftest/b.txt`, or an unclean ext4, means the
   disk build or the umount path broke;
@@ -848,11 +1054,16 @@ Reading a failure:
   `vm_space_unmap_user_pages` frees the leaf frame, not the tables. A fork
   builds a second set for the child's space, so every fork leaves the parent's
   tables in place and adds a new tree that is freed only when the child dies.
-- Fork copies eagerly: there is no copy-on-write, so `SYS_FORK` allocates and
-  `memcpy`s every user page at call time, and the cost grows with the window the
-  parent actually uses.
-- A fork is capped at `VM_SPACE_FORK_MAX_PAGES` (256 pages): a parent with more
-  user pages is refused with an error rather than given a partial copy.
+- Fork is copy-on-write but not lazy beyond that: the first store to a shared
+  page on either side copies that page, so a program that writes its whole
+  window after a fork still pays one `memcpy` per written page. A page that is
+  never written is never copied.
+- The reference table is a fixed 4096-slot table with no growth: a fork that
+  would need more distinct shared frames is refused with `ENOMEM` (the clone
+  destroys the half-built child) rather than falling back to an eager copy.
+- A fork is capped at `VM_SPACE_FORK_MAX_PAGES` (4096 pages): a parent with more
+  user pages is refused with an error rather than given a partial copy. There is
+  no swap and no page cache behind a share.
 - The forked child inherits memory only. Its descriptor table starts empty
   (`ufile_table_init`), so an open file is not shared and a buffered write is
   never flushed twice; there are no pending signals or timers to inherit either.

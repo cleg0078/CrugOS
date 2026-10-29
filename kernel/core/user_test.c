@@ -38,7 +38,8 @@
 #define USER_ISO_WORD 0x0000008000030000ull
 
 /* 0 = off, 1 = U1 programs, 2 = U1 programs plus the isolation pair,
-   3 = plus the ring-3 shell, 4 = plus spawn/wait/exec, 5 = plus fork. */
+   3 = plus the ring-3 shell, 4 = plus spawn/wait/exec, 5 = plus fork,
+   6 = plus a 300-page copy-on-write fork. */
 static int g_user_test;
 
 static int user_space(char c)
@@ -214,9 +215,10 @@ static int user_spawn(void)
     return 0;
 }
 
-/* Phase U5: /bin/fork duplicates itself, the child writes to a private word
+/* Phase U5/U6: /bin/fork forks itself, the child writes to two shared pages
    and exits 3, and the parent has to observe both the exit code and its own
-   unchanged word, which only holds if the address space was copied. */
+   unchanged words: the pages are shared read-only and the stores take a
+   private copy. */
 static int user_fork(void)
 {
     elf_exec_result res;
@@ -240,6 +242,32 @@ static int user_fork(void)
     return 0;
 }
 
+/* Phase U6: /bin/forkbig maps 300 pages before forking, which the old
+   256-page eager copy refused, and the child's writes to the first and last
+   byte must stay invisible to the parent. */
+static int user_forkbig(void)
+{
+    elf_exec_result res;
+    thread *t;
+    i64 code;
+
+    kprintf("CRUGOS: user forkbig test start\n");
+    memset(&res, 0, sizeof(res));
+    t = elf_exec_run("/bin/forkbig", &res);
+    if (!t) {
+        kprintf("CRUGOS: user selftest failed (/bin/forkbig did not start)\n");
+        return -1;
+    }
+    code = thread_join_code(t);
+    if (code != 0) {
+        kprintf("CRUGOS: user selftest failed (/bin/forkbig exited %lld, expected 0)\n",
+                code);
+        return -1;
+    }
+    kprintf("CRUGOS: user forkbig test ok (child exit 7, 300 page(s) isolated)\n");
+    return 0;
+}
+
 int user_selftest(void)
 {
     if (!g_user_test)
@@ -259,6 +287,8 @@ int user_selftest(void)
     if (g_user_test >= 4 && user_spawn() != 0)
         return -1;
     if (g_user_test >= 5 && user_fork() != 0)
+        return -1;
+    if (g_user_test >= 6 && user_forkbig() != 0)
         return -1;
     kprintf("CRUGOS: user selftest ok (3 program(s), 1 fault(s))\n");
     return 0;
