@@ -753,11 +753,13 @@ with `wb.enable=1 wb.wait=30 wb.desk=1 wb.dr=1 wb.fill=24 wb.acts=4`, and
 `make test-workbench-select` with `wb.enable=1 wb.wait=30 wb.desk=1 wb.dr=1
 wb.dsel=1 wb.fill=24 wb.acts=3`, and `make test-workbench-screens` with
 `wb.enable=1 wb.wait=30 wb.screens=1 wb.acts=4`, and `make test-workbench-cx` with
-`wb.enable=1 wb.wait=30 wb.cx=1 wb.acts=4`. `make demo` boots
-`wb.enable=1 wb.wait=0 wb.hold=<seconds>` instead: `wb.wait=0` turns both
-self-tests into no-ops, so the interactive desktop needs neither a drag nor an
-action before the boot marker, and `wb.hold=` keeps the guest alive
-afterwards.
+`wb.enable=1 wb.wait=30 wb.cx=1 wb.acts=4`. `make demo` boots the whole desktop
+instead -- `wb.enable=1 wb.wait=0 wb.desk=1 wb.dr=1 wb.dsel=1 wb.screens=1
+wb.cx=1 wb.shell=1 wb.fill=<files> wb.hold=<seconds>`: `wb.wait=0`
+turns both self-tests into no-ops, so the interactive desktop needs neither a
+drag nor an action before the boot marker, `wb.hold=` keeps the guest alive
+afterwards, and the other tokens make the object, the drawer, both screens, the
+Exchange and a live Shell appear at boot.
 
 ## Boot integration and markers
 
@@ -1569,15 +1571,22 @@ actions. See [build.md](build.md).
 
 ## Interactive demo
 
-`make demo` boots the same desktop in a real QEMU window instead of a headless
-gate: `DEMO_QEMU_EXTRA` plugs a keyboard and a mouse into the xHCI controller
-before boot, `DEMO_DISPLAY` (GTK) opens the window, and the command line carries
-`wb.enable=1 wb.wait=0 wb.hold=$(DEMO_HOLD_SEC)`. The desktop appears once
-`CRUGOS: wb desktop ready` is printed, `wb_hold()` then polls input once per
-timer tick until the deadline, so the two demo windows stay on screen and the
-pointer and the keyboard are live (pointer motion prints
-`CRUGOS: usb mouse move`, a title-bar press starts a drag). After the hold the
-guest prints `CRUGOS: wb hold finished`, exits with status 33 and leaves
+`make demo` boots the whole Workbench in a real QEMU window instead of a
+headless gate: `DEMO_QEMU_EXTRA` plugs a keyboard and a mouse into the xHCI
+controller before boot, `DEMO_DISPLAY` (GTK) opens the window, and
+`DEMO_CMDLINE` carries `wb.enable=1 wb.wait=0 wb.desk=1 wb.dr=1 wb.dsel=1
+wb.screens=1 wb.cx=1 wb.shell=1 wb.fill=$(DEMO_FILL_FILES)
+wb.hold=$(DEMO_HOLD_SEC)`, i.e. every desktop feature at once. The desktop
+appears once `CRUGOS: wb desktop ready` is printed, the ready markers for the
+object, the drawer modes, the screens, the Exchange and the Shell follow, and
+`wb_hold()` then polls input once per timer tick until the deadline, so all
+four windows stay on screen and the pointer and the keyboard are live (pointer
+motion prints `CRUGOS: usb mouse move`, a title-bar press starts a drag,
+`F2`/`F3`/`F4`/`F6` fire the commodities). Double-clicking the `System:` object
+opens its drawer and the fill runs the first time; because the Shell owns the
+keyboard, the drawer's arrow keys are inert and its rows and scrollbar are
+driven by the mouse. After the hold the guest prints
+`CRUGOS: wb hold finished`, exits with status 33 and leaves
 `build/x86_64/serial.log` behind. See [build.md](build.md).
 
 ## Limits

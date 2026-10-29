@@ -26,7 +26,7 @@ Run `make preflight` to check all of the above.
 make             # show this target list (same as `make help`)
 make all         # kernel.elf, BOOTX64.EFI and the ESP tree
 make run         # boot the ESP tree under QEMU + OVMF
-make demo        # boot the Workbench desktop in a real QEMU window
+make demo        # boot the full Workbench demo in a real QEMU window
 make test        # boot, verify markers/version/AVX2, then e2fsck the disk
 make test-net    # boot with a slirp virtio-net NIC and verify DHCP/ARP/ICMP
 make test-tcp    # TCP client/server and an HTTP exchange, both directions
@@ -212,9 +212,10 @@ options` prints the complete resolved set (including paths derived from
 | `FORK_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for the `make test-user5` boot, which also runs the fork stage |
 | `FORKBIG_RUN_TIMEOUT_SEC` | `300` | wall-clock budget for the `make test-user6` boot, which also runs the 300-page copy-on-write fork |
 | `DEMO_DISPLAY` | `gtk` | QEMU display `make demo` opens (any `-display` value, for example `sdl` or `none`) |
-| `DEMO_HOLD_SEC` | `600` | seconds `make demo` keeps the desktop on screen before the guest exits by itself |
+| `DEMO_HOLD_SEC` | `600` | seconds `make demo` keeps the full Workbench on screen before the guest exits by itself |
+| `DEMO_FILL_FILES` | `12` | files the demo drawer creates the first time it opens; `0` leaves the volume untouched |
 | `DEMO_TIMEOUT_SEC` | `900` | wall-clock budget for the whole `make demo` boot |
-| `DEMO_CMDLINE` | `wb.enable=1 wb.wait=0 wb.hold=$(DEMO_HOLD_SEC)` | `CMDLINE_EXTRA` the demo boot passes to the kernel |
+| `DEMO_CMDLINE` | `wb.enable=1 wb.wait=0 wb.desk=1 wb.dr=1 wb.dsel=1 wb.screens=1 wb.cx=1 wb.shell=1 wb.fill=$(DEMO_FILL_FILES) wb.hold=$(DEMO_HOLD_SEC)` | `CMDLINE_EXTRA` the demo boot passes to the kernel |
 | `DEMO_MACHINE_EXTRA` | `usb=off,i8042=off` | machine properties, so the demo keyboard and mouse are the only ones |
 | `DEMO_QEMU_EXTRA` | `-device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-mouse,bus=xhci.0` | QEMU arguments that attach an xHCI with a keyboard and a mouse |
 | `ISO_IMAGE` | `build/<arch>/crugos.iso` | hybrid UEFI ISO written by `make iso` |
@@ -927,27 +928,42 @@ reference table and the fault taxonomy are documented in
 `make demo` is not a gate but a way to watch the system: it boots
 `DEMO_QEMU_EXTRA` (an xHCI controller with a `usb-kbd` and a `usb-mouse`
 already plugged in) into a real `DEMO_DISPLAY` window (GTK by default) instead
-of the headless gates. The command line carries
-`wb.enable=1 wb.wait=0 wb.hold=$(DEMO_HOLD_SEC)`:
+of the headless gates. `DEMO_CMDLINE` carries the whole feature set:
 
-- `wb.enable=1` hands the framebuffer to the phase 6G desktop and opens the two
-  demo windows; adding `wb.shell=1` through `DEMO_CMDLINE` gives window 2 the
-  shell, while `wb.keys=1` lets Tab and the arrow keys drive the desktop and
-  `wb.ikeys=1` plus `wb.desk=1` give the `System:` icon keyboard focus.
+```
+wb.enable=1 wb.wait=0 wb.desk=1 wb.dr=1 wb.dsel=1 wb.screens=1 wb.cx=1
+wb.shell=1 wb.fill=$(DEMO_FILL_FILES) wb.hold=$(DEMO_HOLD_SEC)
+```
+
+- `wb.enable=1` hands the framebuffer to the desktop and opens the Workbench,
+  Shell and Exchange windows.
+- `wb.desk=1` draws the `System:` object; `wb.dr=1` and `wb.dsel=1` enable its
+  drawer (arrow-key scroll, refresh, row select and the scrollbar), and
+  `wb.fill=$(DEMO_FILL_FILES)` fills that drawer the first time it opens.
+- `wb.screens=1` gives the screen strip a second `Tools` screen, `wb.cx=1`
+  opens the Commodities Exchange with its four built-ins, and `wb.shell=1`
+  makes the Shell window live.
 - `wb.wait=0` turns the desktop self-test into a no-op, so the demo does not
-  require a title-bar drag before the gate marker; the interactive desktop is
-  the point, not the self-test.
-- `wb.hold=<seconds>` keeps the guest alive after `CRUGOS: phase 6g boot ok`
+  require a title-bar drag or a fired action before the boot marker; the
+  interactive desktop is the point, not the self-test.
+- `wb.hold=<seconds>` keeps the guest alive after `CRUGOS: phase 6j boot ok`
   (`wb_hold()`), polling input once per timer tick, so the window stays on
   screen until the deadline or until you close it.
 
-Inside the window the USB keyboard and the USB mouse are live: pointer motion
-prints `CRUGOS: usb mouse move dx=.. dy=..` on the serial console, a left
-press on a title bar starts a drag, and `Ctrl+Alt+G` releases the pointer grab
-so you can leave the window. The guest then exits through `isa-debug-exit`
-with status 33, exactly like the gates, and `build/x86_64/serial.log` plus
-`build/x86_64/exit-code.txt` keep the record. Passing `DEMO_DISPLAY=none`
-turns the same target into a headless demo.
+Window menus need no token: `wb_init()` installs them on every window, so they
+are clickable in the demo even though `wb.menu=1` is only used by the menu
+gate. Because `wb.shell=1` owns the keyboard, the drawer's arrow keys are
+inert in the demo and its rows and scrollbar are mouse-driven; the `F1`..`F12`
+hotkeys still reach the commodities, so `F2`/`F3`/`F4`/`F6` change the volume,
+mute and print the uptime. Inside the window the USB keyboard and the USB
+mouse are live: pointer motion prints `CRUGOS: usb mouse move dx=.. dy=..` on
+the serial console, a left press on a title bar starts a drag, a double-click
+on the `System:` object opens the drawer, and `Ctrl+Alt+G` releases the
+pointer grab so you can leave the window. The guest then exits through
+`isa-debug-exit` with status 33, exactly like the gates, and
+`build/x86_64/serial.log` plus `build/x86_64/exit-code.txt` keep the record.
+Passing `DEMO_DISPLAY=none` turns the same target into a headless demo, and
+`DEMO_HOLD_SEC=0` boots and exits at once.
 
 ## Bootable ISO
 

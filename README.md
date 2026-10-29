@@ -516,12 +516,15 @@ Phase 6A starts the Workbench: a small software window manager in the kernel.
   clicks the `Run` gadget, closes window 2 through its close gadget, opens the
   `Workbench` menu and selects `Quit`, then requires four action lines, the menu
   markers and a 33 exit status;
-- `make demo` boots that same desktop in a real QEMU window instead of a
+- `make demo` boots the whole Workbench in a real QEMU window instead of a
   headless gate: `DEMO_QEMU_EXTRA` plugs a `usb-kbd` and a `usb-mouse` into the
   xHCI controller, `DEMO_DISPLAY` (GTK) opens the window, and the command line
-  carries `wb.enable=1 wb.wait=0 wb.hold=<seconds>`, so the desktop stays on
-  screen and both input devices are live until the hold expires (Ctrl+Alt+G
-  releases the pointer). See [build.md](docs/build.md).
+  carries every desktop feature at once -- `wb.enable=1 wb.wait=0 wb.desk=1
+  wb.dr=1 wb.dsel=1 wb.screens=1 wb.cx=1 wb.shell=1
+  wb.fill=$(DEMO_FILL_FILES) wb.hold=<seconds>` -- so the desktop object and its
+  drawer, both screens, the Commodities Exchange and a live Shell are on screen
+  together until the hold expires (Ctrl+Alt+G releases the pointer). See
+  [build.md](docs/build.md).
 
 Phase 6D makes the windows resizable and gives the keyboard work of its own.
 
@@ -1577,15 +1580,23 @@ bar of window 2 sits at `(570, 350)`, the old bar position is idle grey, and the
 white frame of window 1 is unchanged. The drag offset is `(32, 12)` (the grab
 point inside the title bar), so the window moves less than the pointer.
 
-`make demo` shows the same desktop interactively: it boots with a pre-attached
-USB keyboard and mouse into a GTK window and holds the framebuffer with
-`wb.hold=`, so the two windows, their title bars and the amber pointer are on
-screen instead of being verified by a gate. The keyboard types on the serial
-console and the mouse drives the pointer, so a title bar can be dragged by hand;
-`build/x86_64/serial.log` records the `CRUGOS: usb mouse move` lines and the
+`make demo` shows the whole Workbench interactively: it boots with a
+pre-attached USB keyboard and mouse into a GTK window and holds the framebuffer
+with `wb.hold=`. The default `DEMO_CMDLINE` switches every feature on at once --
+`wb.desk=1` for the `System:` object, `wb.dr=1 wb.dsel=1` for its drawer (filled
+with `DEMO_FILL_FILES` files the first time it opens), `wb.screens=1` for the
+`Workbench`/`Tools` screen strip, `wb.cx=1` for the Commodities Exchange and
+`wb.shell=1` for a live Shell window -- so double-clicking the object, dragging
+rows, switching screens, pressing `F2`/`F3`/`F4`/`F6` and typing at the prompt
+all work without a gate. Because the Shell owns the keyboard, the drawer's
+arrow-key navigation is inert; its rows and scrollbar are driven by the mouse.
+`build/x86_64/serial.log` records the ready markers (`wb icon ready`,
+`wb drawer mode`, `wb select mode`, `wb screens ready`, `wb cx ready`,
+`wb shell ready`), the `CRUGOS: usb mouse move` lines and the
 `CRUGOS: wb holding desktop for <seconds> s` line, and the guest still exits
 with status 33 when the hold ends. `DEMO_HOLD_SEC=0` plus
-`DEMO_DISPLAY=none` turns it back into a fast headless boot.
+`DEMO_DISPLAY=none` turns it back into a fast headless boot, and
+`DEMO_FILL_FILES=0` leaves the volume untouched.
 
 With no xHCI function in the default machine the driver prints
 `CRUGOS: usb controller absent` (as in the excerpt above) and the PS/2 keyboard
@@ -1712,7 +1723,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `FUZZ_CRYPT_CASES`, `FUZZ_SEED`, `FUZZ_TIMEOUT_SEC`, `USER_RUN_TIMEOUT_SEC`,
 `USER2_RUN_TIMEOUT_SEC`, `SHELL_RUN_TIMEOUT_SEC`, `SPAWN_RUN_TIMEOUT_SEC`,
 `FORK_RUN_TIMEOUT_SEC`, `FORKBIG_RUN_TIMEOUT_SEC`,
-`DEMO_DISPLAY`, `DEMO_HOLD_SEC`,
+`DEMO_DISPLAY`, `DEMO_HOLD_SEC`, `DEMO_FILL_FILES`,
 `DEMO_TIMEOUT_SEC`, `DEMO_CMDLINE`, `DEMO_MACHINE_EXTRA`, `DEMO_QEMU_EXTRA`,
 `ISO_IMAGE`, `ISO_STAGE`, `ISO_FAT_IMG`, `ISO_SIZE_MB`, `ISO_VOLID`,
 `ISO_CMDLINE`, `ISO_DATE`, `ISO_RUN_TIMEOUT_SEC`, `EXPECT_ISO`, `ISO_IMG`,

@@ -844,10 +844,13 @@ screendump, so a window that logs a move without repainting fails.
 `make test-workbench-menu` adds `wb.menu=1 wb.acts=4` to that command line and
 clicks menus, the `Run` gadget, the close gadget and a second menu, so the log
 carries the `wb menu ...` and `wb action N ...` lines on top of the desktop and
-window lines. `make demo`
-boots the same desktop interactively instead of headlessly: it passes
-`wb.enable=1 wb.wait=0 wb.hold=<seconds>`, so the log shows the desktop, the two
-windows, `CRUGOS: wb holding desktop for <seconds> s` and
+window lines. `make demo` boots the whole Workbench
+interactively instead of headlessly: it passes every desktop token
+(`wb.enable=1 wb.wait=0 wb.desk=1 wb.dr=1 wb.dsel=1 wb.screens=1
+wb.cx=1 wb.shell=1 wb.fill=<files> wb.hold=<seconds>`), so the log shows the
+desktop, the four windows, `wb icon ready`, `wb drawer mode`,
+`wb select mode`, `wb screens ready`, `wb cx ready (4 commodity(ies))`,
+`wb shell ready`, `CRUGOS: wb holding desktop for <seconds> s` and
 `CRUGOS: wb hold finished` before the guest exits with status 33.
 `make test-workbench-icons` keeps `wb.desk=1` and adds `wb.ikeys=1 wb.acts=5`,
 and hotplugs a `usb-kbd` as well as a `usb-mouse`, so the log carries the icon
