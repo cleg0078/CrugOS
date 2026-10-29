@@ -226,6 +226,24 @@ def changed_pixels(first, second, box):
     return count
 
 
+def settle_until(qmp, shot, probes, ok, tries=40, delay=0.05):
+    """Capture until the pixel probes satisfy ok(), and count the retries.
+
+    A screendump requested right after a guest marker can still show the frame
+    from before the paint: the host display update is asynchronous, so the
+    first capture after an event occasionally lags one repaint.  Retry for a
+    bounded time; a frame that never settles still fails the gate.
+    probes: name -> (x, y); ok: callable(samples) -> bool."""
+    samples = {}
+    for attempt in range(tries):
+        qmp.screendump(shot)
+        samples = {name: pixel_at(shot, x, y)
+                   for name, (x, y) in probes.items()}
+        if ok(samples):
+            return samples, attempt
+        time.sleep(delay)
+    return samples, tries - 1
+
 def last_position(path, pattern, fallback):
     text = read_log(path).decode("utf-8", "replace")
     found = pattern.findall(text)
@@ -370,8 +388,13 @@ def main():
         expect(SELECT_MODE, "the guest reported select mode")
 
         shot_idle = tmpdir / "select-0.ppm"
-        qmp.screendump(shot_idle)
-        idle_row0 = pixel_at(shot_idle, *ROW0_PROBE)
+        samples, retries = settle_until(
+            qmp, shot_idle, {"row0": ROW0_PROBE},
+            lambda s: s["row0"] == WINDOW_RGB)
+        idle_row0 = samples["row0"]
+        if retries:
+            print("wbsel: idle paint settled after %d retr%s"
+                  % (retries, "y" if retries == 1 else "ies"))
         print("wbsel: idle row 0 pixel %s" % (idle_row0,))
         if idle_row0 != WINDOW_RGB:
             return fail("row 0 is %s before any click, expected the body %s"
@@ -382,9 +405,14 @@ def main():
         qmp.click()
         expect(ROW_SELECTED, "the third row was selected")
         shot_selected = tmpdir / "select-1.ppm"
-        qmp.screendump(shot_selected)
-        band = pixel_at(shot_selected, *ROW2_PROBE)
-        above = pixel_at(shot_selected, *ROW0_PROBE)
+        samples, retries = settle_until(
+            qmp, shot_selected, {"band": ROW2_PROBE, "above": ROW0_PROBE},
+            lambda s: s["band"] == SELECTED_RGB and s["above"] == WINDOW_RGB)
+        band = samples["band"]
+        above = samples["above"]
+        if retries:
+            print("wbsel: selection paint settled after %d retr%s"
+                  % (retries, "y" if retries == 1 else "ies"))
         print("wbsel: selected band %s, row 0 %s" % (band, above))
         if band != SELECTED_RGB:
             return fail("the selected band is %s, expected amber %s"
@@ -420,8 +448,13 @@ def main():
         if top < 1:
             return fail("the scrollbar drag left the view at the top")
         shot_scrolled = tmpdir / "select-2.ppm"
-        qmp.screendump(shot_scrolled)
-        scrolled_row2 = pixel_at(shot_scrolled, *ROW2_PROBE)
+        samples, retries = settle_until(
+            qmp, shot_scrolled, {"row2": ROW2_PROBE},
+            lambda s: s["row2"] != SELECTED_RGB)
+        scrolled_row2 = samples["row2"]
+        if retries:
+            print("wbsel: scroll paint settled after %d retr%s"
+                  % (retries, "y" if retries == 1 else "ies"))
         print("wbsel: row 2 pixel after the scroll %s" % (scrolled_row2,))
         if scrolled_row2 == SELECTED_RGB:
             return fail("the selected band stayed in the body after scrolling")
@@ -442,8 +475,13 @@ def main():
             return fail("the first visible row selected index %d, below the top %d"
                         % (second_index, top))
         shot_second = tmpdir / "select-3.ppm"
-        qmp.screendump(shot_second)
-        new_band = pixel_at(shot_second, *ROW0_PROBE)
+        samples, retries = settle_until(
+            qmp, shot_second, {"row0": ROW0_PROBE},
+            lambda s: s["row0"] == SELECTED_RGB)
+        new_band = samples["row0"]
+        if retries:
+            print("wbsel: second paint settled after %d retr%s"
+                  % (retries, "y" if retries == 1 else "ies"))
         print("wbsel: new selected band %s" % (new_band,))
         if new_band != SELECTED_RGB:
             return fail("the new band is %s, expected amber %s"

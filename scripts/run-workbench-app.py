@@ -320,10 +320,22 @@ def main():
         double_click(ICON)
         expect(APP_READY, "the Applications window opened")
 
+        # The host display update is asynchronous, so a screendump taken right
+        # after the marker can still show the frame from before the repaint:
+        # retry for a bounded time and report how many attempts it took.
         shot = tmpdir / "applications.ppm"
-        qmp.screendump(shot)
-        body = pixel_at(shot, BODY_PIXEL[0], BODY_PIXEL[1])
-        title = pixel_at(shot, TITLE_PIXEL[0], TITLE_PIXEL[1])
+        body = None
+        title = None
+        for attempt in range(40):
+            qmp.screendump(shot)
+            body = pixel_at(shot, BODY_PIXEL[0], BODY_PIXEL[1])
+            title = pixel_at(shot, TITLE_PIXEL[0], TITLE_PIXEL[1])
+            if body == BODY_RGB and title == TITLE_RGB:
+                if attempt:
+                    print("wba: window paint settled after %d retry(ies)"
+                          % attempt)
+                break
+            time.sleep(0.05)
         print("wba: body %s -> %s, title %s -> %s"
               % (BODY_PIXEL, body, TITLE_PIXEL, title))
         if body != BODY_RGB:

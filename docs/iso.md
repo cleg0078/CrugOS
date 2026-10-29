@@ -209,7 +209,12 @@ carries its own.
 * **8.3 names only.** See above; the ESP tree is four files.
 * **24 MiB by default.** The FAT16 cluster count must stay below 65524, so
   `ISO_SIZE_MB` is capped by `mkfat.py`; 24 MiB uses 83 clusters, and the
-  kernel is 289 KiB.
+  kernel is 339 KiB.
+* **Software framebuffer only.** Phase 8A puts the desktop on a virtio-gpu 2D
+  device when the firmware exposes one, but the ISO path is unchanged:
+  `make test-iso` boots with `storage=none` and no virtio-gpu function, so
+  the guest keeps the firmware framebuffer and every pixel is software
+  rendered. See [gpu.md](gpu.md).
 * **No hardware testing.** `make test-iso` boots the artifact in QEMU; writing
   a physical stick and booting real hardware is a manual step (`make usb`).
 

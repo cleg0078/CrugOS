@@ -20,6 +20,7 @@
 #include <crug/usb.h>
 #include <crug/audio.h>
 #include <crug/gfx.h>
+#include <crug/gpu.h>
 #include <crug/workbench.h>
 #include <crug/trap.h>
 #include <crug/exec.h>
@@ -73,6 +74,11 @@ void kernel_main(const boot_info *bi)
     t.heap = arch_read_tsc();
     kprintf("CRUGOS: heap ready\n");
 
+    /* Phase 8A: a virtio-gpu device takes over the display before the desktop
+       is created, so the Workbench draws straight into the GPU resource. */
+    gpu_cmdline(bi);
+    gpu_init();
+
     input_init();
     kprintf("CRUGOS: input ready (%s)\n",
             keyboard_init() == 0 ? "serial + keyboard" : "serial only");
@@ -88,6 +94,8 @@ void kernel_main(const boot_info *bi)
 
     wb_cmdline(bi);
     wb_init();
+    if (gpu_selftest() != 0)
+        arch_exit_qemu(0x11);
 
     net_init(bi);
     kprintf("CRUGOS: net ready (%u device(s))\n", (unsigned)net_device_count());

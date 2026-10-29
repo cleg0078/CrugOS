@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Verify a CrugOS boot: serial markers, guest version, CPU policy, storage mode, encryption, networking, TCP, DNS, USB, HID mice, audio, the framebuffer cursor, the Workbench desktop, its menus and gadgets, its shell window, its keyboard
-navigation, its desktop objects, its scrollable drawer, the ring-3 userspace
+navigation, its desktop objects, its scrollable drawer, the virtio-gpu 2D
+scanout, the ring-3 userspace
 selftest, the ring-3 shell that reads a script and writes a file, the ring-3
 spawn/exec/wait path and the ring-3 fork path, then the exit code.
 
@@ -43,7 +44,7 @@ REQUIRED_MARKERS = (
     "CRUGOS: selftest ok",
     "CRUGOS: nvme ready",
     "CRUGOS: ahci ready",
-    "CRUGOS: phase 7c boot ok",
+    "CRUGOS: phase 8a boot ok",
 )
 # A rejected unlock stops before scheduling, storage mounting and self-tests.
 WRONG_CRYPT_MARKERS = (
@@ -110,6 +111,7 @@ def main() -> int:
     pkg_mode = "no"
     caps_mode = "no"
     wbpkg_mode = "no"
+    gpu_mode = "no"
     argv = []
     for arg in sys.argv[1:]:
         if arg == "--storage=none":
@@ -147,6 +149,11 @@ def main() -> int:
         elif arg.startswith("--expect-wbpkg="):
             print(f"FAIL: invalid packages-window expectation {arg!r}", file=sys.stderr)
             return 2
+        elif arg == "--expect-gpu=yes":
+            gpu_mode = "yes"
+        elif arg.startswith("--expect-gpu="):
+            print(f"FAIL: invalid gpu expectation {arg!r}", file=sys.stderr)
+            return 2
         else:
             argv.append(arg)
     sys.argv = [sys.argv[0]] + argv
@@ -163,7 +170,7 @@ def main() -> int:
               "[EXPECT_FORKBIG]]]]]]]]]]]]]]]]]]]]]]]]]] "
               "[--storage=none] [--expect-screen=yes] [--expect-cx=yes] "
               "[--expect-app=yes] [--expect-pkg=yes] [--expect-caps=yes] "
-              "[--expect-wbpkg=yes]",
+              "[--expect-wbpkg=yes] [--expect-gpu=yes]",
               file=sys.stderr)
         return 2
 
@@ -269,6 +276,8 @@ def main() -> int:
         return fail(f"invalid caps mode {caps_mode!r}", text)
     if wbpkg_mode not in ("no", "yes"):
         return fail(f"invalid packages-window mode {wbpkg_mode!r}", text)
+    if gpu_mode not in ("no", "yes"):
+        return fail(f"invalid gpu mode {gpu_mode!r}", text)
 
     required = list(REQUIRED_MARKERS)
     if storage_mode == "none":
@@ -435,6 +444,46 @@ def main() -> int:
         positions = re.findall(r"CRUGOS: gfx cursor at \(-?\d+, -?\d+\)", text)
         if len(positions) < 2:
             return fail("expected the cursor to move at least once", text)
+
+    if gpu_mode == "yes":
+        # The gate boots without a VGA adapter, so the only display is the
+        # driver's own resource: every marker below proves the 2D scanout.
+        for marker in (
+            "CRUGOS: virtio-gpu ready (",
+            "CRUGOS: gpu scanout ok",
+            "CRUGOS: wb desktop ready",
+            "CRUGOS: gpu selftest ok",
+            "CRUGOS: wb selftest ok",
+        ):
+            if marker not in text:
+                return fail(f"missing serial marker: {marker!r}", text)
+        ready = re.search(
+            r"CRUGOS: virtio-gpu ready \((\d+)x(\d+), (\d+) backing page\(s\), "
+            r"resource \d+, modern pci\)", text)
+        if ready is None:
+            return fail("expected the virtio-gpu resource to be created", text)
+        if int(ready.group(3)) < 1:
+            return fail("expected at least one backing page", text)
+        scanout = re.search(
+            r"CRUGOS: gpu scanout ok \((\d+)x(\d+), (\d+) transfer\(s\), "
+            r"(\d+) flush\(es\)\)", text)
+        if scanout is None:
+            return fail("expected the GPU scanout to report its size", text)
+        if (scanout.group(1), scanout.group(2)) != (ready.group(1), ready.group(2)):
+            return fail("the scanout size differs from the resource size", text)
+        if int(scanout.group(3)) < 1 or int(scanout.group(4)) < 1:
+            return fail("expected at least one flush to the host", text)
+        selftest = re.search(
+            r"CRUGOS: gpu selftest ok \((\d+)x(\d+), (\d+) transfer\(s\), "
+            r"(\d+) flush\(es\)\)", text)
+        if selftest is None:
+            return fail("expected the GPU selftest to report its counters", text)
+        if (selftest.group(1), selftest.group(2)) != (ready.group(1), ready.group(2)):
+            return fail("the selftest size differs from the resource size", text)
+        if int(selftest.group(3)) < 2 or int(selftest.group(4)) < 2:
+            return fail("expected the desktop repaint to flush at least twice", text)
+    elif "CRUGOS: virtio-gpu ready (" in text:
+        return fail("unexpected virtio-gpu scanout without --expect-gpu=yes", text)
 
     if expect_wb == "yes":
         for marker in (
@@ -965,7 +1014,7 @@ def main() -> int:
           "icons", expect_icons, "drawer", expect_drawer,
           "select", expect_select, "screen", screen_mode, "cx", cx_mode,
           "app", app_mode, "pkg", pkg_mode, "caps", caps_mode,
-          "wbpkg", wbpkg_mode,
+          "wbpkg", wbpkg_mode, "gpu", gpu_mode,
           "heap", expect_heap, "user", expect_user,
           "isolated", expect_users, "ushell", expect_ushell,
           "spawn", expect_spawn, "fork", expect_fork,

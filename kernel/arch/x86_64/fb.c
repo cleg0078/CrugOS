@@ -3,6 +3,7 @@
 #include <crug/string.h>
 #include <crug/kernel.h>
 #include <crug/fb.h>
+#include <crug/gpu.h>
 
 #define FB_GLYPH_W 8
 #define FB_GLYPH_H 16
@@ -18,6 +19,45 @@ static u32 g_cols;
 static u32 g_rows;
 static u32 g_x;
 static u32 g_y;
+
+/* Phase 8A: present callback and damage rectangle.  The GPU driver installs a
+   callback that transfers only the damaged pixels; the plain linear
+   framebuffer leaves it NULL and every flush is a no-op. */
+static fb_present_fn g_present;
+static u32 g_present_depth;
+static struct gpu_damage g_dmg;
+
+static void fb_present_flush(void)
+{
+    struct gpu_rect r;
+
+    if (!g_present || g_present_depth) {
+        return;
+    }
+    if (!gpu_damage_rect(&g_dmg, &r)) {
+        return;
+    }
+    gpu_damage_reset(&g_dmg);
+    g_present(r.x, r.y, r.w, r.h);
+}
+
+void fb_present(void)
+{
+    fb_present_flush();
+}
+
+void fb_present_begin(void)
+{
+    g_present_depth++;
+}
+
+void fb_present_end(void)
+{
+    if (g_present_depth) {
+        g_present_depth--;
+    }
+    fb_present_flush();
+}
 
 static u32 fb_pixel_color(u32 rgb)
 {
@@ -38,6 +78,7 @@ static void fb_store(u32 x, u32 y, u32 color)
 {
     volatile u32 *row = (volatile u32 *)(uintptr)(g_fb.base + (u64)y * g_fb.stride * 4);
     row[x] = color;
+    gpu_damage_add(&g_dmg, x, y, 1u, 1u);
 }
 
 static u32 fb_read(u32 x, u32 y)
@@ -149,11 +190,15 @@ static void fb_clear(void)
     g_x = 0;
     g_y = 0;
     fb_cursor_composite();
+    fb_present_flush();
 }
 
 void fb_init(const framebuffer_info *fb)
 {
     g_ready = 0;
+    g_present = 0;
+    g_present_depth = 0;
+    gpu_damage_reset(&g_dmg);
     g_cursor_wanted = 0;
     g_cursor_drawn = 0;
     g_cursor_x = 0;
@@ -193,6 +238,7 @@ static void fb_scroll(void)
         fb_fill_row(y, fb_pixel_color(FB_COLOR_BG));
     }
     fb_cursor_composite();
+    fb_present_flush();
 }
 
 static void fb_draw_glyph(u32 cell_x, u32 cell_y, unsigned char c)
@@ -257,6 +303,11 @@ void fb_putc(char ch)
     fb_cursor_restore();
     fb_putc_raw(ch);
     fb_cursor_composite();
+    /* Flushing once per line keeps boot output readable without one device
+       round trip per glyph; the desktop primitives flush on their own. */
+    if (ch == 0x0A) {
+        fb_present_flush();
+    }
 }
 
 int fb_dimensions(u32 *width, u32 *height)
@@ -279,12 +330,14 @@ void fb_cursor_show_at(u32 x, u32 y)
     g_cursor_y = y;
     g_cursor_wanted = 1;
     fb_cursor_composite();
+    fb_present_flush();
 }
 
 void fb_cursor_hide(void)
 {
     fb_cursor_restore();
     g_cursor_wanted = 0;
+    fb_present_flush();
 }
 
 int fb_cursor_visible(void)
@@ -345,6 +398,7 @@ void fb_fill_rect(u32 x, u32 y, u32 w, u32 h, u32 rgb)
     fb_cursor_restore();
     fb_fill_raw(x, y, w, h, &g_fb, fb_pixel_color(rgb));
     fb_cursor_composite();
+    fb_present_flush();
 }
 
 void fb_frame_rect(u32 x, u32 y, u32 w, u32 h, u32 rgb)
@@ -361,6 +415,7 @@ void fb_frame_rect(u32 x, u32 y, u32 w, u32 h, u32 rgb)
     fb_fill_raw(x, y, 1u, h, &g_fb, color);
     fb_fill_raw(x + w - 1u, y, 1u, h, &g_fb, color);
     fb_cursor_composite();
+    fb_present_flush();
 }
 
 static void fb_glyph_px(u32 x0, u32 y0, unsigned char c, u32 fg, u32 bg)
@@ -398,4 +453,36 @@ void fb_draw_text(u32 x, u32 y, const char *text, u32 fg, u32 bg)
         text++;
     }
     fb_cursor_composite();
+    fb_present_flush();
+}
+/* Adopt a caller-owned linear buffer as the display and its present callback. */
+int fb_attach_linear(u8 *base, u32 width, u32 height, u32 stride, u32 format,
+                     fb_present_fn present)
+{
+    if (!base || !width || !height || stride < width) {
+        return -1;
+    }
+    if (width / FB_GLYPH_W == 0u || height / FB_GLYPH_H == 0u) {
+        return -1;
+    }
+    g_fb.base = (u64)(uintptr)base;
+    g_fb.size = (u64)stride * (u64)height * 4u;
+    g_fb.width = width;
+    g_fb.height = height;
+    g_fb.stride = stride;
+    g_fb.format = format;
+    g_cols = width / FB_GLYPH_W;
+    g_rows = height / FB_GLYPH_H;
+    g_x = 0;
+    g_y = 0;
+    g_text_enabled = 1;
+    g_cursor_wanted = 0;
+    g_cursor_drawn = 0;
+    g_present = present;
+    g_present_depth = 0;
+    gpu_damage_reset(&g_dmg);
+    g_ready = 1;
+    fb_clear();
+    fb_present_flush();
+    return 0;
 }

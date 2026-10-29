@@ -1,6 +1,6 @@
 # Roadmap
 
-The specification defines 59 phases/gates. Phase 0 established the smallest
+The specification defines 60 phases/gates. Phase 0 established the smallest
 end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
 phase 1 makes the kernel own physical memory, page tables, exceptions and
 timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
@@ -1862,6 +1862,64 @@ reachable until then.
   syscall row, the new markers and the revised limits, alongside README,
   userspace, workbench, versioning, boot and build.
 - All 59 gates pass at `v0.45.0`.
+
+## Phase 8A - virtio-gpu 2D scanout (done)
+
+- `include/crug/gpu.h` and `kernel/gpu/gpu_util.c` hold the pure half of
+  the path (the 24-byte control header, the response classes and names,
+  rectangle clipping, the display-mode pick, the backing-page count and the
+  damage bounding box), so the host tests can exercise the encoding rules
+  without a device; `drivers/gpu/virtio_gpu.c` is the driver itself.
+- The driver binds a **modern** virtio-pci function (device id 0x1050) and
+  sets the legacy id 0x1010 aside as reported-but-unusable: it maps the
+  common, notify, ISR and device capability structures, builds control queue
+  0 from three contiguous pages, keeps one command in flight and puts a
+  two-second deadline on each.
+- Six control commands: `GET_DISPLAY_INFO`, `RESOURCE_CREATE_2D`,
+  `SET_SCANOUT`, `RESOURCE_ATTACH_BACKING`, `TRANSFER_TO_HOST_2D` and
+  `RESOURCE_FLUSH`. One `B8G8R8X8_UNORM` resource (id 1) is created with
+  `ceil(w*h*4 / 4096)` contiguous backing pages (1000 at 1280x800), attached
+  as a linear framebuffer and handed to `SET_SCANOUT`; the boot prints
+  `CRUGOS: virtio-gpu ready (1280x800, 1000 backing page(s), resource 1,
+  modern pci)` and `CRUGOS: gpu scanout ok (1280x800, 1 transfer(s), 1
+  flush(es))`.
+- The mode comes from `gpu.size=WxH` when given, otherwise from the host
+  display info, otherwise from the 1024x768, 800x600 and 640x480 ladder,
+  capped at 4096x2160 and 8192 backing pages.
+- `include/crug/fb.h` gained `fb_attach_linear()` plus `fb_present_begin()`
+  / `fb_present_end()`: `fb_store()` merges every pixel it writes into one
+  damage rectangle and a present clips that rectangle, transfers it and
+  flushes it, so a whole desktop repaint costs a single round trip because
+  `intuition_redraw()` and `intuition_redraw_window()` bracket their work.
+  The console flushes once per line rather than once per glyph.
+- The software path is intact: without a device, or with `gpu.enable=0`,
+  the boot keeps the firmware framebuffer, prints one reason line (or nothing
+  when the PCI bus is empty), `gpu_selftest()` returns 0 and boot continues,
+  so all 59 earlier gates still boot a GOP framebuffer unchanged.
+  `gpu.test=1` only controls the `CRUGOS: gpu selftest skipped (software
+  framebuffer)` line.
+- Gate 60 `make test-gpu` boots `-vga none -device virtio-gpu-pci,id=gpu0`
+  with `wb.enable=1 wb.wait=30 gpu.enable=1 gpu.test=1`, so no firmware
+  framebuffer exists and every Workbench pixel travelled through the device;
+  `scripts/run-gpu.py` takes a QMP screendump and checks the desktop
+  background, the amber shell title, the idle Workbench title and its frame,
+  then prints `ok: virtio-gpu scanout 1280x800 (13 transfer(s), 13 flush(es),
+  exit 33)`. `boot-check.py` gained the `--expect-gpu=yes` flag and
+  `check-disk.py` finishes the gate; the knobs are `GPU_WB_WAIT` (30 s),
+  `GPU_RUN_TIMEOUT_SEC` (300 s) and `GPU_QEMU_EXTRA`.
+- Host tests add `tests/host/test_gpu.c` (command encoding, response
+  classes, clipping, backing pages, display pick, damage merge): `make
+  test-host` reports 8488 checks and `make size` a 347208 B (339 KiB) file
+  and a 994626 B (971 KiB) load image (`.text` 248230 B, `.rodata` 37696 B,
+  `.data` 92 B, `.bss` 708608 B).
+- Limits: 2D only -- no virgl, Vulkan, command stream, hardware cursor
+  plane or the specification's accelerated triangle, which phase 8B has to
+  add; one resource and one display, no mode set or hotplug after boot, one
+  command in flight, an 8192-page contiguous backing cap, and the QEMU
+  screendump is the only automated proof. See [gpu.md](gpu.md).
+- docs: `docs/gpu.md` is new and README, boot, build, workbench and
+  versioning follow it.
+- All 60 gates pass at `v0.46.0`.
 
 ## Bootable media - hybrid UEFI ISO (done, `v0.23.1`)
 

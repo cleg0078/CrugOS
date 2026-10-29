@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 7C package update and removal (`v0.45.0`)
+## Status: phase 8A virtio-gpu scanout (`v0.46.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -90,7 +90,11 @@ Ed25519 signature over a SHA-512 digest that a trust list must recognise, and
 a newer package updates an installed one through a stage-and-swap with a
 rollback backup, a package can be removed again, `SYS_SPAWN` and `SYS_EXEC`
 now require `app.launch` and hand the child the caller's mask, and the shell
-gained a `pkg` builtin.
+gained a `pkg` builtin. Phase 8A gives the kernel a display device: a
+virtio-gpu-pci function on the modern virtio-pci transport creates one 2D
+resource with contiguous backing pages, attaches it as the scanout, and
+presents the desktop as damage rectangles, while the firmware framebuffer
+remains the fallback; `make test-gpu` is the 60th gate.
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -1537,6 +1541,43 @@ See [docs/packages.md](docs/packages.md) for the capability matrix, the policy
 and manifest grammar, the container layout, the update and removal pipeline and
 the refusal table.
 
+Phase 8A reaches the 2D half of the specification's GPU phase:
+
+- `drivers/gpu/virtio_gpu.c` binds PCI device 0x1050 over the modern virtio-pci
+transport, detects the legacy 0x1010 id only to report it unusable, configures
+control queue 0 from three allocated pages and drives six 2D commands
+synchronously with a two-second deadline;
+- `gpu_init()` creates resource 1 as `B8G8R8X8_UNORM` with
+`ceil(w * h * 4 / 4096)` contiguous backing pages (1000 at 1280x800), attaches
+it, makes it the scanout and prints `CRUGOS: virtio-gpu ready ...` and
+`CRUGOS: gpu scanout ok ...`;
+- the mode comes from `gpu.size=WxH`, else the host display info, else the
+first of 1024x768, 800x600 and 640x480 that the device accepts, capped at
+4096x2160 and 8192 backing pages;
+- `fb_attach_linear()` installs the resource as the framebuffer with a present
+callback; `fb_store()` accumulates a damage bounding box and `fb_present()`
+transfers that one rectangle and flushes it, while `fb_present_begin()` and
+`fb_present_end()` batch a whole desktop repaint into a single transfer and
+the console flushes per line rather than per glyph;
+- a missing device, `gpu.enable=0` or any driver failure prints one reason line
+and keeps booting on the firmware framebuffer, so all 59 earlier gates boot
+exactly as before; `gpu.test=1` makes the self-test announce the skip instead
+of staying silent;
+- `make test-gpu` boots without any VGA adapter (`-vga none -device
+virtio-gpu-pci,id=gpu0`), so the resource is the machine's only display, and
+asserts four pixel colours plus amber and frame colour counts from a QMP
+screendump of `gpu0` and the self-test's transfer and flush counters;
+- there is no 3D yet: no virglrenderer, no Vulkan, no command stream and no
+accelerated triangle, which is what a future phase 8B is for;
+- `tests/host/test_gpu.c` covers the pure helpers (command encoding, response
+classes, rectangle clipping, backing-page arithmetic, display pick and damage
+merge), so `make test-host` reports 8488 checks; `make size` reports a 347208 B
+(339 KiB) kernel file and a 994626 B (971 KiB) load image (`.text` 248230 B,
+`.rodata` 37696 B, `.data` 92 B, `.bss` 708608 B), and all 60 gates pass.
+
+See [docs/gpu.md](docs/gpu.md) for the transport, the resource, the present
+model and the failure lines.
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -1545,9 +1586,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.45.0 (phase 7c) -- Amiga-inspired microkernel bring-up
+CrugOS 0.46.0 (phase 8a) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.45.0
+CRUGOS: version 0.46.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -1596,7 +1637,7 @@ CRUGOS: tcp http served (72 bytes)
 CRUGOS: net selftest ok
 CRUGOS: gfx ready (1024x768, cursor at 512,384)
 CRUGOS: selftest ok
-kernel : 0x0000000000100000 size=325 KiB
+kernel : 0x0000000000100000 size=339 KiB
 boot   : cpu=0 acpi_rsdp=0x1f77e000 fdt=0x0 initrd=0x0
 memory : 36 regions, usable 474080 KiB (462 MiB)
 pmm    : total=118520 free=118462 bitmap=131072 B
@@ -1608,7 +1649,7 @@ heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
 boot   : pmm=27601 us cpu=408 us vm=624 us traps=333 us timer=65376 us heap=507 us storage=95213 us sched=5952 us syscall=107 us total=196126 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase 7c boot ok
+CRUGOS: phase 8a boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -1826,6 +1867,7 @@ make test-app-bundles  # launch a .app bundle from the desktop and from the shel
 make test-pkg    # install, update and remove a signed package and refuse a duplicate and an untrusted key
 make test-caps   # launch the installed bundle and prove its capability wall
 make test-workbench-pkg  # install, remove and reinstall a signed package from the Workbench
+make test-gpu    # boot on a virtio-gpu scanout and verify the GPU-backed desktop
 make test-hardening  # craft hostile superblock/inode/crypt images and boot them
 make test-heap   # corrupt the kernel heap and prove the integrity checker catches it
 make test-trap   # inject eight crafted faults and check the report, IST and panic
@@ -1884,6 +1926,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `WB_SCREEN_ACTS`, `WB_SCREEN_RUN_TIMEOUT_SEC`, `WB_CX_WAIT`, `WB_CX_ACTS`,
 `WB_CX_RUN_TIMEOUT_SEC`, `WB_APP_WAIT`, `WB_APP_ACTS`,
 `WB_APP_RUN_TIMEOUT_SEC`, `WB_PKG_WAIT`, `WB_PKG_RUN_TIMEOUT_SEC`,
+`GPU_WB_WAIT`, `GPU_RUN_TIMEOUT_SEC`, `GPU_QEMU_EXTRA`,
 `MKPKG`, `PKG_DATA_DIR`, `PKG_SEED`, `PKG_BAD_SEED`, `PKG_RUN_TIMEOUT_SEC`,
 `CAPS_RUN_TIMEOUT_SEC`, `HARDEN_TIMEOUT_SEC`,
 `HEAP_STRESS_OPS`, `HEAP_RUN_TIMEOUT_SEC`, `TRAP_TIMEOUT_SEC`, `FUZZ_CASES`,
@@ -1915,6 +1958,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/arch/x86_64/` | boot code, linker script, port I/O, serial, i8042 keyboard, framebuffer, CPU/IDT/APIC/timer, context switch |
 | `kernel/core/` | kernel entry, console, printf, panic, self-tests, scheduler, handles, MsgPort, syscall dispatcher, boot report |
 | `kernel/exec/` | ELF loader for ring-3 programs: segment policy, W^X user mappings and the user stack |
+| `kernel/gpu/` | the pure virtio-gpu command, response and damage helpers shared with the host tests |
 | `kernel/lib/` | freestanding string, formatting, bitmap, console line-editor and text-grid routines, the capability mask and the permission policy |
 | `kernel/input/` | `input.device`: set-1 scancode decoder, the console byte queue and the pointer state |
 | `kernel/audio/` | `audio.device` PCM ring, the per-channel mixer and the tone generator |
@@ -1926,13 +1970,13 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/block/` | block-device registry, partitions, bounds checks, RAID1/RAID10, boot-time rebuild and the AES-256-XTS `crypt.device` |
 | `kernel/fs/` | GPT, writable checksummed ext4, checksummed JBD2 journal and the storage boot policy (including the console passphrase prompt) |
 | `kernel/crypto/` | AES, XTS, AES-NI, BLAKE2b, Argon2id, SHA-512 and Ed25519 (shared with the host tools) |
-| `drivers/` | PCI, legacy virtio-blk, NVMe and AHCI/SATA block device drivers, legacy virtio-net, and the xHCI controller with its USB HID keyboard, mouse and Audio Class decoders (audio frames flow into `kernel/audio/`) |
+| `drivers/` | PCI, legacy virtio-blk, the virtio-gpu 2D driver, NVMe and AHCI/SATA block device drivers, legacy virtio-net, and the xHCI controller with its USB HID keyboard, mouse and Audio Class decoders (audio frames flow into `kernel/audio/`) |
 | `scripts/` | QEMU runner, disk/RAID1/RAID10/crypt image builders, the hybrid ISO builder (`mkiso.sh`, `mkfat.py`), boot/PE/disk/RAID/journal/crypt/ISO checks, the serial and keyboard prompt drivers, tamper helper, size and reproducibility gates |
 | `tests/host/` | host unit tests for freestanding code and the mount-path fuzzer (`fuzz_mount.c`) |
 | `tools/` | host-side development tools (`gen-font.py`, `mkcrypt.c`, `gen-crc32c.py`) |
 | `user/` | ring-3 programs and their freestanding runtime (`user.ld`, `start.S`, `lib.h`) |
 | `docs/` | [build](docs/build.md), [boot](docs/boot.md), [storage](docs/storage.md), [checksums](docs/checksums.md), [crypto](docs/crypto.md), [input](docs/input.md), [network](docs/network.md),
-[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [USB/xHCI](docs/usb.md), [audio](docs/audio.md), [graphics](docs/gfx.md), [Workbench](docs/workbench.md), [application bundles](docs/apps.md), [signed packages](docs/packages.md), [bootable ISO](docs/iso.md), [kernel heap](docs/heap.md), [trap policy](docs/traps.md), [mount-path fuzzing](docs/fuzzing.md), [ring 3](docs/userspace.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
+[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [USB/xHCI](docs/usb.md), [audio](docs/audio.md), [graphics](docs/gfx.md), [virtio-gpu](docs/gpu.md), [Workbench](docs/workbench.md), [application bundles](docs/apps.md), [signed packages](docs/packages.md), [bootable ISO](docs/iso.md), [kernel heap](docs/heap.md), [trap policy](docs/traps.md), [mount-path fuzzing](docs/fuzzing.md), [ring 3](docs/userspace.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
 
 ## Versioning
 

@@ -19,6 +19,8 @@ void test_fb_cursor_set(u32 x, u32 y);
 static u32 g_fill_calls;
 static u32 g_frame_calls;
 static u32 g_text_calls;
+static u32 g_present_begins;
+static u32 g_present_ends;
 
 void fb_fill_rect(u32 x, u32 y, u32 w, u32 h, u32 rgb)
 {
@@ -38,12 +40,26 @@ void fb_draw_text(u32 x, u32 y, const char *text, u32 fg, u32 bg)
     g_text_calls++;
 }
 
+/* Phase 8A: the compositor brackets each repaint with begin/end so a GPU
+ * backend can transfer one damage rectangle. */
+void fb_present_begin(void)
+{
+    g_present_begins++;
+}
+
+void fb_present_end(void)
+{
+    g_present_ends++;
+}
+
 static void test_reset(u32 width, u32 height)
 {
     test_fb_fake_reset(width && height, width, height);
     g_fill_calls = 0;
     g_frame_calls = 0;
     g_text_calls = 0;
+    g_present_begins = 0;
+    g_present_ends = 0;
     intuition_init();
 }
 
@@ -244,6 +260,9 @@ static void test_intuition_text_draw(void)
                          "first line\nsecond line") == 1);
     CHECK(g_text_calls >= 3u); /* title + two body lines */
     CHECK(g_fill_calls >= 3u); /* desktop, title bar, body */
+    /* Every repaint is bracketed by a present window, never left open. */
+    CHECK(g_present_begins > 0u);
+    CHECK(g_present_begins == g_present_ends);
 }
 
 /* A menu bar press opens the strip under the pointer, hover highlights a row,

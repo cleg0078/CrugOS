@@ -198,6 +198,24 @@ def pixel_at(path, x, y):
     return (pixels[off], pixels[off + 1], pixels[off + 2])
 
 
+def settle_pixels(qmp, shot, wants, tries=40, delay=0.05):
+    """Capture until every wanted pixel matches, and report the retries.
+
+    A screendump requested right after a guest marker can still show the frame
+    from before the paint: the host display update is asynchronous, so the
+    first capture after an event occasionally lags one repaint.  Retry for a
+    bounded time; a pixel that never settles still fails the gate.
+    wants: name -> (x, y, expected RGB)."""
+    samples = {}
+    for attempt in range(tries):
+        qmp.screendump(shot)
+        samples = {name: pixel_at(shot, x, y)
+                   for name, (x, y, _want) in wants.items()}
+        if all(samples[name] == want for name, (_x, _y, want) in wants.items()):
+            return samples, attempt
+        time.sleep(delay)
+    return samples, tries - 1
+
 def last_position(path, pattern, fallback):
     text = read_log(path).decode("utf-8", "replace")
     found = pattern.findall(text)
@@ -350,9 +368,15 @@ def main():
             return fail("the drawer did not list any root entry")
         print("wbd: drawer lists %s root entries" % match.group(1))
         shot = tmpdir / "drawer.ppm"
-        qmp.screendump(shot)
-        title = pixel_at(shot, *DRAWER_TITLE)
-        overlap = pixel_at(shot, *OVERLAP)
+        samples, retries = settle_pixels(qmp, shot, {
+            "title": (*DRAWER_TITLE, SELECTED_RGB),
+            "overlap": (*OVERLAP, WINDOW_RGB),
+        })
+        title = samples["title"]
+        overlap = samples["overlap"]
+        if retries:
+            print("wbd: drawer paint settled after %d retr%s"
+                  % (retries, "y" if retries == 1 else "ies"))
         print("wbd: drawer title %s, body at overlap %s" % (title, overlap))
         if title != SELECTED_RGB:
             return fail("the open drawer title is %s, expected the active %s"
@@ -367,9 +391,15 @@ def main():
         qmp.click()
         expect(SENT_BACK, "the depth gadget sent the drawer to the back")
         shot = tmpdir / "depth.ppm"
-        qmp.screendump(shot)
-        title = pixel_at(shot, *DRAWER_TITLE)
-        overlap = pixel_at(shot, *OVERLAP)
+        samples, retries = settle_pixels(qmp, shot, {
+            "title": (*DRAWER_TITLE, IDLE_RGB),
+            "overlap": (*OVERLAP, SELECTED_RGB),
+        })
+        title = samples["title"]
+        overlap = samples["overlap"]
+        if retries:
+            print("wbd: depth paint settled after %d retr%s"
+                  % (retries, "y" if retries == 1 else "ies"))
         print("wbd: idle drawer title %s, Shell title at overlap %s"
               % (title, overlap))
         if title != IDLE_RGB:

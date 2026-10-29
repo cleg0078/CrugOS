@@ -1249,6 +1249,9 @@ void intuition_redraw(void)
     if (!g_screen_w || !g_screen_h) {
         return;
     }
+    /* Phase 8A: a whole desktop repaint is one present, so a GPU scanout
+       transfers the finished frame instead of one rectangle per primitive. */
+    fb_present_begin();
     /* Phase 6I: only the front screen is on the glass; the other screens keep
        their windows and objects but are not drawn. */
     fb_fill_rect(0, 0, g_screen_w, g_screen_h, g_screens[g_screen_front].bg);
@@ -1267,6 +1270,7 @@ void intuition_redraw(void)
     }
     menu_draw_bar();
     menu_draw_popup();
+    fb_present_end();
 }
 
 /* A press that missed every window: select a desktop object, or clear the
@@ -1809,7 +1813,9 @@ void intuition_redraw_window(int id)
     if (!w || w->screen != g_screen_front) {
         return;
     }
+    fb_present_begin();
     win_draw(w);
+    fb_present_end();
 }
 
 u64 intuition_drag_count(void)

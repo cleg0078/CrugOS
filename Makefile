@@ -48,6 +48,7 @@
 #   make test-workbench-cx       toggle commodity hotkeys and fire two of them
 #   make test-workbench-pkg  install, remove and reinstall a package from the desktop
 #   make test-app-bundles        launch a .app bundle from the desktop and from the shell
+#   make test-gpu    boot on a virtio-gpu scanout and verify the GPU-backed desktop
 #   make test-pkg    install, update and remove a signed package
 #   make test-caps   launch an installed bundle and prove its capability wall
 #   make crypt-disk  build the AES-256-XTS crypt test disk
@@ -207,6 +208,13 @@ APP_RUN_TIMEOUT_SEC ?= 300
 # body installs, removes and reinstalls the signed captest bundle per click.
 WB_PKG_WAIT ?= 30
 WB_PKG_RUN_TIMEOUT_SEC ?= 240
+
+# GPU gate (make test-gpu): the VM has no VGA adapter, so the virtio-gpu 2D
+# resource is the only display.  A QMP screendump of that device proves the
+# desktop was composited into the GPU framebuffer and flushed to the host.
+GPU_WB_WAIT ?= 30
+GPU_RUN_TIMEOUT_SEC ?= 300
+GPU_QEMU_EXTRA ?= -vga none -device virtio-gpu-pci,id=gpu0
 
 # Package gates (make test-pkg / make test-caps): pkg.test=1 installs the
 # signed captest bundle, updates it, refuses a downgrade and an untrusted
@@ -375,7 +383,8 @@ KERNEL_SOURCES := $(wildcard kernel/arch/$(ARCH)/*.c) $(wildcard kernel/arch/$(A
                   $(wildcard kernel/fs/*.c) $(wildcard kernel/exec/*.c) \
                   $(wildcard kernel/input/*.c) \
                   $(wildcard kernel/net/*.c) $(wildcard kernel/audio/*.c) \
-                  $(wildcard kernel/gfx/*.c) $(wildcard kernel/app/*.c) \
+                  $(wildcard kernel/gfx/*.c) $(wildcard kernel/gpu/*.c) \
+                  $(wildcard kernel/app/*.c) \
                   $(wildcard kernel/shell/*.c) \
                   $(wildcard drivers/*/*.c) \
                   $(wildcard kernel/crypto/*.c) $(wildcard kernel/crypto/*.S)
@@ -434,7 +443,7 @@ HOST_MKPKG_SOURCES := tools/mkpkg.c kernel/crypto/ed25519.c \
         test-workbench test-workbench-menu test-workbench-shell test-workbench-keys \
         test-workbench-desk test-workbench-icons test-workbench-drawer \
         test-workbench-select test-workbench-screens test-workbench-cx \
-        test-workbench-pkg test-app-bundles test-pkg test-caps packages mkpkg \
+        test-workbench-pkg test-app-bundles test-gpu test-pkg test-caps packages mkpkg \
         iso check-iso test-iso usb \
         crash-disk \
         check-disk size check-efi repro test-host preflight version options clean distclean help
@@ -941,6 +950,24 @@ test-workbench-pkg: esp user packages
 	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no --expect-wbpkg=yes
 	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 
+# GPU gate (phase 8A): the QEMU command line removes the VGA adapter, so the
+# virtio-gpu 2D resource is the only display.  The driver attaches that
+# resource as the linear framebuffer before the desktop exists, therefore a
+# QMP screendump of the gpu0 device shows only pixels the guest transferred
+# and flushed over virtio.  The driver also compares the desktop colours and
+# the GPU selftest counters, and the boot still ends at isa-debug-exit 0x10.
+test-gpu: esp
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(MAKE) --no-print-directory disk
+	$(Q)$(PYTHON) scripts/run-gpu.py --repo $(CURDIR) \
+		--disk $(abspath $(DISK_IMG)) --serial-log $(abspath $(SERIAL_LOG)) \
+		--exit-code $(abspath $(QEMU_EXIT)) \
+		--wb-wait $(GPU_WB_WAIT) \
+		--run-timeout $(GPU_RUN_TIMEOUT_SEC) \
+		--qemu-extra "$(GPU_QEMU_EXTRA)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no --expect-gpu=yes
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
 # App-bundle gate (phase 7A): wb.app=1 adds the Applications icon; a double
 # click opens the bundle list and a double click on a row launches that
 # program, which the desktop then reaps with its exit status.  A second boot
@@ -1390,6 +1417,9 @@ options:
 	@printf '  %-16s %s\n' APP_RUN_TIMEOUT_SEC "$(APP_RUN_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' WB_PKG_WAIT "$(WB_PKG_WAIT) (seconds)"
 	@printf '  %-16s %s\n' WB_PKG_RUN_TIMEOUT_SEC "$(WB_PKG_RUN_TIMEOUT_SEC) (seconds)"
+	@printf '  %-16s %s\n' GPU_WB_WAIT "$(GPU_WB_WAIT) (seconds)"
+	@printf '  %-16s %s\n' GPU_RUN_TIMEOUT_SEC "$(GPU_RUN_TIMEOUT_SEC) (seconds)"
+	@printf '  %-16s %s\n' GPU_QEMU_EXTRA "$(GPU_QEMU_EXTRA)"
 	@printf '  %-16s %s\n' EXPECT_PKG "$(EXPECT_PKG)"
 	@printf '  %-16s %s\n' PKG_RUN_TIMEOUT_SEC "$(PKG_RUN_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' EXPECT_CAPS "$(EXPECT_CAPS)"

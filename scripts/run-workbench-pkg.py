@@ -307,8 +307,13 @@ def main():
         # 1. The window is up before the click, and its body has no
         #    highlight yet: the "installed" line only appears afterwards.
         before = tmpdir / "before.ppm"
-        qmp.screendump(before)
-        frame = pixel_at(before, FRAME_PIXEL[0], FRAME_PIXEL[1])
+        frame = None
+        for attempt in range(40):
+            qmp.screendump(before)
+            frame = pixel_at(before, FRAME_PIXEL[0], FRAME_PIXEL[1])
+            if frame == FRAME:
+                break
+            time.sleep(0.05)
         marks = count_color(before, SCAN, HIGHLIGHT)
         print("wbp: frame %s, highlight pixels before the click %d"
               % (frame, marks))
@@ -340,9 +345,20 @@ def main():
 
         # 5. The body now paints the result line and the registry holds the
         #    package once more.
+        # The host display update is asynchronous, so a screendump taken right
+        # after the marker can still show the frame from before the repaint:
+        # retry for a bounded time and report how many attempts it took.
         after = tmpdir / "after.ppm"
-        qmp.screendump(after)
-        marks = count_color(after, SCAN, HIGHLIGHT)
+        marks = 0
+        for attempt in range(40):
+            qmp.screendump(after)
+            marks = count_color(after, SCAN, HIGHLIGHT)
+            if marks:
+                if attempt:
+                    print("wbp: result paint settled after %d retry(ies)"
+                          % attempt)
+                break
+            time.sleep(0.05)
         print("wbp: highlight pixels after the reinstall %d" % marks)
         if marks == 0:
             return fail("the installed line is missing from the window body")

@@ -197,6 +197,24 @@ def pixel_at(path, x, y):
     return (pixels[off], pixels[off + 1], pixels[off + 2])
 
 
+def settle_pixels(qmp, shot, wants, tries=40, delay=0.05):
+    """Capture until every wanted pixel matches, and report the retries.
+
+    A screendump requested right after a guest marker can still show the frame
+    from before the paint: the host display update is asynchronous, so the
+    first capture after an event occasionally lags one repaint.  Retry for a
+    bounded time; a pixel that never settles still fails the gate.
+    wants: name -> (x, y, expected RGB)."""
+    samples = {}
+    for attempt in range(tries):
+        qmp.screendump(shot)
+        samples = {name: pixel_at(shot, x, y)
+                   for name, (x, y, _want) in wants.items()}
+        if all(samples[name] == want for name, (_x, _y, want) in wants.items()):
+            return samples, attempt
+        time.sleep(delay)
+    return samples, tries - 1
+
 def last_position(path, pattern, fallback):
     text = read_log(path).decode("utf-8", "replace")
     found = pattern.findall(text)
@@ -331,9 +349,15 @@ def main():
         expect(SHELL_HOVER, "the first Shell item highlighted")
 
         shot_open = tmpdir / "menu.ppm"
-        qmp.screendump(shot_open)
-        hover_pixel = pixel_at(shot_open, 130, 29)
-        next_pixel = pixel_at(shot_open, 130, 47)
+        samples, retries = settle_pixels(qmp, shot_open, {
+            "hover": (130, 29, HIGHLIGHT),
+            "next": (130, 47, MENU_BG),
+        })
+        hover_pixel = samples["hover"]
+        next_pixel = samples["next"]
+        if retries:
+            print("wbm: popup paint settled after %d retr%s"
+                  % (retries, "y" if retries == 1 else "ies"))
         print("wbm: popup pixels at (130, 29) -> %s, (130, 47) -> %s"
               % (hover_pixel, next_pixel))
         if hover_pixel != HIGHLIGHT:
@@ -362,9 +386,15 @@ def main():
         actions += 1
 
         shot_closed = tmpdir / "closed.ppm"
-        qmp.screendump(shot_closed)
-        old_body = pixel_at(shot_closed, 640, 400)
-        frame = pixel_at(shot_closed, 80, 90)
+        samples, retries = settle_pixels(qmp, shot_closed, {
+            "body": (640, 400, DESKTOP_PIXEL),
+            "frame": (80, 90, FRAME),
+        })
+        old_body = samples["body"]
+        frame = samples["frame"]
+        if retries:
+            print("wbm: close paint settled after %d retr%s"
+                  % (retries, "y" if retries == 1 else "ies"))
         print("wbm: closed area (640, 400) -> %s, window 1 frame (80, 90) -> %s"
               % (old_body, frame))
         if old_body != DESKTOP_PIXEL:

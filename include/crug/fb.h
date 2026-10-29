@@ -41,4 +41,21 @@ void fb_fill_rect(u32 x, u32 y, u32 w, u32 h, u32 rgb);
 void fb_frame_rect(u32 x, u32 y, u32 w, u32 h, u32 rgb);
 void fb_draw_text(u32 x, u32 y, const char *text, u32 fg, u32 bg);
 
+
+/* Phase 8A: a present callback receives the damaged rectangle in pixels; the
+   virtio-gpu driver uses it to transfer and flush only what changed. */
+typedef void (*fb_present_fn)(u32 x, u32 y, u32 w, u32 h);
+
+/* Adopt a linear buffer the caller owns (the GPU resource backing store).
+   The present callback may be NULL for a purely local buffer.  Returns 0 on
+   success and -1 for an unusable geometry. */
+int fb_attach_linear(u8 *base, u32 width, u32 height, u32 stride, u32 format,
+                     fb_present_fn present);
+
+/* Flush the accumulated damage rectangle through the present callback.  While
+   a begin/end bracket is open, fb_present() is a no-op so a whole desktop
+   repaint transfers once at the end instead of once per primitive. */
+void fb_present(void);
+void fb_present_begin(void);
+void fb_present_end(void);
 #endif /* CRUG_FB_H */

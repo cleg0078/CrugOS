@@ -58,7 +58,9 @@ phase 7B adds `wb.pkg=1` for the Packages window plus `pkg.test=1` and
 `pkg.test=2` for the package and capability self-tests, phase 7C makes that
 window a toggle whose body press installs while the package is absent and
 removes while it is present and grows `pkg.test=1` into install, update and
-removal checks, and phase H2 adds
+removal checks, and phase 8A adds `gpu.enable=<0|1>`, `gpu.size=WxH` and
+`gpu.test=1` for the virtio-gpu driver, parsed by `gpu_cmdline()` right after
+the heap and before the desktop, and phase H2 adds
 `heap.stress=<1..200000>` and `heap.guard=1`,
 parsed by `heap_cmdline()` right after `heap_init()`, and phase H3 adds
 `trap.test=<recipe>` (`de`, `ud`, `gp`, `pf`, `df`, `nmi`, `mc`, `db`) for the
@@ -159,7 +161,20 @@ post-snapshot allocations cannot push it over capacity.
    framebuffer and centres the pointer sprite, and `gfx_cmdline` reads
    `gfx.wait=<seconds>` and `gfx.moves=<n>`: the boot prints
    `CRUGOS: gfx framebuffer absent` or
-   `CRUGOS: gfx ready (1024x768, cursor at 512,384)`. `wb_cmdline` then reads
+   `CRUGOS: gfx ready (1024x768, cursor at 512,384)`. `gpu_init` runs right after
+   the heap and before `input_init`, fed by `gpu_cmdline`'s `gpu.enable=<0|1>`,
+   `gpu.size=<WxH>` and `gpu.test=<0|1>`: a boot without a modern
+   virtio-gpu-pci function, or with `gpu.enable=0`, prints one reason line (or
+   nothing at all when the PCI bus is empty), keeps the firmware framebuffer and
+   carries on; with a device it prints `CRUGOS: virtio-gpu ready (1280x800, 1000
+   backing page(s), resource 1, modern pci)` and
+   `CRUGOS: gpu scanout ok (1280x800, 1 transfer(s), 1 flush(es))`, and the
+   framebuffer then lives in the GPU resource. `gpu_selftest()` runs right after
+   `wb_init`: with `gpu.test=1` and no device it prints
+   `CRUGOS: gpu selftest skipped (software framebuffer)` instead of staying
+   silent, and on a device it prints `CRUGOS: gpu selftest start` and
+   `CRUGOS: gpu selftest ok (1280x800, 13 transfer(s), 13 flush(es))`.
+   `wb_cmdline` then reads
    `wb.enable=`, `wb.wait=<seconds>`, `wb.drag=<n>`, `wb.menu=<0|1>`,
    `wb.acts=<n>`, `wb.hold=<seconds>`, `wb.keys=<0|1>`, `wb.desk=<0|1>`,
    `wb.ikeys=<0|1>` (parsed before `wb.desk=`, and still ignored while
@@ -342,7 +357,7 @@ post-snapshot allocations cannot push it over capacity.
     capability check exits 35 before the report.
 14. The user self-test of step 13, when it ran, has already joined its threads;
     then `report_boot`, `storage_lock` (wipes the passphrase, the volume keys
-    and the bounce buffer), `CRUGOS: phase 7c boot ok`, then
+    and the bounce buffer), `CRUGOS: phase 8a boot ok`, then
     `wb_hold` (only when
     `wb.hold=` was given: the guest stays alive with the desktop on screen until
     the deadline), `trap_test_run()` (only when `trap.test=` was given, so the
@@ -506,6 +521,8 @@ CRUGOS: vm ready
 CRUGOS: cpu ready
 CRUGOS: timer ready
 CRUGOS: heap ready
+CRUGOS: virtio-gpu ready (1280x800, 1000 backing page(s), resource 1, modern pci)  # only with a modern virtio-gpu-pci device
+CRUGOS: gpu scanout ok (1280x800, 1 transfer(s), 1 flush(es))
 CRUGOS: input ready (serial + keyboard)   # or: (serial only)
 CRUGOS: usb controller absent             # or: usb controller ready (xhci, 8 port(s))
 CRUGOS: audio device absent               # or: audio device ready (usb uac1, 2 ch, 16-bit, 48000 Hz)
@@ -623,7 +640,7 @@ CRUGOS: wb window 1 sent to front
 CRUGOS: wb action 6 front window 1
 CRUGOS: wb icons selftest ok (1 move(s), 1 front(s))
 CRUGOS: sh run 'ver'
-CRUGOS: sh out CrugOS 0.45.0 (phase 7c), x86_64
+CRUGOS: sh out CrugOS 0.46.0 (phase 8a), x86_64
 CRUGOS: wb selftest ok (1 drag(s), 1 action(s))
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb drawer selftest ok (3 scroll(s), 1 refresh(es))
@@ -682,11 +699,11 @@ CRUGOS: sh exit 7
 CRUGOS: user shell finished (exit 7)
 CRUGOS: user selftest ok (3 program(s), 1 fault(s))
 boot   : pmm=28575 us cpu=414 us vm=617 us traps=317 us timer=65299 us heap=494 us storage=95001 us sched=5614 us syscall=90 us total=196426 us
-CRUGOS: phase 7c boot ok
+CRUGOS: phase 8a boot ok
 ```
 
 With `trap.test=<recipe>` the same boot ends differently: the injector runs after
-`CRUGOS: phase 7c boot ok`, injects exactly one fault and the guest exits 35
+`CRUGOS: phase 8a boot ok`, injects exactly one fault and the guest exits 35
 instead of 33. A `trap.test=de` boot ends:
 
 ```
@@ -759,7 +776,7 @@ CRUGOS: sh exit 7
 CRUGOS: user shell finished (exit 7)
 CRUGOS: user selftest ok (3 program(s), 1 fault(s))
 boot   : pmm=28575 us cpu=414 us vm=617 us traps=317 us timer=65299 us heap=494 us storage=95001 us sched=5614 us syscall=90 us total=196426 us
-CRUGOS: phase 7c boot ok
+CRUGOS: phase 8a boot ok
 ```
 
 A `user.test=7` boot, the second leg of `make test-app-bundles`, adds the app
@@ -1024,6 +1041,25 @@ header goes backwards, is removed and reinstalled, and that the untrusted one is
 refused; the second proves the installed bundle runs with `fs.read` only. See
 [packages.md](packages.md) and [build.md](build.md).
 
+`make test-gpu` (gate 60) removes the VGA adapter (`-vga none -device
+virtio-gpu-pci,id=gpu0`) and boots with `wb.enable=1 wb.wait=30 gpu.enable=1
+gpu.test=1`, so no firmware framebuffer exists and every Workbench pixel has
+travelled through `TRANSFER_TO_HOST_2D` and `RESOURCE_FLUSH`. The driver waits
+for `CRUGOS: gpu scanout ok`, `CRUGOS: wb desktop ready`, `CRUGOS: gpu
+selftest ok` and `CRUGOS: wb selftest ok`, takes a QMP screendump of `gpu0`
+and requires the desktop background at (1200,700) to be (16,32,48), the shell
+title bar at (600,306) to be (255,176,0), the Workbench title bar at (200,96)
+to be (128,128,128) and its frame at (80,150) to be (255,255,255), with 5800
+amber pixels and 3627 frame pixels in the image; it parses the transfer and
+flush counters and prints
+`ok: virtio-gpu scanout 1280x800 (13 transfer(s), 13 flush(es), exit 33)`.
+The run then calls `scripts/boot-check.py --expect-gpu=yes` (a flag, so the
+positional expectations are unchanged) and `scripts/check-disk.py`, and the
+knobs are `GPU_WB_WAIT` (30), `GPU_RUN_TIMEOUT_SEC` (300) and
+`GPU_QEMU_EXTRA`. The GPU gate asserts no boot-time budget: a `make test` boot
+report read `total=426189 us` on this host's vvfat ESP, and the 250 ms
+contract is not measured here. See [gpu.md](gpu.md) and [build.md](build.md).
+
 The `audio` lines appear only on machines with a USB audio function: a default
 `q35` boot prints `CRUGOS: audio device absent`, while `make test-audio` adds
 `-device usb-audio` behind `qemu-xhci` on an `-audiodev none` backend, so the log
@@ -1057,14 +1093,14 @@ replaced by the skip marker, and the USB device the firmware booted from shows
 up in the USB lines as an unsupported mass-storage function:
 
 ```
-CRUGOS: version 0.45.0
+CRUGOS: version 0.46.0
 CRUGOS: usb controller ready (xhci, 8 port(s))
 CRUGOS: usb device 46f4:0001 on port 1 (speed 4)
 CRUGOS: usb device class 8 on port 1 (unsupported)
 CRUGOS: storage skipped (storage=none)
 CRUGOS: heap check ok (6 slab(s), 8 object(s), 1 large block(s))
 CRUGOS: selftest ok
-CRUGOS: phase 7c boot ok
+CRUGOS: phase 8a boot ok
 ```
 
 `kernel/core/report.c` prints the machine description between them: kernel

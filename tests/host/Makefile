@@ -12,11 +12,11 @@ SOURCES := main.c test_string.c test_printf.c test_elf.c test_bitmap.c test_vm_m
            test_gfx.c test_intuition.c test_commodity.c test_app.c test_textgrid.c \
            test_shell.c test_harden.c \
            test_heap.c test_trap.c test_argv.c test_ufile.c \
-           test_uaccess.c test_exec.c test_vm_space.c test_pkg.c \
+           test_uaccess.c test_exec.c test_vm_space.c test_pkg.c test_gpu.c \
            ../../drivers/usb/usb_hid.c \
            ../../kernel/audio/audio.c ../../kernel/audio/mixer.c \
            ../../kernel/gfx/gfx.c ../../kernel/gfx/intuition.c \
-           ../../kernel/gfx/commodities.c \
+           ../../kernel/gfx/commodities.c ../../kernel/gpu/gpu_util.c \
            ../../kernel/input/input.c ../../kernel/net/net_util.c \
            ../../kernel/net/dns.c \
            ../../kernel/lib/string.c ../../kernel/lib/printf.c ../../kernel/lib/bitmap.c \

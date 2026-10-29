@@ -1,7 +1,68 @@
 # Versioning
 
 CrugOS uses [Semantic Versioning 2.0.0](https://semver.org/) with annotated
-`vMAJOR.MINOR.PATCH` Git tags. The current release is `v0.45.0`, phase 7C:
+`vMAJOR.MINOR.PATCH` Git tags. The current release is `v0.46.0`, phase 8A:
+virtio-gpu 2D scanout, the first release that owns the display instead of
+inheriting it from the firmware. The specification's phase 8 asks for GPU
+acceleration; 8A takes the 2D half of it and defers the 3D half, so the
+release adds a driver rather than a renderer. `drivers/gpu/virtio_gpu.c` binds
+a **modern** virtio-pci function (device id 0x1050) and sets the legacy id
+0x1010 aside as reported-but-unusable: it maps the common, notify, ISR and
+device capability structures, builds control queue 0 from three contiguous
+pages allocated with `pmm_alloc_pages(3)`, keeps one command in flight and
+puts a two-second `GPU_TIMEOUT_NS` deadline on each. Six control commands do
+the work: `GET_DISPLAY_INFO`, `RESOURCE_CREATE_2D`, `SET_SCANOUT`,
+`RESOURCE_ATTACH_BACKING`, `TRANSFER_TO_HOST_2D` and `RESOURCE_FLUSH`; one
+`B8G8R8X8_UNORM` resource (format 2, id 1) is created with
+`ceil(w*h*4 / 4096)` contiguous backing pages (1000 at 1280x800), attached as
+a linear framebuffer and handed to `SET_SCANOUT`. The mode comes from
+`gpu.size=WxH` when given, otherwise from the host display info, otherwise
+from the 1024x768, 800x600 and 640x480 ladder, capped at 4096x2160
+(`GPU_RECT_MAX_W` and `GPU_RECT_MAX_H`) and 8192 backing pages
+(`GPU_BACKING_MAX_PAGES`). The boot prints
+`CRUGOS: virtio-gpu ready (1280x800, 1000 backing page(s), resource 1, modern pci)`
+and `CRUGOS: gpu scanout ok (1280x800, 1 transfer(s), 1 flush(es))`.
+
+The guest side stays a software renderer on purpose. `include/crug/fb.h`
+gained `fb_attach_linear()`, `fb_present_begin()` and `fb_present_end()`:
+`fb_store()` merges every pixel it writes into one damage rectangle
+(`struct gpu_damage`, a bounding box with exclusive x1/y1), a present clips the
+rectangle to the current mode, transfers it with `TRANSFER_TO_HOST_2D` and
+flushes it with `RESOURCE_FLUSH`, and `intuition_redraw()` and
+`intuition_redraw_window()` bracket their work so a whole desktop repaint
+costs a single round trip. The console flushes once per line instead of once
+per glyph. `kernel/gpu/gpu_util.c` holds the pure half of the path -- the
+24-byte control header, the response classes and names, rectangle clipping,
+the display-mode pick, the backing-page count and the damage merge -- so the
+host tests exercise the encoding rules without a device.
+
+The software path never went away: without a device, or with
+`gpu.enable=0`, `gpu_init()` prints one reason line (or nothing at all when
+the PCI bus is empty), the boot keeps the firmware framebuffer and
+`gpu_selftest()` returns 0, so all 59 earlier gates still boot the GOP
+framebuffer unchanged; `gpu.test=1` only makes the skip visible as
+`CRUGOS: gpu selftest skipped (software framebuffer)`. Gate 60 `make
+test-gpu` is the new proof: it boots `-vga none -device
+virtio-gpu-pci,id=gpu0` with `wb.enable=1 wb.wait=30 gpu.enable=1 gpu.test=1`,
+so no firmware framebuffer exists and every Workbench pixel travelled through
+the device; `scripts/run-gpu.py` waits for `CRUGOS: gpu scanout ok`,
+`CRUGOS: wb desktop ready`, `CRUGOS: gpu selftest ok` and
+`CRUGOS: wb selftest ok`, takes a QMP screendump of gpu0 and asserts the
+desktop background (16,32,48), the amber shell title (255,176,0), the idle
+Workbench title (128,128,128) and a white frame, then prints
+`ok: virtio-gpu scanout 1280x800 (13 transfer(s), 13 flush(es), exit 33)`;
+`scripts/boot-check.py` gained the `--expect-gpu=yes` flag and the gate
+finishes with `scripts/check-disk.py`. The knobs are `GPU_WB_WAIT` (30 s),
+`GPU_RUN_TIMEOUT_SEC` (300 s) and `GPU_QEMU_EXTRA`.
+
+`tests/host/test_gpu.c` covers the encoding, the response classes, clipping,
+backing pages, the display pick and the damage merge, and `make test-host`
+reports 8488 checks. `make size` reports a 347208 B (339 KiB) kernel file and
+a 994626 B (971 KiB) load image (`.text` 248230 B (242 KiB), `.rodata` 37696 B
+(36 KiB), `.data` 92 B and `.bss` 708608 B), inside the 1024 KiB stretch and
+2048 KiB hard budgets. There is no 3D yet: no virgl, no Vulkan and no command
+stream, and the specification's accelerated triangle is phase 8B's to add --
+60 gates at `v0.46.0` -- on top of `v0.45.0`, phase 7C:
 package update and removal, the release that makes the installer a service a
 package can be replaced or taken away through instead of a one-way door.
 `pkg_install()` now reads the record in `/System/pkgdb/<id>.txt` and compares
@@ -869,6 +930,7 @@ make test-app-bundles           # launch a .app bundle from the desktop and from
 make test-pkg                    # install, update, remove and reinstall a signed package and refuse the bad cases
 make test-caps                   # run a ring-3 program with one capability and check the denials
 make test-workbench-pkg         # install, remove and reinstall a package from the Workbench
+make test-gpu                    # boot on a virtio-gpu scanout and verify the GPU-backed desktop
 make test-iso                    # boot the hybrid ISO from USB and from CD-ROM
 make size check-efi test-host repro
 make check-disk                  # e2fsck + persisted files on the test disk
@@ -896,6 +958,7 @@ git push origin main vX.Y.Z
 | `v0.13.0` | 2026-10-27 | phase 3B-9: `crypt.device` (GPT type `8f1c7d2e-...`, 16 KiB header, eight keyslots, AES-256-XTS data area with data-relative tweaks), Argon2id (RFC 9106) key derivation, 64-byte master key wrapped per slot with a keyed BLAKE2b-256 MAC and a recovery passphrase, AES-NI/software dispatch pinned to IEEE 1619 vector 10, loader `\crugos\cmdline.txt` with `crypt.pass=` plus redaction and key zeroization, `mkcrypt` host tool, `mkdisk.sh crypt` mode, and five encrypted-root gates; BootInfo stays v1 and the kernel ABI is unchanged |
 | `v0.14.0` | 2026-10-27 | phase 3B-10: masked serial-console passphrase prompt when the ESP carries no `crypt.pass=`, shared line editor (`kernel/lib/lineedit.c`) with CR/LF, backspace, Ctrl-C and overflow handling, three attempts bounded by `crypt.prompt_timeout=`, fail-closed `crypt locked` markers, `SERIAL_TCP` serial capture and the `run-crypt-prompt.py` driver behind three new gates (correct, wrong, timeout); BootInfo stays v1 and the kernel ABI is unchanged |
 | `v0.15.0` | 2026-10-27 | phase 4A: `input.device` (set-1 scancode decoder, Shift/Ctrl/Alt/Caps state, US layout, control-code mapping, 64-byte queue), polled i8042 keyboard driver, `console_try_getc()` merging serial and keyboard input, `CRUGOS: input ready (serial + keyboard)` marker and console prompt wording, QMP `send-key` driver (`run-crypt-keyboard.py`) behind two new keyboard gates and 903 host checks; BootInfo stays v1 and the kernel ABI is unchanged |
+| `v0.46.0` | 2026-10-29 | phase 8A: virtio-gpu 2D scanout (`include/crug/gpu.h`, `kernel/gpu/gpu_util.c`, `drivers/gpu/virtio_gpu.c`, `include/crug/fb.h`, `kernel/arch/x86_64/fb.c`, `kernel/core/main.c`, `kernel/gfx/intuition.c`, `kernel/gfx/workbench.c`, `scripts/run-gpu.py`, `scripts/boot-check.py`, `tests/host/test_gpu.c`, `tests/host/Makefile`, `Makefile`: a modern virtio-pci function (device id 0x1050) with the legacy id 0x1010 reported-but-unusable, the common, notify, ISR and device capability structures, control queue 0 from three contiguous pages, one command in flight under a two-second `GPU_TIMEOUT_NS` deadline, `GET_DISPLAY_INFO` 0x0100, `RESOURCE_CREATE_2D` 0x0101, `SET_SCANOUT` 0x0103, `RESOURCE_FLUSH` 0x0104, `TRANSFER_TO_HOST_2D` 0x0105 and `RESOURCE_ATTACH_BACKING` 0x0106, one `B8G8R8X8_UNORM` resource (format 2, id 1) of `ceil(w*h*4 / 4096)` contiguous backing pages (1000 at 1280x800) attached as a linear framebuffer and handed to `SET_SCANOUT`, the mode from `gpu.size=WxH` else the host display info else the 1024x768, 800x600 and 640x480 ladder capped at 4096x2160 (`GPU_RECT_MAX_W`, `GPU_RECT_MAX_H`) and 8192 pages (`GPU_BACKING_MAX_PAGES`), `fb_attach_linear()`, `fb_present_begin()` and `fb_present_end()` in `include/crug/fb.h` with `fb_store()` merging every pixel into one `struct gpu_damage` bounding box and the `intuition_redraw()` and `intuition_redraw_window()` wrappers so a desktop repaint costs one transfer and one flush, a console flush per line, the software fallback that keeps the firmware framebuffer and returns 0 from `gpu_selftest()` so all 59 earlier gates boot unchanged (`gpu.enable=0` to disable the driver, `gpu.test=1` for the `CRUGOS: gpu selftest skipped (software framebuffer)` line), `CRUGOS: virtio-gpu ready (1280x800, 1000 backing page(s), resource 1, modern pci)`, `CRUGOS: gpu scanout ok (1280x800, 1 transfer(s), 1 flush(es))` and `CRUGOS: gpu selftest ok (1280x800, 13 transfer(s), 13 flush(es))`, gate 60 `make test-gpu` booting `-vga none -device virtio-gpu-pci,id=gpu0` with `wb.enable=1 wb.wait=30 gpu.enable=1 gpu.test=1`, `scripts/run-gpu.py` QMP screendumps asserting (16,32,48) at (1200,700), (255,176,0) at (600,306), (128,128,128) at (200,96) and (255,255,255) at (80,150) plus 5800 amber and 3627 frame pixels and printing `ok: virtio-gpu scanout 1280x800 (13 transfer(s), 13 flush(es), exit 33)`, `--expect-gpu=yes` in `scripts/boot-check.py` as a flag, the knobs `GPU_WB_WAIT` 30, `GPU_RUN_TIMEOUT_SEC` 300 and `GPU_QEMU_EXTRA`, `tests/host/test_gpu.c` for the command encoding, response classes, clipping, backing pages, display pick and damage merge, new `docs/gpu.md`, 8488 host checks, 347208 B (339 KiB) file / 994626 B (971 KiB) load; BootInfo stays v1 and the kernel ABI is unchanged |
 | `v0.45.0` | 2026-10-29 | phase 7C: package update and removal (`kernel/app/pkg.c`, `kernel/core/syscall.c`, `kernel/core/pkg_test.c`, `kernel/gfx/workbench.c`, `include/crug/syscall.h`, `user/sh.c`, `user/lib.h`, `user/captest.c`, `scripts/mkpkgtest.sh`, `scripts/run-workbench-pkg.py`, `scripts/boot-check.py`, `tests/host/test_pkg.c`, `Makefile`: `pkg_install()` comparing the `/System/pkgdb/<id>.txt` record with `app_version_compare()` before it stages anything, refusing the same version as `already-installed` and an older header as `downgrade`, and treating a newer one as an update that renames the installed tree to `/Applications/.stage-<id>.old`, restores it on every failure and deletes it only once the new record is on disk, marker `CRUGOS: pkg updated <id> <old> -> <new> (N file(s), M cap(s))`; `pkg_remove(id)` validating the id (letters, digits, `.`, `_` and `-`, under 32 characters), requiring a registry entry or a bundle directory, remounting the root writable, deleting `/Applications/<id>.app` recursively, unlinking the record, fsyncing, dropping the registry entry and rescanning, marker `CRUGOS: pkg removed <id> (N package(s))`, rejection line `CRUGOS: pkg remove rejected <id> (<reason>)` and the new `downgrade`, `not-installed` and `read-only` reasons; `SYS_PKG_REMOVE` 33 with `SYS_MAX` 34, gated on `CAP_PKG_INSTALL` and wrapped as `u_pkg_remove()`; `SYS_SPAWN` and `SYS_EXEC` gated on `CAP_APP_LAUNCH` with `elf_spawn_user_caps()` handing a child the caller's mask instead of `CAP_ALL`; the `pkg list`, `pkg info`, `pkg install` and `pkg remove` shell builtins under `CrugOS ring-3 shell (phase 7c)`; `/bin/captest` denial lines for `pkg.remove`, spawn and exec; `wb.pkg=1` as a toggle that installs `captest` while it is absent and removes it while it is present, with `CRUGOS: wb pkg removed captest (N package(s))` and `CRUGOS: wb pkg selftest ok (2 install(s), 1 remove(s), 1 package(s))`; gate 57 walking install, update to 2.0.0, the downgrade refusal, the second-install refusal, a removal, the second-removal refusal, an untrusted refusal and a reinstall to `pkg selftest ok (2 installed, 1 updated, 1 removed)` with `scripts/mkpkgtest.sh` building the second package from the same seed, gate 58 with the three new denials, gate 59 pressing the desktop body three times for `ok: workbench package toggle (2 installs, 1 remove, exit 33)`, 8408 host checks, 333224 B (325 KiB) file / 984062 B (960 KiB) load; BootInfo stays v1 and the kernel ABI is unchanged |
 | `v0.44.0` | 2026-10-29 | phase 7B: signed packages and capabilities (`include/crug/caps.h`, `include/crug/pkg.h`, `include/crug/syscall.h`, `kernel/lib/caps.c`, `kernel/lib/perms.c`, `kernel/app/pkg.c`, `kernel/crypto/sha512.c`, `kernel/crypto/ed25519.c`, `kernel/core/main.c`, `kernel/core/syscall.c`, `kernel/core/user_test.c`, `kernel/gfx/workbench.c`, `user/lib.h`, `user/captest.c`, `scripts/mkdisk.sh`, `scripts/run-workbench-pkg.py`, `scripts/boot-check.py`, `tools/mkpkg.c`, `tests/host/test_pkg.c`, `tests/host/Makefile`, `Makefile`: a `u32` capability mask with `CAP_FS_READ` 0x01, `CAP_FS_WRITE` 0x02, `CAP_APP_LAUNCH` 0x04, `CAP_NET` 0x08, `CAP_AUDIO` 0x10, `CAP_PKG_INSTALL` 0x20, `CAP_ALL` 0x3F and `CAP_NONE`, kernel threads at `CAP_ALL`, ring-3 threads inheriting the parent mask and a bundle narrowed to the intersection of its manifest caps with `perms_granted(id)`, the `/System/perms.conf` policy (`perms_line`, `perms_id`, `perms_cap`, `perms_dup` and `perms_full` reasons, eight rules, marker `CRUGOS: perms policy ready (default <caps>, N rule(s))`), checks in `kernel/core/syscall.c` for `SYS_OPEN` (`fs.read`, plus `fs.write` when writable), `SYS_LISTDIR` (`fs.read`), the socket and resolve calls (`net`), `SYS_APP_SPAWN` (`app.launch`) and `SYS_PKG_INSTALL` (`pkg.install`) that return `SYS_EPERM` and pass CPL0 callers, `SYS_CAP_QUERY` 28, `SYS_CAP_CHECK` 29, `SYS_PKG_COUNT` 30, `SYS_PKG_INFO` 31 and `SYS_PKG_INSTALL` 32 with `SYS_MAX` 33 and `SYS_PKG_INFO_MAX` 192, the `u_cap_query()`, `u_cap_check()`, `u_pkg_count()`, `u_pkg_info()` and `u_pkg_install()` wrappers, the `.crpkg` container with a 512-byte header (`PKG_MAGIC` `CRUGPKG1`, five text fields, payload size, capability mask, key id, `PKG_PUBKEY_OFFSET` 0xE8, `PKG_SIG_OFFSET` 0x110), `PKG_MAX_FILES` 32 files of 96 KiB under `PKG_MAX_BYTES` 128 KiB and no heap, the SHA-512 payload digest and Ed25519 signature checked against `/System/trusted/keys.conf` with `untrusted-key` for every other publisher, the staged install from `/Applications/.stage/<id>` through a rename to `/Applications/<id>.app` and a `/System/pkgdb/<id>.txt` record to `CRUGOS: pkg installed <id> <version> (N file(s), M cap(s))` and `CRUGOS: package registry ready (N package(s))`, 21 stable refusal reasons from `bad-entry` to `registry-full`, `make mkpkg` driven by `MKPKG` and `PKG_DATA_DIR` and signed with the deterministic `PKG_SEED`/`PKG_BAD_SEED` pair, the `pkg.test=1` and `pkg.test=2` selftests, `wb.pkg=1` with the (40,330,420,200) installer window and `pkg_reason_text()` on refusal, gates 57 `make test-pkg`, 58 `make test-caps` and 59 `make test-workbench-pkg` (`PKG_RUN_TIMEOUT_SEC`, `CAPS_RUN_TIMEOUT_SEC` and `WB_PKG_RUN_TIMEOUT_SEC` 240, `WB_PKG_WAIT` 30), `tests/host/test_pkg.c` with vectors, parsers and container cases, new `docs/packages.md`, 8403 host checks, 329016 B (321 KiB) file / 980414 B (957 KiB) load; BootInfo stays v1 and the kernel ABI is unchanged |
 | `v0.43.0` | 2026-10-29 | phase 7A: `.app` bundles and tool types (`include/crug/app.h`, `kernel/app/app.c`, `kernel/app/manifest.c`, `kernel/core/main.c`, `include/crug/syscall.h`, `kernel/core/syscall.c`, `kernel/core/user_test.c`, `kernel/gfx/workbench.c`, `user/lib.h`, `user/sh.c`, `user/app_hello.c`, `user/app_orbit.c`, `scripts/mkdisk.sh`, `scripts/run-workbench-app.py`, `scripts/boot-check.py`, `tests/host/test_app.c`, `tests/host/Makefile`, `Makefile`: a static `APP_MAX` 8 registry filled from `/Applications` once at boot with nineteen stable rejection reasons, a `APP_MANIFEST_MAX` 2048-byte TOML-subset manifest with `[app]`, `[exec]`, `[tooltypes]` and `[icon]`, `app_launch()` through `elf_spawn_user()` with `argv[0]` set to the bundle directory, `SYS_APP_COUNT` 25, `SYS_APP_INFO` 26 and `SYS_APP_SPAWN` 27 with `SYS_MAX` 28 and `APP_INFO_MAX` 512, the `app list`, `app info` and `app run` shell builtins, `user.test=7` through `/etc/app.rc`, `wb.app=1` with the Applications icon and its bundle window, the Hello, Orbit and Broken bundles, gate 56 `make test-app-bundles` (a desktop leg checked with `--expect-app=yes` and a `user.test=7` shell leg, `WB_APP_WAIT` 30, `WB_APP_ACTS` 1, `WB_APP_RUN_TIMEOUT_SEC` 240, `APP_RUN_TIMEOUT_SEC` 300), new `docs/apps.md`, 8216 host checks, 296848 B (289 KiB) file / 942394 B (920 KiB) load; BootInfo stays v1 and the kernel ABI is unchanged |
