@@ -25,6 +25,7 @@
 #define U_SYS_PKG_COUNT 30u
 #define U_SYS_PKG_INFO 31u
 #define U_SYS_PKG_INSTALL 32u
+#define U_SYS_PKG_REMOVE 33u
 
 /* Capability bits, mirroring include/crug/caps.h. */
 #define U_CAP_FS_READ (1u << 0)
@@ -239,6 +240,12 @@ static inline i64 u_pkg_info(u32 index, void *buf, u32 len)
 static inline i64 u_pkg_install(const char *path)
 {
     return u_syscall3(U_SYS_PKG_INSTALL, (u64)(uintptr)path, 0, 0);
+}
+
+/* Phase 7C: remove an installed package by id.  Same capability. */
+static inline i64 u_pkg_remove(const char *id)
+{
+    return u_syscall3(U_SYS_PKG_REMOVE, (u64)(uintptr)id, 0, 0);
 }
 
 static inline i64 u_gettid(void)

@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 7B signed packages (v0.44.0)
+## Status: phase 7C package update and removal (`v0.45.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -86,7 +86,11 @@ signed packages: every ring-3 thread carries a capability mask, a policy file
 in `/System` decides what a bundle may hold, a `.crpkg` container carries an
 Ed25519 signature over a SHA-512 digest that a trust list must recognise, and
 `make test-pkg`, `make test-caps` and `make test-workbench-pkg` are gates 57 to
-59.
+59. Phase 7C gives the installer a lifecycle and closes the capability hole:
+a newer package updates an installed one through a stage-and-swap with a
+rollback backup, a package can be removed again, `SYS_SPAWN` and `SYS_EXEC`
+now require `app.launch` and hand the child the caller's mask, and the shell
+gained a `pkg` builtin.
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -1498,8 +1502,40 @@ verifiable package instead of a copied directory.
   (321 KiB) kernel file and a 980414 B (957 KiB) load image (`.text` 236070 B,
   `.rodata` 35648 B, `.data` 88 B, `.bss` 708608 B), and all 59 gates pass.
 
+Phase 7C gives those packages a lifecycle:
+
+- `pkg_install()` compares the header version with the record in
+  `/System/pkgdb/<id>.txt` before it stages anything: the same version is
+  refused as `already-installed`, an older one as `downgrade`, and a newer
+  one takes the update path;
+- an update stages the new tree, renames the installed bundle to
+  `/Applications/.stage-<id>.old`, renames the stage into place, rewrites the
+  record and rescans; every failure restores the backup, and the backup is
+  deleted only after the record is on disk. The success line is
+  `CRUGOS: pkg updated <id> <old> -> <new> (N file(s), M cap(s))`;
+- `pkg_remove(id)` remounts writable, deletes `/Applications/<id>.app`
+  recursively, unlinks the pkgdb record, fsyncs and rescans, then prints
+  `CRUGOS: pkg removed <id> (N package(s))`; `SYS_PKG_REMOVE` 33 is the only
+  removal path and needs `pkg.install` (`SYS_MAX` is now 34);
+- `SYS_SPAWN` and `SYS_EXEC` are gated on `app.launch` and
+  `elf_spawn_user_caps()` passes the caller's mask to the child, so a narrowed
+  program can no longer recover `CAP_ALL` by starting `/bin/sh`;
+- the ring-3 shell gained `pkg list`, `pkg info <id>`, `pkg install <path>`
+  and `pkg remove <id>`, and `/bin/captest` now also proves that
+  `pkg.remove`, spawn and exec are denied;
+- the desktop window became a toggle: the body press installs when the id is
+  absent and removes it when present, paints `installed` or `removed`, and
+  the selftest counts two installs and one remove;
+- gate 57 now walks install, update, downgrade, remove and reinstall;
+  `scripts/mkpkgtest.sh` builds the 2.0.0 package from the same seed. The gate
+  count stays at 59, and `make test-host` is 8408 checks after the new
+  `test_pkg.c` cases; `make size` reports a 333224 B (325 KiB) kernel file and a
+  984062 B (960 KiB) load image (`.text` 239078 B, `.rodata` 36288 B, `.data`
+  88 B, `.bss` 708608 B).
+
 See [docs/packages.md](docs/packages.md) for the capability matrix, the policy
-and manifest grammar, the container layout and the refusal table.
+and manifest grammar, the container layout, the update and removal pipeline and
+the refusal table.
 
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
@@ -1509,9 +1545,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.44.0 (phase 7b) -- Amiga-inspired microkernel bring-up
+CrugOS 0.45.0 (phase 7c) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.44.0
+CRUGOS: version 0.45.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -1560,7 +1596,7 @@ CRUGOS: tcp http served (72 bytes)
 CRUGOS: net selftest ok
 CRUGOS: gfx ready (1024x768, cursor at 512,384)
 CRUGOS: selftest ok
-kernel : 0x0000000000100000 size=321 KiB
+kernel : 0x0000000000100000 size=325 KiB
 boot   : cpu=0 acpi_rsdp=0x1f77e000 fdt=0x0 initrd=0x0
 memory : 36 regions, usable 474080 KiB (462 MiB)
 pmm    : total=118520 free=118462 bitmap=131072 B
@@ -1570,9 +1606,9 @@ entropy: ca02033c50b53413
 wx     : audit ok, identity map 0..4 GiB, guard unmapped
 heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
-boot   : pmm=28663 us cpu=455 us vm=665 us traps=361 us timer=65361 us heap=578 us storage=97059 us sched=7420 us syscall=113 us total=200681 us
+boot   : pmm=27601 us cpu=408 us vm=624 us traps=333 us timer=65376 us heap=507 us storage=95213 us sched=5952 us syscall=107 us total=196126 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase 7b boot ok
+CRUGOS: phase 7c boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -1787,9 +1823,9 @@ make test-workbench-select  # click drawer rows and drag its scrollbar
 make test-workbench-screens  # switch screens and move a window between them
 make test-workbench-cx  # drive commodity hotkeys and toggle rows in the Exchange manager
 make test-app-bundles  # launch a .app bundle from the desktop and from the shell
-make test-pkg    # install a signed package and refuse a duplicate and an untrusted key
+make test-pkg    # install, update and remove a signed package and refuse a duplicate and an untrusted key
 make test-caps   # launch the installed bundle and prove its capability wall
-make test-workbench-pkg  # install a signed package from the Workbench
+make test-workbench-pkg  # install, remove and reinstall a signed package from the Workbench
 make test-hardening  # craft hostile superblock/inode/crypt images and boot them
 make test-heap   # corrupt the kernel heap and prove the integrity checker catches it
 make test-trap   # inject eight crafted faults and check the report, IST and panic
@@ -1805,7 +1841,7 @@ make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
 make usb         # write the ISO to a USB block device (USB_DEV=/dev/sdX)
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
-make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows/menus/gadgets, resize grips, keyboard focus and keys, icon dragging, the send-to-front gadget and keyboard icon focus, the body input handler, the text grid and the shell, the user-window and uaccess validators, the per-space page-table tests, the ELF exec mapper, the argv predicates, the fork clone, the copy-on-write table, the screen model, the commodity registry, the app manifest parser, the capability mask and permission policy, and the package container with its Ed25519 signatures)
+make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows/menus/gadgets, resize grips, keyboard focus and keys, icon dragging, the send-to-front gadget and keyboard icon focus, the body input handler, the text grid and the shell, the user-window and uaccess validators, the per-space page-table tests, the ELF exec mapper, the argv predicates, the fork clone, the copy-on-write table, the screen model, the commodity registry, the app manifest parser, the capability mask and permission policy, the package container with its Ed25519 signatures, and the version comparison an update and a removal depend on)
 make check-disk  # e2fsck + persisted-file checks on the latest test disk
 make user        # build the ring-3 programs and .app payloads the disk image carries
 make packages    # sign the test bundles the installer gates install

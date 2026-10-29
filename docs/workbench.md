@@ -556,7 +556,7 @@ a body-relative (12,60,160,22) `Send to Workbench` gadget, return to screen 0 an
 print `CRUGOS: wb screens ready (%u screen(s), front %d)`. A press on the gadget
 moves the Tools window to screen 0, which is the programmatic way to show a move
 without dragging the window's title bar across a screen edge. In screens mode the
-Workbench window body reads `phase 7b` and the self-test ends with
+Workbench window body reads `phase 7c` and the self-test ends with
 `CRUGOS: wb screens selftest ok (%u switch(es), %u move(s))`.
 
 ## Commodities Exchange
@@ -674,9 +674,10 @@ self-test waits for that many reaps and then ends with
 `CRUGOS: wb app selftest ok (%u click(s), %u launch(es))`; a wait that expires
 first prints `CRUGOS: wb app timeout (%u/%u)` and panics the boot.
 
-## Packages window (phase 7B)
+## Packages window (phase 7B, a toggle since 7C)
 
-Phase 7B gives the desktop an installer. `wb.pkg=<0|1>` (default 0, only 0
+Phase 7B gives the desktop an installer and phase 7C turns the body press into a
+toggle. `wb.pkg=<0|1>` (default 0, only 0
 disables) opens a `Packages` window and requires `wb.enable=1`. The window is
 created in `wb_init()` at (40,330), 420x200, titled `Packages` with the body
 heading `CrugOS Packages`, and that happens before `pkg_init()` has read
@@ -695,23 +696,26 @@ and row layout as the Applications window next door. A successful install writes
 failed one writes `pkg_reason_text()` of the reason there instead, which is
 the same sentence the kernel prints on the serial line.
 
-A body press is the whole interface: `wb_pkg_install()` counts the operation,
-calls `pkg_install()` on `WB_PKG_DEMO`
-(`/System/packages/captest.crpkg`) and redraws. The click is idempotent:
-once the registry holds `WB_PKG_DEMO_ID` (`captest`), a second press prints
-`CRUGOS: wb pkg already installed (captest)` and changes nothing. Otherwise a
-success prints `CRUGOS: wb pkg installed /System/packages/captest.crpkg
-(%u package(s))` and a refusal prints `CRUGOS: wb pkg rejected <file>
-(<reason>)`.
+A body press is the whole interface. `wb_pkg_toggle()` counts the operation
+and looks the id up in the registry: when `WB_PKG_DEMO_ID` (`captest`) is
+absent it calls `pkg_install()` on `WB_PKG_DEMO`
+(`/System/packages/captest.crpkg`); when it is present it calls
+`pkg_remove("captest")` instead. A success prints
+`CRUGOS: wb pkg installed /System/packages/captest.crpkg (%u package(s))` or
+`CRUGOS: wb pkg removed captest (%u package(s))`, and a refusal prints
+`CRUGOS: wb pkg rejected <id> (<reason>)`. The body paints `installed`
+after an install and `removed` after a removal, so the same press keeps
+flipping the row.
 
-With `wb.acts=` set (the gate sets it to 1) the self-test waits for the
-install: it ends with `CRUGOS: wb pkg selftest ok (%u install(s), %u
-package(s))`, or with `CRUGOS: wb pkg timeout (%u/%u)` and a panicked boot
-when nothing arrives inside `wb.wait=`. The finished desktop is held for 1.5 s
+With `wb.acts=` set (the gate sets it to 3: install, remove, install) the
+self-test waits for the presses: it ends with
+`CRUGOS: wb pkg selftest ok (%u install(s), %u remove(s), %u package(s))`, or
+with `CRUGOS: wb pkg timeout (%u/%u)` and a panicked boot when nothing
+arrives inside `wb.wait=`. The finished desktop is held for 1.5 s
 before the exit so the last screendump can land. `make test-workbench-pkg` is
-gate 59; [packages.md](packages.md) describes the package format, the trust list
-and the install pipeline, and [userspace.md](userspace.md) the `SYS_PKG_*`
-syscalls.
+gate 59; [packages.md](packages.md) describes the package format, the trust list,
+the update and removal pipeline, and [userspace.md](userspace.md) the
+`SYS_PKG_*` syscalls.
 
 ## The event queue
 
@@ -758,7 +762,7 @@ index and the new tile origin.
 
    | id | rectangle | title | body |
    | --- | --- | --- | --- |
-   | 1 | (80, 90) 360x220 | `Workbench` | `CrugOS Workbench` / `phase 7b` / `software rendered` |
+   | 1 | (80, 90) 360x220 | `Workbench` | `CrugOS Workbench` / `phase 7c` / `software rendered` |
    | 2 | (480, 300) 320x200 | `Shell` | `4.OS` / `crugos>`, or the shell grid when `wb.shell=1` |
 
    Window 1 carries the `Workbench` (About/Info/Quit) and `Window`
@@ -853,7 +857,7 @@ CRUGOS: wb window 2 drag start (512, 312)
 CRUGOS: wb window 2 drag to (557, 337)
 CRUGOS: wb window 2 moved to (570, 350)
 CRUGOS: wb selftest ok (1 drag(s), 0 action(s))
-CRUGOS: phase 7b boot ok
+CRUGOS: phase 7c boot ok
 ```
 
 The menu gate is a second boot and adds the action lines:
@@ -871,7 +875,7 @@ CRUGOS: wb menu 'Workbench' open (window 1)
 CRUGOS: wb menu 'Workbench' selected ('Quit')
 CRUGOS: wb action 4 menu window 1 item 2
 CRUGOS: wb selftest ok (0 drag(s), 4 action(s))
-CRUGOS: phase 7b boot ok
+CRUGOS: phase 7c boot ok
 ```
 
 The shell gate is a third boot: it adds `CRUGOS: wb shell ready (window 2,
@@ -898,7 +902,7 @@ CRUGOS: wb menu 'Workbench' item 1 highlighted ('Info')
 CRUGOS: wb menu 'Workbench' selected ('Info')
 CRUGOS: wb action 2 menu window 1 item 1
 CRUGOS: wb selftest ok (0 drag(s), 2 action(s))
-CRUGOS: phase 7b boot ok
+CRUGOS: phase 7c boot ok
 ```
 
 The desktop gate is a fifth boot: it selects the `System:` object, opens its
@@ -916,7 +920,7 @@ CRUGOS: wb window 3 sent to back
 CRUGOS: wb action 3 depth window 3
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb selftest ok (0 drag(s), 3 action(s))
-CRUGOS: phase 7b boot ok
+CRUGOS: phase 7c boot ok
 ```
 
 The icon gate is a sixth boot: it focuses the `System:` object from the
@@ -940,7 +944,7 @@ CRUGOS: wb window 1 sent to front
 CRUGOS: wb action 5 front window 1
 CRUGOS: wb icons selftest ok (1 move(s), 1 front(s))
 CRUGOS: wb selftest ok (0 drag(s), 5 action(s))
-CRUGOS: phase 7b boot ok
+CRUGOS: phase 7c boot ok
 ```
 
 The drawer gate is a seventh boot, the only one that fills the volume first:
@@ -966,7 +970,7 @@ CRUGOS: wb drawer refreshed (29 entries)
 CRUGOS: wb selftest ok (0 drag(s), 0 action(s))
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb drawer selftest ok (3 scroll(s), 1 refresh(es))
-CRUGOS: phase 7b boot ok
+CRUGOS: phase 7c boot ok
 ```
 
 The select gate is an eighth boot: same filled drawer, but the pointer now
@@ -989,7 +993,7 @@ CRUGOS: wb drawer scrollbar to (top 18 of 29)
 CRUGOS: wb drawer selected '<name>' (index 18 of 29)
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb select selftest ok (2 select(s), 1 scrollbar drag(s))
-CRUGOS: phase 7b boot ok
+CRUGOS: phase 7c boot ok
 ```
 
 The screens gate is a ninth boot: two screens, a switch and a move between them:
@@ -1004,7 +1008,7 @@ CRUGOS: wb action 3 screen-move window 3 to 0
 CRUGOS: wb screen 0 front (3 window(s))
 CRUGOS: wb action 4 screen 0 front
 CRUGOS: wb screens selftest ok (2 switch(es), 1 move(s))
-CRUGOS: phase 7b boot ok
+CRUGOS: phase 7c boot ok
 ```
 
 The commodities gate is a tenth boot: four registered utilities, a manager
@@ -1020,7 +1024,7 @@ CRUGOS: wb action 3 commodity Mute fired (muted)
 CRUGOS: wb action 4 commodity Clock fired (uptime 1 s)
 CRUGOS: wb cx selftest ok (2 toggle(s), 2 fire(s))
 CRUGOS: wb selftest ok (0 drag(s), 4 action(s))
-CRUGOS: phase 7b boot ok
+CRUGOS: phase 7c boot ok
 ```
 
 The app-bundle gate boots the desktop with a three-bundle registry
@@ -1038,7 +1042,7 @@ CRUGOS: wb app launch hello tid 11
 CRUGOS: wb app reaped tid 11 exit 0
 CRUGOS: wb selftest ok (0 drag(s), 0 action(s))
 CRUGOS: wb app selftest ok (2 click(s), 1 launch(es))
-CRUGOS: phase 7b boot ok
+CRUGOS: phase 7c boot ok
 ```
 
 | marker | when |
@@ -1260,7 +1264,7 @@ there is no keyboard text entry, only focus, movement and menu selection.
 `kernel/gfx/commodities.c`, `kernel/app/manifest.c`, `kernel/app/pkg.c`,
 `kernel/lib/caps.c`, `kernel/lib/perms.c`, `kernel/crypto/sha512.c`,
 `kernel/crypto/ed25519.c`, `kernel/lib/textgrid.c` and
-`kernel/shell/shell.c` and reports 8403 checks.
+`kernel/shell/shell.c` and reports 8408 checks.
 `tests/host/test_intuition.c` replaces the framebuffer primitives with counting
 stubs and the cursor accessors with a settable fake (`test_fb_fake_reset()` /
 `test_fb_cursor_set()` from `tests/host/test_gfx.c`), then checks:
@@ -1370,7 +1374,9 @@ stubs and the cursor accessors with a settable fake (`test_fb_fake_reset()` /
   lookup), the 512-byte header (magic, size, flags, the five text fields,
   the payload size window, the capability mask and the key id), the payload
   container (paths, per-file and total sizes, the file-count cap and the
-  trailing-byte check) and `pkg_format_info()` / `pkg_reason_text()`.
+  trailing-byte check), `pkg_format_info()` / `pkg_reason_text()`
+  and the version-comparison cases the update and the `downgrade` refusal
+  depend on.
 
 ## Gate
 
@@ -1408,7 +1414,7 @@ anything else. The script then:
    `ok: workbench title-bar drag (N drag(s), window 2 at (x, y), exit 33)`.
 
 `make test-workbench` then runs `scripts/boot-check.py` with `EXPECT_WB=yes`
-(the phase 7b boot marker, the desktop marker, a `wb selftest ok`, at least one
+(the phase 7c boot marker, the desktop marker, a `wb selftest ok`, at least one
 `wb window N opened`, one `wb window N moved to`, and one `wb cursor at` with
 numeric coordinates) and `scripts/check-disk.py` for the ext4 root.
 
@@ -1443,7 +1449,7 @@ larger relative motion into several 8-bit HID reports and the guest drops some
 of them, so a single jump of 644 pixels landed 136 pixels short when the gate
 was first written.
 
-`boot-check.py` then runs with `EXPECT_MENU=yes`, which requires the phase 7b
+`boot-check.py` then runs with `EXPECT_MENU=yes`, which requires the phase 7c
 marker, the desktop marker, the menu open and selected markers, the gadget
 click marker, the close marker, at least one `wb action N ...` line and a
 `wb selftest ok (N drag(s), M action(s))` with at least one action, and
@@ -1489,7 +1495,7 @@ wb.acts=$(WB_KEYS_ACTS)`:
    and Enter to select it, requiring the highlight marker, the selection marker
    and `wb action 2 menu window 1 item 1`.
 5. waits for exit status 33, then runs `scripts/boot-check.py` with
-   `EXPECT_KEYS=yes` (the phase 7b marker, the desktop and keys markers, the
+   `EXPECT_KEYS=yes` (the phase 7c marker, the desktop and keys markers, the
    resize and key-move markers, the menu markers and a two-action
    `wb selftest ok`) and `scripts/check-disk.py`, and prints
    `ok: workbench resize and keyboard navigation (exit 33)`.
@@ -1521,7 +1527,7 @@ wb.acts=$(WB_DESK_ACTS)`:
    back: the drawer title bar turns idle grey `(128,128,128)` and the Shell
    title bar behind it becomes amber at the same point.
 6. waits for exit status 33, then runs `scripts/boot-check.py` with
-   `EXPECT_DESK=yes` (the phase 7b marker, the desktop and icon markers, the
+   `EXPECT_DESK=yes` (the phase 7c marker, the desktop and icon markers, the
    drawer marker, the icon and depth action lines, the desk self-test line and
    a three-action `wb selftest ok`) and `scripts/check-disk.py`, and prints
    `ok: workbench desktop objects and depth (exit 33)`.
@@ -1548,7 +1554,7 @@ wb.ikeys=1 wb.acts=$(WB_ICONS_ACTS)`:
 5. presses the front gadget at (394,102): the same title bar turns amber
    `(255,176,0)` again and the log carries
    `CRUGOS: wb window 1 sent to front`.
-6. waits for exit status 33, then `scripts/boot-check.py` requires the phase 7b
+6. waits for exit status 33, then `scripts/boot-check.py` requires the phase 7c
    marker, the icons-ready, focus, drag, drop, front and action markers, the
    icon self-test line and `EXPECT_ICONS=yes` (its ok line reads `desk no icons
    yes storage disk`), and `scripts/check-disk.py` still runs a clean `e2fsck`.
@@ -1736,27 +1742,31 @@ manifest format and the registry itself.
 (`usb=off,i8042=off`) and a hot-plugged `usb-mouse`, this time over a QMP
 socket, in six steps:
 
-1. boots with `wb.enable=1 wb.wait=$(WB_PKG_WAIT) wb.pkg=1` and requires
-   `CRUGOS: wb desktop ready` and `CRUGOS: wb pkg ready` before it touches
-   the pointer.
+1. boots with `wb.enable=1 wb.wait=$(WB_PKG_WAIT) wb.pkg=1 wb.acts=3`
+   and requires `CRUGOS: wb desktop ready` and `CRUGOS: wb pkg ready`
+   before it touches the pointer.
 2. hot-plugs `mouse0` on `xhci.0` and reads the starting cursor from
    `CRUGOS: gfx ready`, moving in steps of at most 100 pixels so the 8-bit
    HID reports do not overflow.
 3. takes a `screendump` and requires the window frame at (40,330) to be
    (255,255,255) and zero amber pixels in the body scan region
    (44,360)-(456,526): the window must start with no `installed` line.
-4. presses the body at (250,430) once, which is the install; when the serial
-   line does not follow it presses once more, so the run tolerates a lost
-   first click.
+4. presses the body at (250,430) three times: the first press installs
+   `captest`, the second removes it, the third installs it again. It waits
+   for each serial line in turn and retries the first press once, so the run
+   tolerates a lost click, and it requires the removal line to appear in the
+   log, which is what proves the press is a toggle and not an idempotent
+   install.
 5. takes a second `screendump` and requires amber (255,176,0) pixels in the
    same region, then the serial lines
    `CRUGOS: wb pkg installed /System/packages/captest.crpkg`,
-   `CRUGOS: wb pkg selftest ok` and `CRUGOS: wb selftest ok`, and waits for
-   exit status 33.
+   `CRUGOS: wb pkg removed captest`,
+   `CRUGOS: wb pkg selftest ok (2 install(s), 1 remove(s), 1 package(s))` and
+   `CRUGOS: wb selftest ok`, and waits for exit status 33.
 6. runs `scripts/boot-check.py --expect-wbpkg=yes` (a flag, not a positional
    argument, so the argument order and the argc range are unchanged; its ok
    line reads `wbpkg yes`) and `scripts/check-disk.py`, and prints
-   `ok: workbench package install (1 install, exit 33)`.
+   `ok: workbench package toggle (2 installs, 1 remove, exit 33)`.
 
 Its knobs are `WB_PKG_WAIT` (30) and `WB_PKG_RUN_TIMEOUT_SEC` (240), plus the
 shared `WB_QEMU_EXTRA`. See [packages.md](packages.md) for the format and

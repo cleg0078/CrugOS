@@ -1814,6 +1814,55 @@ reachable until then.
   build.
 - All 59 gates pass at `v0.44.0`.
 
+## Phase 7C - package update and removal (done)
+
+- `pkg_install()` reads the record in `/System/pkgdb/<id>.txt` and compares
+  the header version with `app_version_compare()` before it stages anything:
+  the same version is refused as `already-installed`, an older header as
+  `downgrade`, and a newer one becomes an update.
+- An update keeps the staged-and-renamed install path and adds a backup: the
+  installed tree is renamed to `/Applications/.stage-<id>.old` before the
+  stage is renamed into place, every failure restores it, and it is deleted only
+  after the new record is on disk and the registry rescanned. The marker is
+  `CRUGOS: pkg updated <id> <old> -> <new> (N file(s), M cap(s))`.
+- `pkg_remove(id)` validates the id, requires a registry entry or a bundle
+  directory, remounts the root writable, deletes `/Applications/<id>.app`
+  recursively, unlinks the pkgdb record, fsyncs, drops the registry entry and
+  rescans, then prints `CRUGOS: pkg removed <id> (N package(s))`; the reason
+  set grows `downgrade`, `not-installed` and `read-only`.
+- `SYS_PKG_REMOVE` (33) is the only removal path: it takes the package id,
+  needs `pkg.install` and returns `SYS_EPERM`, `SYS_EFAULT` or
+  `SYS_EIO`; `SYS_MAX` is now 34.
+- The capability hole is closed: `SYS_SPAWN` and `SYS_EXEC` require
+  `app.launch` (`SYS_EPERM` otherwise) and `elf_spawn_user_caps()` hands
+  the child the caller's mask instead of `CAP_ALL`, so a narrowed program
+  cannot regain rights by starting `/bin/sh`.
+- The ring-3 shell gained `pkg list`, `pkg info <id>`, `pkg install
+  <path>` and `pkg remove <id>`; `user/lib.h` adds `u_pkg_remove()` and
+  `/bin/captest` now also proves that `pkg.remove`, spawn and exec are
+  denied.
+- `wb.pkg=1` turns the desktop window into a toggle: the body press installs
+  `captest` when it is absent and removes it when it is present, paints
+  `installed` or `removed`, and the self-test counts the two installs and
+  the remove.
+- Gate 57 now boots `pkg.test=1` through install, update to 2.0.0, the
+  `downgrade` refusal, the `already-installed` refusal, a removal, the
+  `not-installed` refusal, an untrusted refusal and a reinstall, and
+  `scripts/mkpkgtest.sh` builds the second package from the same seed. Gate 59
+  presses the body three times and prints
+  `ok: workbench package toggle (2 installs, 1 remove, exit 33)`.
+- Host tests add the version-comparison cases the update and the `downgrade`
+  refusal depend on: `make test-host` reports 8408 checks. The gate count
+  stays at 59 because each phase's gate grew rather than adding another one.
+- Limits: no file-level merge (an update replaces the bundle wholesale), no
+  rollback beyond the stage/backup swap, `audio` is still never checked, and
+  a removal takes no reference count, so a running bundle is unlinked from under
+  itself. See [packages.md](packages.md).
+- docs: `docs/packages.md` gains the updating and removing sections, the
+  syscall row, the new markers and the revised limits, alongside README,
+  userspace, workbench, versioning, boot and build.
+- All 59 gates pass at `v0.45.0`.
+
 ## Bootable media - hybrid UEFI ISO (done, `v0.23.1`)
 
 - `kernel/fs/storage.c` gained the `storage=none` command-line token: every

@@ -147,8 +147,16 @@ int pkg_probe(const char *path, struct pkg_header *out, int *out_trusted,
 /* Install PATH: verify, stage under /Applications/.stage-<id>, write the
    files, rename to /Applications/<id>.app and record the install.  A
    failure before the rename removes the stage directory, so a bad package
-   never leaves a half-application behind.  Returns 0 or -1 with *reason. */
+   never leaves a half-application behind.  Installing a different version
+   of an installed package is an update: the old bundle is moved to
+   .stage-<id>.old until the new one is in place, and put back on failure.
+   Returns 0 or -1 with *reason ('already-installed', 'downgrade', ...). */
 int pkg_install(const char *path, const char **reason);
+
+/* Remove the installed package ID: its /Applications/<id>.app tree and its
+   /System/pkgdb/<id>.txt record.  Returns 0 or -1 with *reason
+   ('not-installed', 'id', 'read-only', 'io'). */
+int pkg_remove(const char *id, const char **reason);
 
 /* Human readable name of a reason string, for the installer window. */
 const char *pkg_reason_text(const char *reason);

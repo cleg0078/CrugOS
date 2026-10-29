@@ -32,6 +32,7 @@
 
 #define PKG_TEST_ID "captest"
 #define PKG_TEST_PATH PKG_DIR "/captest.crpkg"
+#define PKG_TEST_V2 PKG_DIR "/captest2.crpkg"
 #define PKG_TEST_BAD PKG_DIR "/untrusted.crpkg"
 #define PKG_TEST_PROG "/Applications/captest.app/bin/x86_64/captest"
 #define PKG_TEST_MANIFEST "/Applications/captest.app/manifest.toml"
@@ -129,11 +130,52 @@ static int pkg_test_install(void)
     kprintf("CRUGOS: pkg selftest installed %s %s\n", installed->id,
             installed->version);
 
+    /* Phase 7C: a newer version at the same path is an update, not a
+       refusal.  The old bundle is parked under .stage-<id>.old until the new
+       one and its record are in place. */
+    reason = 0;
+    if (pkg_install(PKG_TEST_V2, &reason) != 0)
+        return pkg_test_failed("update", reason);
+    installed = pkg_find_id(PKG_TEST_ID);
+    if (!installed || strcmp(installed->version, "2.0.0") != 0)
+        return pkg_test_failed("update registry", 0);
+    if (!fs || ext4_lookup(fs, PKG_TEST_PROG, &ino) != 0)
+        return pkg_test_failed("updated files", 0);
+    kprintf("CRUGOS: pkg selftest updated %s 1.0.0 -> %s\n", installed->id,
+            installed->version);
+
     reason = 0;
     if (pkg_install(PKG_TEST_PATH, &reason) == 0 || !reason ||
+        strcmp(reason, "downgrade") != 0)
+        return pkg_test_failed("downgrade", reason);
+    kprintf("CRUGOS: pkg selftest rejected downgrade (downgrade)\n");
+
+    reason = 0;
+    if (pkg_install(PKG_TEST_V2, &reason) == 0 || !reason ||
         strcmp(reason, "already-installed") != 0)
         return pkg_test_failed("second install", reason);
     kprintf("CRUGOS: pkg selftest rejected second install (already-installed)\n");
+
+    /* Phase 7C: removal takes the bundle, the pkgdb record and the registry
+       entry with it, and a second removal is a clean rejection. */
+    reason = 0;
+    if (pkg_remove(PKG_TEST_ID, &reason) != 0)
+        return pkg_test_failed("remove", reason);
+    if (pkg_find_id(PKG_TEST_ID))
+        return pkg_test_failed("remove registry", 0);
+    if (fs && ext4_lookup(fs, PKG_TEST_PROG, &ino) == 0)
+        return pkg_test_failed("remove files", 0);
+    (void)app_init();
+    if (app_find_id(PKG_TEST_ID))
+        return pkg_test_failed("remove app registry", 0);
+    kprintf("CRUGOS: pkg selftest removed %s (%u package(s))\n", PKG_TEST_ID,
+            (unsigned)pkg_count());
+
+    reason = 0;
+    if (pkg_remove(PKG_TEST_ID, &reason) == 0 || !reason ||
+        strcmp(reason, "not-installed") != 0)
+        return pkg_test_failed("second remove", reason);
+    kprintf("CRUGOS: pkg selftest rejected second remove (not-installed)\n");
 
     reason = 0;
     if (pkg_install(PKG_TEST_BAD, &reason) == 0 || !reason ||
@@ -141,11 +183,15 @@ static int pkg_test_install(void)
         return pkg_test_failed("untrusted install", reason);
     kprintf("CRUGOS: pkg selftest rejected untrusted (untrusted-key)\n");
 
+    /* Leave 1.0.0 installed: the capability level and the gates expect it. */
+    reason = 0;
+    if (pkg_install(PKG_TEST_PATH, &reason) != 0)
+        return pkg_test_failed("reinstall", reason);
     (void)app_init();
     if (!app_find_id(PKG_TEST_ID))
         return pkg_test_failed("app registry", 0);
     kprintf("CRUGOS: pkg selftest app registered %s\n", PKG_TEST_ID);
-    kprintf("CRUGOS: pkg selftest ok (1 installed, 2 rejected)\n");
+    kprintf("CRUGOS: pkg selftest ok (2 installed, 1 updated, 1 removed)\n");
     return 0;
 }
 

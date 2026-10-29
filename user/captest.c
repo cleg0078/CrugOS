@@ -16,6 +16,9 @@
 #define CAPTEST_READ 7
 #define CAPTEST_WRITE 8
 #define CAPTEST_PKG 9
+#define CAPTEST_REMOVE 10
+#define CAPTEST_SPAWN 11
+#define CAPTEST_EXEC 12
 
 static int fail(const char *what, int code)
 {
@@ -75,6 +78,19 @@ int main(int argc, char **argv, char **envp)
     if (u_pkg_install("/System/packages/captest.crpkg") >= 0)
         return fail("package install allowed", CAPTEST_PKG);
     u_puts("CRUGOS: captest denied pkg.install\n");
+
+    /* Phase 7C: removal is the same capability, and spawning or exec'ing is
+       CAP_APP_LAUNCH, so a narrowed bundle cannot regain its mask that way
+       either. */
+    if (u_pkg_remove("captest") >= 0)
+        return fail("package remove allowed", CAPTEST_REMOVE);
+    u_puts("CRUGOS: captest denied pkg.remove\n");
+    if (u_spawn("/bin/hello", 0, 0) >= 0)
+        return fail("spawn allowed", CAPTEST_SPAWN);
+    u_puts("CRUGOS: captest denied spawn\n");
+    if (u_exec("/bin/hello", 0, 0) >= 0)
+        return fail("exec allowed", CAPTEST_EXEC);
+    u_puts("CRUGOS: captest denied exec\n");
     if (u_pkg_count() < 0)
         return fail("pkg count", CAPTEST_PKG);
     u_puts("CRUGOS: captest ok\n");

@@ -46,9 +46,9 @@
 #   make test-workbench-select  select a drawer row and drag its scrollbar
 #   make test-workbench-screens  switch screens and move a window between them
 #   make test-workbench-cx       toggle commodity hotkeys and fire two of them
-#   make test-workbench-pkg  install a signed package from a desktop window
+#   make test-workbench-pkg  install, remove and reinstall a package from the desktop
 #   make test-app-bundles        launch a .app bundle from the desktop and from the shell
-#   make test-pkg    install a signed package and refuse one signed by an untrusted key
+#   make test-pkg    install, update and remove a signed package
 #   make test-caps   launch an installed bundle and prove its capability wall
 #   make crypt-disk  build the AES-256-XTS crypt test disk
 #   make test-crypt  boot from an encrypted root and verify the disk
@@ -204,14 +204,15 @@ WB_APP_RUN_TIMEOUT_SEC ?= 240
 APP_RUN_TIMEOUT_SEC ?= 300
 
 # Packages-window gate (make test-workbench-pkg): wb.pkg=1 opens a window whose
-# body installs the signed captest bundle with a single click.
+# body installs, removes and reinstalls the signed captest bundle per click.
 WB_PKG_WAIT ?= 30
 WB_PKG_RUN_TIMEOUT_SEC ?= 240
 
-# Package gates (make test-pkg / make test-caps): pkg.test=1 installs the signed
-# captest bundle and refuses one signed by an untrusted key; pkg.test=2 launches
-# the installed bundle and checks the capability wall around it.  Both packages
-# are built from a fixed seed and timestamp so two images are byte-identical.
+# Package gates (make test-pkg / make test-caps): pkg.test=1 installs the
+# signed captest bundle, updates it, refuses a downgrade and an untrusted
+# key, then removes it; pkg.test=2 launches the installed bundle and checks
+# the capability wall around it.  Both packages are built from a fixed seed
+# and timestamp so two images are byte-identical.
 PKG_SEED ?= 0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0
 PKG_BAD_SEED ?= 1122334455667788990011223344556677889900112233445566778899001122
 PKG_RUN_TIMEOUT_SEC ?= 240

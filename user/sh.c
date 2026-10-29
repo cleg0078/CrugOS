@@ -322,6 +322,111 @@ static int sh_cmd_app(int argc, char **argv)
     return -1;
 }
 
+/* Phase 7C: the package builtin. A registry record is
+   'id|name|version|publisher|caps|prog' with no trailing newline. */
+#define SH_PKG_REC 192u
+
+static i64 sh_pkg_lookup(const char *id, i64 count, char *rec, u32 cap)
+{
+    char idbuf[40];
+    i64 i;
+
+    for (i = 0; i < count; i++) {
+        if (u_pkg_info((u32)i, rec, cap) <= 0)
+            continue;
+        sh_field(rec, 0, idbuf, sizeof(idbuf));
+        if (u_strcmp(idbuf, id) == 0)
+            return i;
+    }
+    return -1;
+}
+
+static int sh_cmd_pkg(int argc, char **argv)
+{
+    char rec[SH_PKG_REC];
+    char idbuf[40];
+    char namebuf[40];
+    char verbuf[24];
+    char capbuf[64];
+    i64 count;
+    i64 i;
+
+    if (argc < 2) {
+        sh_line("CRUGOS: sh pkg usage: pkg list|info <id>|install <path>|remove <id>");
+        return -1;
+    }
+    count = u_pkg_count();
+    if (count < 0) {
+        sh_line("CRUGOS: sh error package registry unavailable");
+        return -1;
+    }
+    if (u_strcmp(argv[1], "list") == 0) {
+        for (i = 0; i < count; i++) {
+            if (u_pkg_info((u32)i, rec, SH_PKG_REC) <= 0)
+                continue;
+            sh_field(rec, 0, idbuf, sizeof(idbuf));
+            sh_field(rec, 2, verbuf, sizeof(verbuf));
+            u_puts("CRUGOS: sh pkg ");
+            u_puts(idbuf);
+            u_puts(" ");
+            sh_line(verbuf);
+        }
+        sh_marker("CRUGOS: sh pkg count", 0, count, "");
+        return 0;
+    }
+    if (argc < 3) {
+        sh_line("CRUGOS: sh pkg usage: pkg list|info <id>|install <path>|remove <id>");
+        return -1;
+    }
+    if (u_strcmp(argv[1], "install") == 0) {
+        if (u_pkg_install(argv[2]) != 0) {
+            u_puts("CRUGOS: sh error pkg install ");
+            sh_line(argv[2]);
+            return -1;
+        }
+        u_puts("CRUGOS: sh pkg installed ");
+        sh_line(argv[2]);
+        return 0;
+    }
+    if (u_strcmp(argv[1], "remove") == 0) {
+        if (u_pkg_remove(argv[2]) != 0) {
+            u_puts("CRUGOS: sh error pkg remove ");
+            sh_line(argv[2]);
+            return -1;
+        }
+        u_puts("CRUGOS: sh pkg removed ");
+        sh_line(argv[2]);
+        return 0;
+    }
+    i = sh_pkg_lookup(argv[2], count, rec, SH_PKG_REC);
+    if (i < 0) {
+        u_puts("CRUGOS: sh error unknown package ");
+        sh_line(argv[2]);
+        return -1;
+    }
+    sh_field(rec, 0, idbuf, sizeof(idbuf));
+    sh_field(rec, 1, namebuf, sizeof(namebuf));
+    sh_field(rec, 2, verbuf, sizeof(verbuf));
+    sh_field(rec, 4, capbuf, sizeof(capbuf));
+    if (u_strcmp(argv[1], "info") == 0) {
+        u_puts("CRUGOS: sh pkg ");
+        u_puts(idbuf);
+        u_puts(" ");
+        sh_line(verbuf);
+        u_puts("CRUGOS: sh pkg ");
+        u_puts(idbuf);
+        u_puts(" name ");
+        sh_line(namebuf);
+        u_puts("CRUGOS: sh pkg ");
+        u_puts(idbuf);
+        u_puts(" caps ");
+        sh_line(capbuf);
+        return 0;
+    }
+    sh_line("CRUGOS: sh pkg usage: pkg list|info <id>|install <path>|remove <id>");
+    return -1;
+}
+
 static void sh_run(int argc, char **argv)
 {
     const char *cmd;
@@ -331,7 +436,7 @@ static void sh_run(int argc, char **argv)
     cmd = argv[0];
     sh_marker("CRUGOS: sh cmd ", cmd, -1, "");
     if (u_strcmp(cmd, "ver") == 0) {
-        sh_line("CrugOS ring-3 shell (phase 7b)");
+        sh_line("CrugOS ring-3 shell (phase 7c)");
     } else if (u_strcmp(cmd, "echo") == 0) {
         (void)sh_cmd_echo(argc, argv);
     } else if (u_strcmp(cmd, "cat") == 0) {
@@ -342,6 +447,8 @@ static void sh_run(int argc, char **argv)
         (void)sh_cmd_write(argc, argv);
     } else if (u_strcmp(cmd, "app") == 0) {
         (void)sh_cmd_app(argc, argv);
+    } else if (u_strcmp(cmd, "pkg") == 0) {
+        (void)sh_cmd_pkg(argc, argv);
     } else if (u_strcmp(cmd, "exit") == 0) {
         int code = argc >= 2 ? (int)u_atoi(argv[1]) : 0;
 

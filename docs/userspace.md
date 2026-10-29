@@ -476,7 +476,7 @@ path. It executes one command per line:
 
 | Command | Effect |
 | --- | --- |
-| `ver` | print `CrugOS ring-3 shell (phase 7b)` |
+| `ver` | print `CrugOS ring-3 shell (phase 7c)` |
 | `echo TEXT` | print `TEXT` |
 | `cat FILE` | read the file and write its bytes to the console |
 | `ls PATH` | list a directory |
@@ -869,13 +869,16 @@ bits exist; `CAP_ALL` is 0x3F and the policy file spells the empty set
 | --- | --- | --- |
 | 0x01 | `fs.read` | `SYS_OPEN` for reading, `SYS_LISTDIR` |
 | 0x02 | `fs.write` | `SYS_OPEN` with a write flag, so `SYS_WRITE` |
-| 0x04 | `app.launch` | `SYS_APP_SPAWN` |
+| 0x04 | `app.launch` | `SYS_APP_SPAWN`, `SYS_SPAWN`, `SYS_EXEC` |
 | 0x08 | `net` | `SYS_SOCKET`, `SYS_RESOLVE` and the socket calls |
 | 0x10 | `audio` | nothing yet - defined, never checked |
-| 0x20 | `pkg.install` | `SYS_PKG_INSTALL` |
+| 0x20 | `pkg.install` | `SYS_PKG_INSTALL`, `SYS_PKG_REMOVE` |
 
 Kernel threads start with `CAP_ALL`; a ring-3 thread inherits its parent's
-mask. A bundle launch narrows it once more: the kernel intersects the
+mask, and `SYS_SPAWN` and `SYS_EXEC` - both gated on `app.launch` - hand the
+new image the caller's mask rather than the kernel default, so a narrowed
+program cannot recover the full set by starting `/bin/sh`. A bundle launch
+narrows it once more: the kernel intersects the
 manifest's `caps` with the policy grant for that bundle id, read from
 `/System/perms.conf` (`<id> <caps>` lines with a `default` fallback), and
 prints `CRUGOS: perms policy ready (default <caps>, N rule(s))` at boot.
@@ -901,32 +904,43 @@ The package calls are the counterpart on the install side:
 | `SYS_PKG_COUNT` | 30 | none | the number of installed packages |
 | `SYS_PKG_INFO` | 31 | index, buffer, length | the record size, or `SYS_ENOENT` |
 | `SYS_PKG_INSTALL` | 32 | path | 0, `SYS_ENOENT`, `SYS_EFAULT` or `SYS_EIO` |
+| `SYS_PKG_REMOVE` | 33 | id | 0, `SYS_EPERM`, `SYS_EFAULT` or `SYS_EIO` |
 
-`SYS_MAX` is 33. `SYS_PKG_INFO` writes at most `SYS_PKG_INFO_MAX` (192)
+`SYS_MAX` is 34. `SYS_PKG_INFO` writes at most `SYS_PKG_INFO_MAX` (192)
 bytes of a record shaped like the bundle one:
 `id|name|version|publisher|RRGGBB|caps`. `SYS_PKG_INFO` checks the caller's
 buffer through uaccess, so a kernel pointer is `SYS_EFAULT` and a too-small
 buffer is `SYS_EINVAL`; a bad index is `SYS_ENOENT`. `SYS_PKG_INSTALL`
 requires `pkg.install`, then runs the same verifier the selftest uses: the
 512-byte header, the Ed25519 signature against `/System/trusted/keys.conf`
-and the SHA-512 payload digest. A refusal returns `SYS_EIO` and leaves the
-registry alone. `user/lib.h` wraps the five calls as `u_cap_query()`,
-`u_cap_check(mask)`, `u_pkg_count()`, `u_pkg_info(index, buf, len)` and
-`u_pkg_install(path)`, with `U_CAP_*` macros for the bits.
+and the SHA-512 payload digest; when the id is already installed it
+compares versions and either updates in place or refuses a downgrade. A
+refusal returns `SYS_EIO` and leaves the registry alone. `SYS_PKG_REMOVE`
+requires the same bit, validates the id, deletes `/Applications/<id>.app` and
+its pkgdb record and re-runs the bundle scan. `user/lib.h` wraps the calls as
+`u_cap_query()`, `u_cap_check(mask)`, `u_pkg_count()`,
+`u_pkg_info(index, buf, len)`, `u_pkg_install(path)` and
+`u_pkg_remove(id)`, with `U_CAP_*` macros for the bits.
 
 The probe is `/bin/captest`, which runs in the second leg of
 `make test-caps` (gate 58): the kernel grants it only `fs.read` through the
 policy, it prints `CRUGOS: captest caps 0x1`, checks that a read succeeds and
-that a write open and an install are denied, then exits 5. `make test-pkg`
-(gate 57) covers the installer itself: a trusted package installs, a second
-install and an untrusted key are rejected, and the bundle registration runs
-afterwards. Both gates boot with `pkg.test=1` or `pkg.test=2` instead of
-`user.test=`, and neither needs the shell.
+that a write open, an install, a remove, a spawn and an exec are denied,
+then exits 5. `make test-pkg` (gate 57) covers the installer itself: a trusted
+package installs, updates to a second version, refuses a downgrade and a same
+version reinstall, removes itself, refuses a second remove, and registers the
+bundle afterwards; an untrusted key is rejected at every point. Both gates boot
+with `pkg.test=1` or `pkg.test=2` instead of `user.test=`, and neither
+needs the shell.
 
-There is no `pkg` or `cap` builtin in the ring-3 shell - it has `ver`,
-`echo`, `cat`, `ls`, `write`, `app` and `exit` only. A program reaches
-the mask through the three `int $0x80` wrappers, which is why the probes are
-C programs from `USER_PROGRAMS` and not shell lines.
+The shell gained a `pkg` builtin in phase 7C: `pkg list` prints
+`CRUGOS: sh pkg count <n>` and one `CRUGOS: sh pkg <id> <version>` line per
+installed package, `pkg info <id>` adds the name and icon lines,
+`pkg install <path>` prints `CRUGOS: sh pkg installed <path>` and
+`pkg remove <id>` prints `CRUGOS: sh pkg removed <id>`. Installing and
+removing need `pkg.install`, so the shell only succeeds when it holds the
+bit. The rest of the shell is unchanged: `ver`, `echo`, `cat`, `ls`,
+`write`, `app` and `exit`.
 
 ## Building a user program
 
@@ -1031,7 +1045,7 @@ warning at disk-build time and a "did not start" failure at run time.
 | `CRUGOS: user app ok (exit 9)` | end of level 7 | the script listed, inspected and ran a bundle |
 | `CRUGOS: perms policy ready (default <caps>, N rule(s))` | boot | `/System/perms.conf` was read or the built-in default applied |
 | `CRUGOS: captest caps 0x1` | from `/bin/captest` | the restricted probe asked for its mask |
-| `CRUGOS: pkg selftest ok (1 installed, 2 rejected)` | `pkg.test=1` | the installer accepted one and refused two |
+| `CRUGOS: pkg selftest ok (2 installed, 1 updated, 1 removed)` | `pkg.test=1` | the installer installed, updated, removed and reinstalled one package |
 | `CRUGOS: caps selftest ok (exit 5, caps 0x1)` | `pkg.test=2` | the probe exited 5 holding only `fs.read` |
 | `CRUGOS: user selftest ok (3 program(s), 1 fault(s))` | end | the U1 programs behaved |
 
@@ -1261,10 +1275,10 @@ Reading a failure:
 - A user image is capped at `ELF_MAX_BYTES` (512 KiB) and the stack is four
   pages with no growth: a program that needs more has to change these constants
   first.
-- Capabilities are a syscall-layer filter, not a hardware boundary. `SYS_SPAWN`
-  and `SYS_EXEC` are not gated themselves and `elf_spawn_user()` hands a new
-  thread `CAP_ALL`, so a narrowed bundle that can run `/bin/sh` regains every
-  bit the moment it does; there is also no way to drop a bit at run time.
+- Capabilities are a syscall-layer filter, not a hardware boundary. Every
+  launch path is gated and inherits the caller's mask since phase 7C, so a
+  narrowed program cannot widen itself by spawning or execing another image,
+  but there is still no way to drop a bit at run time.
 - `CAP_AUDIO` is defined and policy-parsed but nothing checks it yet: audio has
   no syscalls in this release.
 - There is no revocation and no way to shrink a mask at run time: a thread's

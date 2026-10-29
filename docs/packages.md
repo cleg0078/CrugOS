@@ -15,6 +15,15 @@ the door and a list of what each caller may do after it is through.
 `make test-pkg` is the 57th gate, `make test-caps` the 58th and
 `make test-workbench-pkg` the 59th.
 
+Phase 7C gives the installer a lifecycle. A newer package updates an older one
+in place: the version is compared before anything is staged, the old bundle is
+renamed to a backup, and the backup is deleted only once the new tree, the
+record and the registry all agree. A package can be removed again, from the
+shell or from the desktop window, and `SYS_SPAWN` and `SYS_EXEC` now require
+`app.launch` and hand a child its parent's mask instead of `CAP_ALL`, which
+closes phase 7B's largest open item. The gate count stays at 59 because each
+phase's gate grew rather than adding another one.
+
 The two mechanisms are deliberately separate. A signature proves the bytes
 came from a key the operator trusts; it says nothing about what the program
 does. Capabilities bound the damage a trusted program can do, including one
@@ -56,10 +65,10 @@ A capability is a single bit in a 32-bit mask. Six are defined:
 | --- | --- | --- | --- |
 | `fs.read` | `0x01` | opening a file for reading, listing a directory | `SYS_OPEN`, `SYS_LISTDIR` |
 | `fs.write` | `0x02` | opening a file for write, create or truncate | `SYS_OPEN` |
-| `app.launch` | `0x04` | starting an application bundle | `SYS_APP_SPAWN` |
+| `app.launch` | `0x04` | starting a bundle or a program | `SYS_APP_SPAWN`, `SYS_SPAWN`, `SYS_EXEC` |
 | `net` | `0x08` | sockets and name resolution | `SYS_SOCKET_*`, `SYS_RESOLVE` |
 | `audio` | `0x10` | reserved for a ring-3 audio path | none yet |
-| `pkg.install` | `0x20` | installing a package | `SYS_PKG_INSTALL` |
+| `pkg.install` | `0x20` | installing, updating or removing a package | `SYS_PKG_INSTALL`, `SYS_PKG_REMOVE` |
 
 `CAP_ALL` is `0x3F`: every defined bit. `cap_format()` renders a mask as
 comma-joined names in table order and renders an empty mask as `none`, so the
@@ -333,6 +342,13 @@ visible state is always either "not installed" or "fully installed"; a record
 that cannot be written removes the bundle again rather than leaving it
 unregistered.
 
+Before it stages anything the installer decides whether the package is new or
+an update: it reads `/System/pkgdb/<id>.txt` and compares the header version
+with the recorded one. The same version is refused as `already-installed`, an
+older header as `downgrade`, and a newer header takes the update path
+described under [Updating a package](#updating-a-package). Removal is the other
+half of the lifecycle, described under [Removing a package](#removing-a-package).
+
 Every refusal prints one line with a stable reason code, and the code has a
 sentence form used by the desktop window:
 
@@ -366,17 +382,23 @@ CRUGOS: pkg rejected /System/packages/untrusted.crpkg (untrusted-key)
 | `path` | illegal file path | absolute, `..`, empty component, bad characters |
 | `file-size` | file too large | one payload file exceeds 96 KiB |
 | `too-many-files` | too many files | more than 32 payload files |
-| `already-installed` | already installed | `/Applications/<id>.app` exists |
-| `read-only` | (raw code) | the remount to read-write failed |
+| `already-installed` | already installed | the same version is already installed |
+| `downgrade` | newer version installed | the installed version is newer than the header |
+| `read-only` | the root is read-only | the remount to read-write failed |
+| `not-installed` | package not installed | a remove for an id that is neither installed nor on disk |
 | `record` | cannot record install | the pkgdb record could not be written |
 
-Two states are reported by the installer on success:
+Three states are reported by the installer on success:
 
 ```
-CRUGOS: pkg installed captest 1.0.0 (7 file(s), 1 cap(s))
+CRUGOS: pkg installed captest 1.0.0 (2 file(s), 1 cap(s))
+CRUGOS: pkg updated captest 1.0.0 -> 2.0.0 (2 file(s), 1 cap(s))
+CRUGOS: pkg removed captest (0 package(s))
 ```
 
-and at boot, once the pkgdb records have been read back:
+A failed removal prints `CRUGOS: pkg remove rejected <id> (<reason>)`; a
+failed install keeps the older `pkg rejected` line. At boot, once the pkgdb
+records have been read back:
 
 ```
 CRUGOS: package registry ready (1 package(s))
@@ -392,6 +414,68 @@ registry. The bundle registration that follows reads `/Applications` as it did
 in phase 7A; an installed bundle therefore appears in both tables and can be
 launched from the desktop and the shell exactly like a hand-built one.
 
+## Updating a package
+
+An install is an update when the version in the header is newer than the one in
+the pkgdb record for the same id. The comparison is `app_version_compare()`
+over the three numeric parts, so `1.0.0` to `2.0.0` is an update, `2.0.0`
+over `1.0.0` is a `downgrade` refusal and the same version is
+`already-installed`. Everything else on the install path is unchanged: the
+signature, the payload hash, the trust list and the manifest rules are checked
+before the update is considered, and the new header must be signed by a key
+the trust list carries, exactly like a first install. The id must match, which
+it does by construction - the record is looked up by the id in the header.
+
+The swap is the only extra state the installer keeps:
+
+1. stage the new tree in `/Applications/.stage/<id>` and fsync it, as for a
+   fresh install;
+2. remove any leftover backup, then rename the installed tree to
+   `/Applications/.stage-<id>.old`;
+3. rename the stage to `/Applications/<id>.app`;
+4. rewrite the pkgdb record, fsync it and re-scan the registry;
+5. remove the backup tree and its directory, which is the point of no return.
+
+Every failure after step 2 puts the old tree back: a failed rename of the stage
+renames the backup to its original name, and a failed record renames the new
+tree back to the stage and the backup to the installed name, so the visible
+state is the old package, fully working. A failure before the first rename
+only removes the stage tree. The success marker names both versions:
+
+```
+CRUGOS: pkg updated captest 1.0.0 -> 2.0.0 (2 file(s), 1 cap(s))
+```
+
+An update replaces the bundle directory wholesale. Files the new payload does
+not carry do not survive, and nothing outside `/Applications/<id>.app` is
+touched.
+
+## Removing a package
+
+`pkg_remove(const char *id, const char **reason)` is the inverse of install.
+It validates the id (letters, digits, dot, underscore and dash, at most 31
+characters) and requires either a bundle directory or a registry entry, so a
+remove of an id that is not installed is refused as `not-installed` rather
+than being treated as success. It then:
+
+1. remounts the root read-write, or refuses with `read-only`;
+2. deletes `/Applications/<id>.app` recursively;
+3. unlinks `/System/pkgdb/<id>.txt`;
+4. fsyncs the filesystem;
+5. drops the registry entry, re-runs the bundle scan so the desktop and the
+   shell stop listing it, remounts read-only and prints
+
+```
+CRUGOS: pkg removed captest (0 package(s))
+```
+
+The count in brackets is the package registry size after the removal, so the
+line doubles as a check that the record went away. A refusal prints
+`CRUGOS: pkg remove rejected <id> (<reason>)` with one of `id`,
+`not-installed`, `read-only` or `io`. Removal does not touch anything the
+program wrote outside its bundle, and there is no uninstall script: the
+package format has no way to describe one.
+
 ## The syscall ABI
 
 | Number | Name | Arguments | Returns |
@@ -401,8 +485,9 @@ launched from the desktop and the shell exactly like a hand-built one.
 | 30 | `SYS_PKG_COUNT` | none | number of installed packages |
 | 31 | `SYS_PKG_INFO` | `rdi` index, `rsi` buffer, `rdx` capacity | bytes written, or a negative error |
 | 32 | `SYS_PKG_INSTALL` | `rdi` path | 0, or a negative error |
+| 33 | `SYS_PKG_REMOVE` | `rdi` id | 0, or a negative error |
 
-`SYS_MAX` is 33. A package record is at most 192 bytes and has the same shape
+`SYS_MAX` is 34. A package record is at most 192 bytes and has the same shape
 as the pkgdb file:
 
 ```
@@ -416,15 +501,23 @@ record that does not fit with `SYS_EINVAL`. `SYS_PKG_INSTALL` checks
 `CAP_PKG_INSTALL` first, so a bundle without it gets `SYS_EPERM` and the
 installer never runs; with the capability, a failed install returns
 `SYS_EIO` and the reason appears in the kernel log, not in the return value.
+`SYS_PKG_REMOVE` shares the same bit and takes the package id rather than a
+path: without `pkg.install` it returns `SYS_EPERM`, and when `pkg_remove()`
+refuses the call returns `SYS_EIO` with the reason in the log. It is the only
+removal path; there is no unlink-style interface.
 `SYS_CAP_CHECK` is a query, not an enforcement point: it answers 0 rather
 than an error, and the caller decides what to do about it.
 
 The ring-3 side of the ABI is a set of thin wrappers in `user/lib.h`:
 `u_cap_query()`, `u_cap_check(mask)`, `u_pkg_count()`,
-`u_pkg_info(index, buf, len)` and `u_pkg_install(path)`, plus the `U_CAP_*`
-bit macros. There is no `pkg` or `cap` shell builtin: the shell's builtins are
-`ver`, `echo`, `cat`, `ls`, `write`, `app` and `exit`, and a ring-3 program
-uses the syscalls directly.
+`u_pkg_info(index, buf, len)`, `u_pkg_install(path)` and
+`u_pkg_remove(id)`, plus the `U_CAP_*` bit macros. The shell has a `pkg`
+builtin with `list`, `info <id>`, `install <path>` and `remove <id>`
+subcommands; its other builtins are `ver`, `echo`, `cat`, `ls`, `write`,
+`app` and `exit`. The `pkg` builtin prints `CRUGOS: sh pkg count <n>` and one
+`CRUGOS: sh pkg <id> <version>` line per package for `list`, and
+`CRUGOS: sh pkg installed <path>` or `CRUGOS: sh pkg removed <id>` for the
+mutations.
 
 ## The selftests
 
@@ -435,16 +528,25 @@ CRUGOS: pkg selftest start
 CRUGOS: pkg selftest probe captest 1.0.0 trusted
 CRUGOS: pkg selftest probe untrusted rejected (untrusted-key)
 CRUGOS: pkg selftest installed captest 1.0.0
+CRUGOS: pkg selftest updated captest 1.0.0 -> 2.0.0
+CRUGOS: pkg selftest rejected downgrade (downgrade)
 CRUGOS: pkg selftest rejected second install (already-installed)
+CRUGOS: pkg selftest removed captest (0 package(s))
+CRUGOS: pkg selftest rejected second remove (not-installed)
 CRUGOS: pkg selftest rejected untrusted (untrusted-key)
 CRUGOS: pkg selftest app registered captest
-CRUGOS: pkg selftest ok (1 installed, 2 rejected)
+CRUGOS: pkg selftest ok (2 installed, 1 updated, 1 removed)
 ```
 
-It probes both packages without installing, installs the trusted one, checks
-that its payload and manifest are on disk, proves the second install is
-refused, proves the untrusted package is refused even though its payload is
-well formed, and re-runs the application scan so the new bundle is visible.
+It probes both packages without installing, installs the trusted 1.0.0, checks
+that its payload and manifest are on disk, updates it to 2.0.0 with the second
+package, proves that 1.0.0 is now refused as a downgrade and the same version
+as already installed, removes the package, proves a second remove is refused,
+proves the untrusted package is refused even though its payload is well formed,
+and re-runs the application scan. It ends by reinstalling 1.0.0, so the caps
+level and the gates still find the id they expect. `scripts/mkpkgtest.sh`
+builds `captest2.crpkg` by rewriting the manifest version to 2.0.0 and
+keeping the seed, so both packages carry the same key and publisher.
 
 `pkg.test=2` (gate 58) proves the capability wall. It installs `captest` if
 the previous level did not, computes the granted mask, launches the bundle and
@@ -457,17 +559,23 @@ CRUGOS: caps selftest launched tid 12 caps 0x1
 CRUGOS: captest ok
 CRUGOS: captest denied fs.write
 CRUGOS: captest denied pkg.install
+CRUGOS: captest denied pkg.remove
+CRUGOS: captest denied spawn
+CRUGOS: captest denied exec
 CRUGOS: caps selftest ok (exit 5, caps 0x1)
 ```
 
 `/bin/captest` is the probe: it prints its mask, confirms `fs.read` is held
 and `fs.write` is not, reads `/hello.txt`, requires a write-open of
-`/System/captest-denied` to fail, requires `u_pkg_install()` to fail, and
-exits 5. A wrong mask, a write that succeeds or an install that succeeds each
-produce a different failure, so the gate names the wall that broke.
+`/System/captest-denied` to fail, and requires `u_pkg_install()`,
+`u_pkg_remove()`, `u_spawn()` and `u_exec()` to fail. The last two are the
+phase 7C check that a narrowed program cannot widen itself by launching another
+image. A wrong mask or an operation that succeeds produces a different
+failure, so the gate names the wall that broke.
 
-The token is parsed next to the other boot tokens and takes levels 1 to 9,
-highest wins.
+The token is parsed next to the other boot tokens; `pkg.test=2` installs the
+bundle itself when `pkg.test=1` did not run first, so the two gates do not
+depend on each other's order.
 
 ## The desktop installer
 
@@ -479,8 +587,10 @@ desktop:
 - a subtitle naming the package a click will install;
 - one 18-pixel row per installed package, id on the left and version on the
   right;
-- one press anywhere in the body installs `/System/packages/captest.crpkg`
-  and paints `installed` in amber, or paints the reason sentence on failure.
+- one press anywhere in the body toggles `/System/packages/captest.crpkg`: it
+  installs when the id is absent, removes it when it is installed, and paints
+  `installed` or `removed` in amber, or paints the reason sentence on
+  failure.
 
 The window is opened during `wb_init()`, before `pkg_init()` reads the
 registry, so it starts empty and fills on the first redraw after boot. That
@@ -492,15 +602,16 @@ The markers are:
 ```
 CRUGOS: wb pkg ready (window 3, 0 package(s))
 CRUGOS: wb pkg installed /System/packages/captest.crpkg (1 package(s))
-CRUGOS: wb pkg already installed (captest)
+CRUGOS: wb pkg removed captest (0 package(s))
 CRUGOS: wb pkg rejected <file> (<reason>)
-CRUGOS: wb pkg selftest ok (1 install(s), 1 package(s))
+CRUGOS: wb pkg selftest ok (2 install(s), 1 remove(s), 1 package(s))
 ```
 
-A second press finds the id in the registry and prints the `already
-installed` line instead of a second install marker, so the window is
-idempotent and the gate can press again if a click was lost without the risk
-of a duplicate.
+Each press looks the id up in the registry first: an installed id is removed
+through `pkg_remove()`, an absent one is installed. The body then paints
+`removed` or `installed` until the next redraw, so a second press is a
+second operation rather than a no-op, and the gate can press three times to
+watch the install/remove/install cycle.
 
 ## The gates
 
@@ -514,8 +625,12 @@ finishes with `check-disk.py`. The boot-check line reports which optional
 fields were expected:
 
 ```
-ok: boot markers found, version 0.44.0 avx2 yes ... app no pkg yes caps no wbpkg no heap no user no ... storage disk QEMU exit status 33
+ok: boot markers found, version 0.45.0 avx2 yes ... app no pkg yes caps no wbpkg no heap no user no ... storage disk QEMU exit status 33
 ```
+
+The same leg covers the lifecycle now: the selftest installs 1.0.0, updates
+to 2.0.0, refuses the downgrade, removes the package and refuses the second
+remove, so gate 57 is the update and removal gate as well as the install gate.
 
 `make test-caps` (gate 58) does the same with `pkg.test=2` and
 `--expect-caps=yes`, and additionally requires the `captest` markers and
@@ -523,23 +638,25 @@ ok: boot markers found, version 0.44.0 avx2 yes ... app no pkg yes caps no wbpkg
 
 `make test-workbench-pkg` (gate 59) is the desktop leg. It rebuilds the
 disk, boots with `CMDLINE_EXTRA="wb.enable=1 wb.wait=<WB_PKG_WAIT>
-wb.pkg=1"` and drives the window with a QEMU-QMP hot-plugged mouse:
+wb.pkg=1 wb.acts=3"` and drives the window with a QEMU-QMP hot-plugged
+mouse:
 
 1. wait for `wb desktop ready` and `wb pkg ready`;
 2. add `usb-mouse` on the xHCI controller and wait for the cursor;
-3. screendump before the click and require zero amber pixels in the window
-   body, i.e. no `installed` line yet;
-4. click the body at `(250, 430)`;
-5. screendump after the click and require amber pixels, the install marker
-   and `wb pkg selftest ok`;
+3. screendump before the first click and require zero amber pixels in the
+   window body, i.e. no `installed` line yet;
+4. click the body at `(250, 430)`, wait for the install marker, press again
+   and wait for the remove marker, press a third time and wait for the second
+   install;
+5. screendump after the clicks and require amber pixels;
 6. run `boot-check.py --expect-wbpkg=yes`, then `check-disk.py`.
 
-The driver refuses an action count other than 1, because the window fills its
-row only after the first install; a second click would be testing the
-idempotent path rather than the install path. On success it prints:
+The driver's command line hardcodes `wb.acts=3`, so the window completes
+exactly the install/remove/install cycle the selftest watches for. On success
+it prints:
 
 ```
-ok: workbench package install (1 install, exit 33)
+ok: workbench package toggle (2 installs, 1 remove, exit 33)
 ```
 
 A failure names the step, for example `FAIL: the window body is already
@@ -563,7 +680,9 @@ inspection, not for normal runs.
 | `pkg rejected ... (signature)` | the header was modified after signing, or the wrong seed signed it | serial log |
 | `pkg rejected ... (payload-hash)` | a payload byte changed, including a truncation that kept the sizes consistent | serial log |
 | `pkg rejected ... (container)` | the file table is inconsistent, or `manifest.toml` is missing from the payload | serial log |
-| `pkg rejected ... (already-installed)` | `/Applications/<id>.app` already exists; there is no upgrade path | serial log |
+| `pkg rejected ... (already-installed)` | the same version is already installed | serial log |
+| `pkg rejected ... (downgrade)` | the installed version is newer than the package | serial log |
+| `pkg remove rejected ... (not-installed)` | the id is neither in the registry nor on disk | serial log |
 | `pkg rejected ... (read-only)` | the root could not be remounted read-write | serial log |
 | `pkg rejected ... (record)` | the pkgdb record could not be written; the bundle was removed again | serial log |
 | `perms policy error (...)` | the policy file is unreadable or malformed | serial log; the ready line shows `default none` |
@@ -572,10 +691,11 @@ inspection, not for normal runs.
 | `wb pkg rejected ...` after a click | the package on the image is stale or signed with the wrong seed | serial log after the driver's click |
 | a bundle runs but every syscall returns `-1` | it was launched with an empty mask: no `[caps] require`, or a policy that grants nothing | `SYS_CAP_QUERY`, the program's own checks |
 
-Two of these are design choices rather than bugs. There is no upgrade: an
-installed id must be removed before a new version can be installed, and phase
-7B has no uninstall either. And an empty mask is a usable state, not a broken
-one, which is why the policy file may grant `none` explicitly.
+Two of these are design choices rather than bugs. An update replaces the
+installed bundle wholesale, so files the old version carried but the new one
+does not are gone afterwards; there is no file-level merge and no dependency
+resolution. And an empty mask is a usable state, not a broken one, which is why
+the policy file may grant `none` explicitly.
 
 ## Limits
 
@@ -595,19 +715,20 @@ one, which is why the policy file may grant `none` explicitly.
   is defined but no syscall gates it yet, because there is no ring-3 audio
   path to gate.
 - Capability checks sit at the listed syscalls only. `SYS_SPAWN` and
-  `SYS_EXEC` are not gated, and `SYS_SPAWN` still creates its child with
-  `CAP_ALL`, the pre-7B default; attenuation applies to bundles launched
-  through `SYS_APP_SPAWN`. Until that is closed, a bundle with an empty mask
-  can start a `/bin` program and recover the full set. This is the most
-  important open item in phase 7B.
-- No dependency resolution, no package versioning at install time, no
-  uninstall, and no rollback beyond the all-or-nothing stage.
+  `SYS_EXEC` require `app.launch` and both hand the child the caller's mask,
+  so attenuation now covers every launch path; a bundle with an empty mask can
+  no longer start a `/bin` program to recover the full set. `CAP_AUDIO` is
+  still defined and unchecked.
+- No dependency resolution, no file-level merge on update, and no rollback
+  beyond the stage/backup swap: an interrupted update leaves either the old
+  bundle or the new one, never a mixture, but nothing records a history that
+  could be rolled back later.
 - Four trust keys, 32 files, 96 KiB per file, 128 KiB per package, 8 policy
   rules. The package is read in one allocation bounded by `PKG_MAX_BYTES`, so
   a bigger one is refused, not streamed.
 - Signing happens on the host with a seed on the command line. That is right
   for reproducible test images and wrong for real key handling, where a
   private key should never be an argument.
-- The desktop installer is a demo: one hard-coded path, one package id, one
-  click. A real installer needs a file picker, a progress path and a way to
-  remove a package.
+- The desktop installer is a demo: one hard-coded path, one package id, a
+  single body click that toggles the id. A real installer needs a file picker,
+  a progress path and a package list rather than one row.

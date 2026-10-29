@@ -4,7 +4,8 @@
 #   mkpkgtest.sh OUT_DIR CAPTEST_ELF MKPKG
 #
 # OUT_DIR receives:
-#   captest.crpkg    signed by PKG_SEED, whose public key lands in keys.conf
+#   captest.crpkg    version 1.0.0, signed by PKG_SEED (key in keys.conf)
+#   captest2.crpkg   version 2.0.0, same id and key: the update path
 #   untrusted.crpkg  signed by PKG_BAD_SEED, so the trust list has no match
 #   keys.conf        the trust list (/System/trusted/keys.conf)
 #   perms.conf       the capability policy (/System/perms.conf)
@@ -50,6 +51,17 @@ printf '%s\n' '# CrugOS trusted package keys (phase 7B).' > "$out/keys.conf"
     --caps fs.read --key-id crug-test --timestamp 0 \
     --trust-out "$out/keys.conf"
 
+# The update path needs the same id and key at a newer version.
+tree2=$out/tree2/captest.app
+mkdir -p "$tree2/bin/x86_64"
+cp "$captest" "$tree2/bin/x86_64/captest"
+sed 's/version = "1.0.0"/version = "2.0.0"/' "$tree/manifest.toml" \
+    > "$tree2/manifest.toml"
+rm -f "$out/captest2.crpkg"
+"$mkpkg" --seed "$PKG_SEED" --out "$out/captest2.crpkg" --bundle "$tree2" \
+    --id captest --name 'CapTest' --version 2.0.0 --publisher 'Crug Labs' \
+    --caps fs.read --key-id crug-test --timestamp 1
+
 rm -f "$out/untrusted.crpkg"
 "$mkpkg" --seed "$PKG_BAD_SEED" --out "$out/untrusted.crpkg" --bundle "$tree" \
     --id captest --name 'CapTest' --version 1.0.0 --publisher 'Crug Labs' \
@@ -60,4 +72,4 @@ printf '%s\n' \
     'default app.launch,fs.read' \
     'captest fs.read' > "$out/perms.conf"
 
-echo "mkpkgtest: $out/captest.crpkg $out/untrusted.crpkg $out/keys.conf $out/perms.conf"
+echo "mkpkgtest: $out/captest.crpkg $out/captest2.crpkg $out/untrusted.crpkg $out/keys.conf $out/perms.conf"

@@ -82,7 +82,17 @@ int storage_remount_rw(void)
     return -1;
 }
 
+/* pkg_remove() rescans /Applications after a removal; the bundle's own
+   registry lives in kernel/app/app.c, which the unit-test link leaves out
+   because its scanner needs the real filesystem. */
+int app_init(void);
+
 int storage_remount_ro(void)
+{
+    return 0;
+}
+
+int app_init(void)
 {
     return 0;
 }
@@ -681,6 +691,12 @@ static void test_pkg_reasons(void)
     CHECK_STR(pkg_reason_text("untrusted-key"), "untrusted signing key");
     CHECK_STR(pkg_reason_text("trust-full"), "bad trust list");
     CHECK_STR(pkg_reason_text(0), "unknown");
+    /* Phase 7C update/removal reasons. */
+    CHECK_STR(pkg_reason_text("already-installed"), "already installed");
+    CHECK_STR(pkg_reason_text("downgrade"), "newer version installed");
+    CHECK_STR(pkg_reason_text("not-installed"), "package not installed");
+    CHECK_STR(pkg_reason_text("record"), "cannot record install");
+    CHECK_STR(pkg_reason_text("read-only"), "the root is read-only");
     /* An unrecognised reason is handed back verbatim, never NULL. */
     CHECK_STR(pkg_reason_text("no-such-reason"), "no-such-reason");
 }

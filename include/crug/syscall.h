@@ -38,7 +38,8 @@
 #define SYS_PKG_COUNT 30u
 #define SYS_PKG_INFO 31u
 #define SYS_PKG_INSTALL 32u
-#define SYS_MAX 33u
+#define SYS_PKG_REMOVE 33u
+#define SYS_MAX 34u
 
 /* Open flags for SYS_OPEN (phase U3). SYS_O_RDONLY is the zero flag. */
 #define SYS_O_RDONLY 0u
@@ -74,10 +75,11 @@ int syscall_resolve_selftest(const char *host, u32 addr);
 #define SYS_APP_INFO_MAX 512u
 
 /* Phase 7B capabilities and packages: the caller's mask, one check, and the
-   read-only package registry plus an installation request.  SYS_CAP_QUERY
-   returns the caller's mask, SYS_CAP_CHECK(need) returns 1 when every bit of
-   NEED is held, SYS_PKG_INFO(index, buf, cap) writes the text record and
-   SYS_PKG_INSTALL(path) installs a signed .crpkg (CAP_PKG_INSTALL). */
+   read-only package registry plus installation and removal requests.
+   SYS_CAP_QUERY returns the caller's mask, SYS_CAP_CHECK(need) returns 1 when
+   every bit of NEED is held, SYS_PKG_INFO(index, buf, cap) writes the text
+   record, SYS_PKG_INSTALL(path) installs a signed .crpkg and
+   SYS_PKG_REMOVE(id) removes one (both need CAP_PKG_INSTALL). */
 #define SYS_PKG_INFO_MAX 192u
 
 #endif /* CRUG_SYSCALL_H */

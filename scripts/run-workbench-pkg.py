@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Verify the Workbench Packages window (phase 7B).
+"""Verify the Workbench Packages window (phase 7C).
 
 The driver boots QEMU with an xHCI controller but no USB device, hotplugs a
-usb-mouse over QMP once the guest has opened its windows, clicks the Packages
-window body, and proves that a signed .crpkg was installed: the guest prints a
-CRUGOS marker for the install, the desktop selftest waits for it, and a
-screendump shows the "installed" line appear in the window body.
+usb-mouse over QMP once the guest has opened its windows, and clicks the
+Packages window body three times: install, remove, install.  The guest prints a
+CRUGOS marker for each transition, the desktop selftest waits for all three
+(a wb.acts=3 boot token), and a screendump shows the "installed" line come back
+in the window body.
 
 usage: run-workbench-pkg.py --disk IMG --serial-log LOG --exit-code FILE [options]
 """
@@ -27,6 +28,7 @@ MOUSE = b"CRUGOS: usb mouse ready"
 GFX_READY = b"CRUGOS: gfx ready"
 CURSOR = b"CRUGOS: wb cursor at ("
 INSTALLED = b"CRUGOS: wb pkg installed /System/packages/captest.crpkg"
+REMOVED = b"CRUGOS: wb pkg removed captest"
 PKG_OK = b"CRUGOS: wb pkg selftest ok"
 OK = b"CRUGOS: wb selftest ok"
 HOTPLUG_ID = "mouse0"
@@ -237,7 +239,9 @@ def main():
 
     # i8042=off removes the PS/2 controller and usb=off the machine USB
     # controllers, so the hotplugged USB mouse is the only pointer device.
-    cmdline = "wb.enable=1 wb.wait=%d wb.pkg=1" % args.wb_wait
+    # wb.acts=3 makes the desktop wait for the install, the removal and the
+    # second install before its selftest reports.
+    cmdline = "wb.enable=1 wb.wait=%d wb.pkg=1 wb.acts=3" % args.wb_wait
     cmd = [
         args.make,
         "--no-print-directory",
@@ -323,12 +327,23 @@ def main():
                             args.event_timeout):
                 return fail("the Packages window never installed the package")
 
-        # 3. The body now paints the result line and the registry is one
-        #    package larger.
+        # 3. A second click removes it again: bundle, record and registry.
+        press(BODY_CLICK)
+        if not wait_for(serial_log, REMOVED, 1, proc, args.event_timeout):
+            return fail("the Packages window never removed the package")
+
+        # 4. A third click installs it again, which proves the window can go
+        #    both ways without a reboot.
+        press(BODY_CLICK)
+        if not wait_for(serial_log, INSTALLED, 2, proc, args.event_timeout):
+            return fail("the Packages window never reinstalled the package")
+
+        # 5. The body now paints the result line and the registry holds the
+        #    package once more.
         after = tmpdir / "after.ppm"
         qmp.screendump(after)
         marks = count_color(after, SCAN, HIGHLIGHT)
-        print("wbp: highlight pixels after the install %d" % marks)
+        print("wbp: highlight pixels after the reinstall %d" % marks)
         if marks == 0:
             return fail("the installed line is missing from the window body")
 
@@ -365,7 +380,10 @@ def main():
     if PKG_OK not in data:
         return fail("guest did not report the Packages selftest")
 
-    print("ok: workbench package install (1 install, exit %d)" % status)
+    if REMOVED not in data:
+        return fail("guest did not report the package removal")
+    print("ok: workbench package toggle (2 installs, 1 remove, exit %d)"
+          % status)
     return 0
 
 

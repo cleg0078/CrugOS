@@ -46,9 +46,9 @@ make test-workbench-select  # click drawer rows and drag its scrollbar
 make test-workbench-screens  # switch screens and move a window between them
 make test-workbench-cx  # drive commodity hotkeys and toggle rows in the Exchange manager
 make test-app-bundles  # launch a .app bundle from the desktop and from the shell
-make test-pkg    # install a signed package and refuse a duplicate and an untrusted key
+make test-pkg    # install, update and remove a signed package and refuse the duplicate and untrusted cases
 make test-caps   # launch the installed bundle and prove its capability wall
-make test-workbench-pkg  # install a signed package from the Workbench
+make test-workbench-pkg  # install, remove and reinstall a signed package from the Workbench
 make test-hardening  # boot crafted superblock/inode/crypt images and assert the rejections
 make test-heap   # corrupt the kernel heap and prove the integrity checker catches it
 make test-trap   # inject eight crafted faults and check the report, IST and panic
@@ -85,7 +85,7 @@ make test-crypt-keyboard  # type the passphrase on the PS/2 keyboard and boot
 make test-crypt-keyboard-wrong  # three wrong keyboard passphrases must lock the volume
 make crypt-run   # boot the encrypted disk in a QEMU window for real typing
 make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
-make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/USB HID keyboard and mouse descriptors and reports/pointer state/IPv4/TCP/UDP checksums/DHCP parsing/DNS/audio mixer, tone and PCM ring/framebuffer cursor/intuition windows, menus and gadgets, icon dragging, the send-to-front gadget and keyboard icon focus, the drawer viewport, scrollbar and refresh, the drawer body-input handler, the seven hardening validators, the heap integrity checker, the trap report formatter and classification policy, the user-window and uaccess validators, the ELF exec mapper, the per-space page-table tests, the argv predicates, the fork clone cases, the screen model, the commodity registry, the app manifest parser, the capability mask and permission policy, the package container and its Ed25519 signatures, 8403 checks
+make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/USB HID keyboard and mouse descriptors and reports/pointer state/IPv4/TCP/UDP checksums/DHCP parsing/DNS/audio mixer, tone and PCM ring/framebuffer cursor/intuition windows, menus and gadgets, icon dragging, the send-to-front gadget and keyboard icon focus, the drawer viewport, scrollbar and refresh, the drawer body-input handler, the seven hardening validators, the heap integrity checker, the trap report formatter and classification policy, the user-window and uaccess validators, the ELF exec mapper, the per-space page-table tests, the argv predicates, the fork clone cases, the screen model, the commodity registry, the app manifest parser, the capability mask and permission policy, the package container and its Ed25519 signatures, 8408 checks
 make user        # build the ring-3 programs and .app payloads the disk image carries
 make packages    # sign the test bundles the installer gates install
 make mkpkg       # build the host package signer (tools/mkpkg.c)
@@ -365,7 +365,7 @@ OVMF 4M needs a substantial amount of RAM before it will boot from QEMU's
 | 512 | reliable; used by all gates |
 
 This is a firmware limit, not a kernel limit: the kernel load image is about
-957 KiB. The specification's 16 MiB headless target needs a leaner boot path and
+960 KiB. The specification's 16 MiB headless target needs a leaner boot path and
 is tracked in [roadmap.md](roadmap.md).
 
 ## Test disk
@@ -726,8 +726,8 @@ script takes a `screendump` and checks the Exchange body (700,250) against
 `scripts/boot-check.py --expect-cx=yes` (a flag, not an extra positional, so the
 argv layout is unchanged) then requires the ready/action/selftest markers and
 `scripts/check-disk.py` runs a clean `e2fsck`. The tree's `make test-host`
-suite reports 8403 checks, and `make size` reports a 329016 B (321 KiB) file and
-a 980414 B (957 KiB) load image.
+suite reports 8408 checks, and `make size` reports a 333224 B (325 KiB) file and
+a 984062 B (960 KiB) load image.
 
 `make test-hardening` is gate 44 and proves the phase H1 hardening pass against
 crafted images. [scripts/run-hardening.py](../scripts/run-hardening.py) copies
@@ -739,7 +739,7 @@ the pristine test disk and encrypted disk per case, patches exactly one field
 35 -- `CRUGOS: ext4 mount rejected (geometry)`, `CRUGOS: ext4 mount rejected
 (root extent)`, `CRUGOS: crypt unlock failed (kdf policy)` or `CRUGOS: crypt
 unlock failed (volume exceeds partition)` -- while the unpatched control must
-still reach `CRUGOS: phase 7b boot ok` (the driver accepts any phase id) and
+still reach `CRUGOS: phase 7c boot ok` (the driver accepts any phase id) and
 exit 33. Every case forbids
 `CRUGOS: panic` and `trap   : page fault`, a hostile case must not print
 `CRUGOS: ext4 ready` or `CRUGOS: storage ready`, and a QEMU timeout fails the
@@ -765,7 +765,7 @@ disk copies under `build/x86_64/trap/`, each with
 a `TRAP_TIMEOUT_SEC` (60 s) budget. Every hostile boot must print
 `CRUGOS: trap test <recipe>`, the report's vector, IST and `from=kernel`
 fragments, `CRUGOS PANIC: <name>` and `CRUGOS: panic`, and exit 35; the control
-must reach `CRUGOS: phase 7b boot ok` and `CRUGOS: selftest ok`, exit 33 and
+must reach `CRUGOS: phase 7c boot ok` and `CRUGOS: selftest ok`, exit 33 and
 never panic. No case may print `trap test unknown` or `trap test survived`, an
 exit 33 from a hostile case means the injection never ran, and a missing exit
 file or a 124 timeout is a hang. The driver prints
@@ -773,8 +773,8 @@ file or a 124 timeout is a hang. The driver prints
 `ok: trap policy reported 8 crafted fault(s) (control boot exit 33)`;
 `run-trap.py` accepts `--keep` to leave those disks in the serial-log
 directory, and `tests/host/test_trap.c` covers the same matrix on the host, so
-`make test-host` reports 8403 checks. `make size` reports a 329016 B (321 KiB)
-file and a 980414 B (957 KiB) load image.
+`make test-host` reports 8408 checks. `make size` reports a 333224 B (325 KiB)
+file and a 984062 B (960 KiB) load image.
 
 `make test-fuzz` is gate 47 and proves the phase H4 host mount-path fuzzer.
 Unlike every other gate it never boots QEMU: it deletes
@@ -815,7 +815,7 @@ runs `scripts/boot-check.py` with `EXPECT_USER=yes` plus `scripts/check-disk.py`
 The serial log must carry `CRUGOS: user hello from ring 3`,
 `CRUGOS: user badptr blocked (EFAULT)`, a `CRUGOS: user fault killed tid N
 code -14` line and `CRUGOS: user selftest ok (3 program(s), 1 fault(s))`, reach
-`CRUGOS: phase 7b boot ok` and exit 33; the boot in practice also shows the
+`CRUGOS: phase 7c boot ok` and exit 33; the boot in practice also shows the
 `CRUGOS: user selftest start` line and, before the kill line, the phase H3
 report with `from=user` and `cr2=0x10000000000`. A kernel/user exit-code
 mismatch ends the boot with status 35 before the report and the phase marker,
@@ -826,8 +826,8 @@ Every other gate runs with `EXPECT_USER=no`, and `boot-check.py` fails any of
 them that prints `user selftest ok`, so the userspace selftest cannot leak into
 an unrelated boot. `tests/host/test_uaccess.c` and `tests/host/test_exec.c`
 cover the same window, segment and entry validators and the ELF segment policy
-on the host. `make test-host` reports 8403 checks and `make size` a 329016 B
-(321 KiB) file and a 980414 B (957 KiB) load image. The marker set, the
+on the host. `make test-host` reports 8408 checks and `make size` a 333224 B
+(325 KiB) file and a 984062 B (960 KiB) load image. The marker set, the
 syscall boundary, the loader pipeline and the limits are documented in
 [userspace.md](userspace.md).
 
@@ -843,7 +843,7 @@ then `/bin/iso` twice; the serial log must carry the gate-48 markers plus
 `CRUGOS: user isolation start`, `CRUGOS: user isolation frames 0x28000 vs
 0x38000 at 0x8000030000`, `CRUGOS: iso tid 11 word 0x15500b00 ok`,
 `CRUGOS: iso tid 12 word 0x15500c00 ok` and `CRUGOS: user isolation ok
-(2 program(s), 0 mismatch(es))`, reach `CRUGOS: phase 7b boot ok` and exit 33,
+(2 program(s), 0 mismatch(es))`, reach `CRUGOS: phase 7c boot ok` and exit 33,
 and `boot-check.py` prints `user yes isolated yes` in its `ok: boot markers
 found` line. A wrong frame pair or an iso instance that reads back the other
 instance's word fails the gate with a non-zero `mismatch(es)` count and a
@@ -866,7 +866,7 @@ the disk image with all nine programs and `/etc/sh.rc`, boots with
 `CRUGOS: storage remounted read-write`/`read-only` lines,
 `CRUGOS: sh write /shout.txt 22 byte(s)`, `CRUGOS: sh exit 7` and
 `CRUGOS: user shell finished (exit 7)`, and it must reach
-`CRUGOS: phase 7b boot ok` and exit 33 while boot-check reports
+`CRUGOS: phase 7c boot ok` and exit 33 while boot-check reports
 `user yes isolated yes ushell yes`. `check-disk --expect-shell-write`
 asserts `/shout.txt` is exactly `hello-from-user-shell` plus a newline after
 a clean umount and `e2fsck`, and ends with `ok: ext4 root is clean,
@@ -891,7 +891,7 @@ rebuilds the disk image with all nine programs, boots with
 `CRUGOS: user spawn child exit 5`, `CRUGOS: user spawn exec`,
 `CRUGOS: user exec /bin/child (tid 14)`, `CRUGOS: user child arg from-exec`
 and `CRUGOS: user spawn test ok (child exit 5, exec exit 5)`, and it must reach
-`CRUGOS: phase 7b boot ok` and exit 33 while boot-check reports
+`CRUGOS: phase 7c boot ok` and exit 33 while boot-check reports
 `user yes isolated yes ushell yes spawn yes`. The two tids are the assertion:
 the spawned child runs as a new thread (tid 15), while the exec'd child keeps the
 spawner's tid (14), so a `SYS_EXEC` that started a new thread instead of
@@ -918,7 +918,7 @@ from `user_fork()`. The log must carry `CRUGOS: user fork test start`,
 `CRUGOS: user fork reap exit 3`, `CRUGOS: user fork parent word 4369`,
 `CRUGOS: user fork ok (child exit 3, memory isolated)` and
 `CRUGOS: user fork test ok (child exit 3, memory isolated)`, and it must reach
-`CRUGOS: phase 7b boot ok` and exit 33 while boot-check reports
+`CRUGOS: phase 7c boot ok` and exit 33 while boot-check reports
 `user yes isolated yes ushell yes spawn yes fork yes`. The two word lines are
 the assertion: the child writes `0x2222` (8738) into the page it cloned and
 exits 3, so a parent that still reads `0x1111` (4369) afterwards proves the
@@ -945,11 +945,11 @@ two `user cow fault ... (copy)` lines and one `... (sole owner)` line, then
 `user fork parent write 17476`), the forkbig block
 (`CRUGOS: user forkbig start` through
 `CRUGOS: user forkbig ok (child exit 7, 300 page(s) isolated)`) and the usual
-`CRUGOS: user selftest ok` line, and it must reach `CRUGOS: phase 7b boot ok`
+`CRUGOS: user selftest ok` line, and it must reach `CRUGOS: phase 7c boot ok`
 and exit 33 while boot-check reports
 `user yes isolated yes ushell yes spawn yes fork yes forkbig yes`. The host
-suite covers the reference table and the clone: `make test-host` reports 8403
-checks and `make size` a 329016 B (321 KiB) file and a 980414 B (957 KiB) load
+suite covers the reference table and the clone: `make test-host` reports 8408
+checks and `make size` a 333224 B (325 KiB) file and a 984062 B (960 KiB) load
 image. Every other gate runs with `EXPECT_FORKBIG=no`, and `boot-check.py`
 fails any boot that prints a forkbig marker. The copy-on-write bit, the
 reference table and the fault taxonomy are documented in
@@ -976,20 +976,26 @@ s): `/etc/app.rc` makes the shell print `CRUGOS: sh app count N`,
 kernel ends the level with `CRUGOS: user app ok (exit 9)` because the script
 exits 9. Both legs finish with `scripts/check-disk.py`, and the driver prints
 `ok: app bundles and tool types (exit 33)`. The tree's `make test-host` suite
-reports 8403 checks, and `make size` reports a 329016 B (321 KiB) file and a
-980414 B (957 KiB) load image (`.text` 236070 B, `.rodata` 35648 B, `.data`
+reports 8408 checks, and `make size` reports a 333224 B (325 KiB) file and a
+984062 B (960 KiB) load image (`.text` 239078 B, `.rodata` 36288 B, `.data`
 88 B, `.bss` 708608 B).
 
-`make test-pkg` is gate 57 and proves the signed package path. It rebuilds the
-disk with `make disk` (which needs `make packages` first), boots with
+`make test-pkg` is gate 57 and proves the signed package lifecycle. It rebuilds
+the disk with `make disk` (which needs `make packages` first), boots with
 `CMDLINE_EXTRA="pkg.test=1"` under `PKG_RUN_TIMEOUT_SEC` (240 s) and then
 runs `scripts/check-disk.py`. The boot must print
 `CRUGOS: perms policy ready (default app.launch,fs.read, 1 rule(s))`, the
 untrusted refusal `CRUGOS: app rejected` with reason `untrusted-key`, the
-accepted install `CRUGOS: pkg installed captest 1.0.0 (1 file(s), 1 cap(s))`,
-`CRUGOS: package registry ready (1 package(s))` and the summary
-`CRUGOS: pkg selftest ok (1 installed, 2 rejected)` -- the second rejection is
-the second install of the same package. `scripts/boot-check.py` takes
+accepted install `CRUGOS: pkg installed captest 1.0.0 (2 file(s), 1 cap(s))`,
+`CRUGOS: package registry ready (1 package(s))`, the update
+`CRUGOS: pkg updated captest 1.0.0 -> 2.0.0 (2 file(s), 1 cap(s))`, the
+refusals `CRUGOS: pkg rejected captest.crpkg (downgrade)` and
+`CRUGOS: pkg rejected captest2.crpkg (already-installed)`, the removal
+`CRUGOS: pkg removed captest (0 package(s))`, the second-removal refusal
+`CRUGOS: pkg remove rejected captest (not-installed)` and the summary
+`CRUGOS: pkg selftest ok (2 installed, 1 updated, 1 removed)`. The update
+input is `scripts/mkpkgtest.sh`, which builds `captest2.crpkg` (version 2.0.0,
+same id and key) next to the 1.0.0 package. `scripts/boot-check.py` takes
 `--expect-pkg=yes` as a flag, so the positional argv layout is unchanged.
 
 `make test-caps` is gate 58 and proves the capability wall from ring 3. It
@@ -998,23 +1004,28 @@ installs the same package, launches `/bin/captest` from the registry and
 requires `CRUGOS: caps selftest manifest 0x1 policy 0x1 granted 0x1`,
 `CRUGOS: caps selftest launched tid N caps 0x1` and
 `CRUGOS: caps selftest ok (exit 5, caps 0x1)`. The probe holds `fs.read`
-only: its read succeeds, its write and its `pkg.install` attempt come back
-`SYS_EPERM`, and it exits 5 so the kernel can tell a run from a silent
-failure. `--expect-caps=yes` is again a flag.
+only: its read succeeds, its write, its `pkg.install`, its `pkg.remove`, its
+`spawn` and its `exec` attempts come back `SYS_EPERM`, and it exits 5 so the
+kernel can tell a run from a silent failure. `--expect-caps=yes` is again a
+flag.
 
 `make test-workbench-pkg` is gate 59 and drives the installer from the
 desktop. It rebuilds the disk, boots with
-`wb.enable=1 wb.wait=$(WB_PKG_WAIT) wb.pkg=1` through
+`wb.enable=1 wb.wait=$(WB_PKG_WAIT) wb.pkg=1 wb.acts=3` through
 [scripts/run-workbench-pkg.py](../scripts/run-workbench-pkg.py), hotplugs a
-`usb-mouse` over QMP, takes a screendump before the click (no amber in the
-window body), clicks the `Packages` row at (250,430), takes a second
-screendump (the installed row painted in `(255,176,0)`), runs
+`usb-mouse` over QMP, takes a screendump before the first click (no amber in
+the window body), clicks the `Packages` row at (250,430) three times (install,
+remove and reinstall, retrying once if a press is lost), takes screendumps
+that show the body going from empty to the installed row painted in
+`(255,176,0)` and back to empty after the removal, runs
 `boot-check.py --expect-wbpkg=yes` and finishes with `check-disk.py`. The
-driver prints `ok: workbench package install (1 install, exit 33)` and the
-boot must carry `CRUGOS: wb pkg ready (window N, 0 package(s))`,
-`CRUGOS: wb pkg installed captest` and the desktop's own
-`CRUGOS: wb pkg selftest ok` line. The boot budget is
-`WB_PKG_RUN_TIMEOUT_SEC` (240 s) and the mouse wait is `WB_PKG_WAIT` (30 s).
+driver prints `wbp: highlight pixels after the reinstall 153` followed by
+`ok: workbench package toggle (2 installs, 1 remove, exit 33)` and the boot
+must carry `CRUGOS: wb pkg ready (window N, 0 package(s))`,
+`CRUGOS: wb pkg installed captest`, `CRUGOS: wb pkg removed captest` and the
+desktop's own `CRUGOS: wb pkg selftest ok (2 install(s), 1 remove(s), 1
+package(s))` line. The boot budget is `WB_PKG_RUN_TIMEOUT_SEC` (240 s) and the
+mouse wait is `WB_PKG_WAIT` (30 s).
 
 ## Interactive demo
 
@@ -1039,7 +1050,7 @@ wb.shell=1 wb.fill=$(DEMO_FILL_FILES) wb.hold=$(DEMO_HOLD_SEC)
 - `wb.wait=0` turns the desktop self-test into a no-op, so the demo does not
   require a title-bar drag or a fired action before the boot marker; the
   interactive desktop is the point, not the self-test.
-- `wb.hold=<seconds>` keeps the guest alive after `CRUGOS: phase 7b boot ok`
+- `wb.hold=<seconds>` keeps the guest alive after `CRUGOS: phase 7c boot ok`
   (`wb_hold()`), polling input once per timer tick, so the window stays on
   screen until the deadline or until you close it.
 

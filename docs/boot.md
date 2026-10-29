@@ -55,7 +55,10 @@ window, gadget and self-test, phase 6J adds `wb.cx=1` for the Commodities
 Exchange (four built-in hotkey utilities and a manager window), phase 7A adds
 `wb.app=1` for the Applications icon and the bundle window behind it, and
 phase 7B adds `wb.pkg=1` for the Packages window plus `pkg.test=1` and
-`pkg.test=2` for the package and capability self-tests, and phase H2 adds
+`pkg.test=2` for the package and capability self-tests, phase 7C makes that
+window a toggle whose body press installs while the package is absent and
+removes while it is present and grows `pkg.test=1` into install, update and
+removal checks, and phase H2 adds
 `heap.stress=<1..200000>` and `heap.guard=1`,
 parsed by `heap_cmdline()` right after `heap_init()`, and phase H3 adds
 `trap.test=<recipe>` (`de`, `ud`, `gp`, `pf`, `df`, `nmi`, `mc`, `db`) for the
@@ -189,7 +192,8 @@ post-snapshot allocations cannot push it over capacity.
    `CRUGOS: wb app ready (N application(s))` when `wb.app=1` added the
    Applications icon and its window, and by `CRUGOS: wb pkg ready (window N, M
    package(s))` when `wb.pkg=1` opened the Packages window before `pkg_init`
-   filled the registry; a screen switch prints `CRUGOS: wb screen N
+   filled the registry, and `CRUGOS: wb pkg removed <id> (N package(s))` when
+   the toggle took one away; a screen switch prints `CRUGOS: wb screen N
    front (K window(s))` and a move between screens `CRUGOS: wb window N moved
    to screen M`. Without the token the framebuffer console keeps
    its text mode and no Workbench line appears.
@@ -296,9 +300,11 @@ post-snapshot allocations cannot push it over capacity.
     `CRUGOS: wb cx selftest ok (N toggle(s), M fire(s))`; with `wb.app=1` it
     opens the Applications window, clicks the first row and launches it, printing
     `CRUGOS: wb app selftest ok (N click(s), M launch(es))` once the desktop has
-    reaped the program; with `wb.pkg=1` it presses the Packages window body,
-    installs the demo package and prints
-    `CRUGOS: wb pkg selftest ok (N install(s), M package(s))`. The whole
+    reaped the program; with `wb.pkg=1` it presses the Packages window body three times
+    (`wb.acts=3`), installing the demo package, removing it and installing it
+    again, and prints
+    `CRUGOS: wb pkg selftest ok (N install(s), M remove(s), K package(s))`. The
+    whole
     check is silent unless `wb.enable=` enabled it. `heap_selftest()` prints
     `CRUGOS: heap check ok (S slab(s), O object(s), L large block(s))` and,
     when `heap.stress=` or `heap.guard=` was supplied, runs those passes too.
@@ -325,16 +331,18 @@ post-snapshot allocations cannot push it over capacity.
     and the kernel requires that code. A mismatch exits 35
     before the report. Without the token the user level is 0 and nothing is
     printed. `pkg.test=1` then runs `pkg_selftest()`: it probes the signed and
-    the untrusted package, installs the first, refuses a second install and the
-    untrusted one, re-runs `app_init` and prints
-    `CRUGOS: pkg selftest ok (1 installed, 2 rejected)`. `pkg.test=2` installs
+    the untrusted package, installs the first, updates it to 2.0.0, refuses the
+    downgrade, a second install of the same version and the untrusted package,
+    removes the package, refuses a second removal, reinstalls it, re-runs
+    `app_init` and prints
+    `CRUGOS: pkg selftest ok (2 installed, 1 updated, 1 removed)`. `pkg.test=2` installs
     the bundle if it is missing, checks the manifest mask against the policy,
     launches it and requires exit 5 with `fs.read` only, printing
     `CRUGOS: caps selftest ok (exit 5, caps 0x1)`. A failed package or
     capability check exits 35 before the report.
 14. The user self-test of step 13, when it ran, has already joined its threads;
     then `report_boot`, `storage_lock` (wipes the passphrase, the volume keys
-    and the bounce buffer), `CRUGOS: phase 7b boot ok`, then
+    and the bounce buffer), `CRUGOS: phase 7c boot ok`, then
     `wb_hold` (only when
     `wb.hold=` was given: the guest stays alive with the desktop on screen until
     the deadline), `trap_test_run()` (only when `trap.test=` was given, so the
@@ -615,7 +623,7 @@ CRUGOS: wb window 1 sent to front
 CRUGOS: wb action 6 front window 1
 CRUGOS: wb icons selftest ok (1 move(s), 1 front(s))
 CRUGOS: sh run 'ver'
-CRUGOS: sh out CrugOS 0.44.0 (phase 7b), x86_64
+CRUGOS: sh out CrugOS 0.45.0 (phase 7c), x86_64
 CRUGOS: wb selftest ok (1 drag(s), 1 action(s))
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb drawer selftest ok (3 scroll(s), 1 refresh(es))
@@ -635,7 +643,9 @@ CRUGOS: wb app reaped tid 11 exit 0
 CRUGOS: wb app selftest ok (1 click(s), 1 launch(es))
 CRUGOS: wb pkg ready (window 3, 0 package(s))  # only with wb.pkg=1
 CRUGOS: wb pkg installed /System/packages/captest.crpkg (1 package(s))  # only with wb.pkg=1
-CRUGOS: wb pkg selftest ok (1 install(s), 1 package(s))
+CRUGOS: wb pkg removed captest (0 package(s))           # a second body press takes it away
+CRUGOS: wb pkg installed /System/packages/captest.crpkg (1 package(s))  # the third press installs again
+CRUGOS: wb pkg selftest ok (2 install(s), 1 remove(s), 1 package(s))
 CRUGOS: sh selftest ok (1 command(s))
 CRUGOS: selftest ok
 CRUGOS: user selftest start                  # only with user.test=
@@ -671,12 +681,12 @@ CRUGOS: sh cmd exit
 CRUGOS: sh exit 7
 CRUGOS: user shell finished (exit 7)
 CRUGOS: user selftest ok (3 program(s), 1 fault(s))
-boot   : pmm=29718 us cpu=444 us vm=715 us traps=379 us timer=65325 us heap=530 us storage=96031 us sched=7133 us syscall=90 us total=200370 us
-CRUGOS: phase 7b boot ok
+boot   : pmm=28575 us cpu=414 us vm=617 us traps=317 us timer=65299 us heap=494 us storage=95001 us sched=5614 us syscall=90 us total=196426 us
+CRUGOS: phase 7c boot ok
 ```
 
 With `trap.test=<recipe>` the same boot ends differently: the injector runs after
-`CRUGOS: phase 7b boot ok`, injects exactly one fault and the guest exits 35
+`CRUGOS: phase 7c boot ok`, injects exactly one fault and the guest exits 35
 instead of 33. A `trap.test=de` boot ends:
 
 ```
@@ -748,8 +758,8 @@ CRUGOS: sh cmd exit
 CRUGOS: sh exit 7
 CRUGOS: user shell finished (exit 7)
 CRUGOS: user selftest ok (3 program(s), 1 fault(s))
-boot   : pmm=29718 us cpu=444 us vm=715 us traps=379 us timer=65325 us heap=530 us storage=96031 us sched=7133 us syscall=90 us total=200370 us
-CRUGOS: phase 7b boot ok
+boot   : pmm=28575 us cpu=414 us vm=617 us traps=317 us timer=65299 us heap=494 us storage=95001 us sched=5614 us syscall=90 us total=196426 us
+CRUGOS: phase 7c boot ok
 ```
 
 A `user.test=7` boot, the second leg of `make test-app-bundles`, adds the app
@@ -777,11 +787,23 @@ ends with these lines:
 CRUGOS: pkg selftest start
 CRUGOS: pkg selftest probe captest 1.0.0 trusted
 CRUGOS: pkg selftest probe untrusted rejected (untrusted-key)
+CRUGOS: pkg installed captest 1.0.0 (2 file(s), 1 cap(s))
 CRUGOS: pkg selftest installed captest 1.0.0
+CRUGOS: pkg updated captest 1.0.0 -> 2.0.0 (2 file(s), 1 cap(s))
+CRUGOS: pkg selftest updated captest 1.0.0 -> 2.0.0
+CRUGOS: pkg rejected captest.crpkg (downgrade)
+CRUGOS: pkg selftest rejected downgrade (downgrade)
+CRUGOS: pkg rejected captest2.crpkg (already-installed)
 CRUGOS: pkg selftest rejected second install (already-installed)
+CRUGOS: pkg removed captest (0 package(s))
+CRUGOS: pkg selftest removed captest (0 package(s))
+CRUGOS: pkg remove rejected captest (not-installed)
+CRUGOS: pkg selftest rejected second remove (not-installed)
+CRUGOS: pkg rejected untrusted.crpkg (untrusted-key)
 CRUGOS: pkg selftest rejected untrusted (untrusted-key)
+CRUGOS: pkg installed captest 1.0.0 (2 file(s), 1 cap(s))
 CRUGOS: pkg selftest app registered captest
-CRUGOS: pkg selftest ok (1 installed, 2 rejected)
+CRUGOS: pkg selftest ok (2 installed, 1 updated, 1 removed)
 ```
 
 A `pkg.test=2` boot (gate 58), the capability leg, installs the bundle when it
@@ -984,18 +1006,22 @@ unchanged); the second runs `make run CMDLINE_EXTRA="user.test=7"` and drives
 the registry from the shell. Both pass check-disk. See [workbench.md](workbench.md),
 [apps.md](apps.md) and [build.md](build.md).
 
-`make test-workbench-pkg` (gate 59) sets `wb.pkg=1` on that desktop line,
-presses the Packages window body once, and checks in two screendumps that the
-body gains the amber `installed` line; it then calls
+`make test-workbench-pkg` (gate 59) sets `wb.pkg=1 wb.acts=3` on that
+desktop line, presses the Packages window body three times (install, remove and
+reinstall, with one retry allowed) and checks in screendumps that the body first
+has no amber row, then gains the amber `installed` line and later the
+`removed` one; it then calls
 `scripts/boot-check.py --expect-wbpkg=yes` (again a flag, so the argv layout is
 unchanged) and `scripts/check-disk.py`, and the driver prints
-`ok: workbench package install (1 install, exit 33)`.
+`wbp: highlight pixels after the reinstall 153` followed by
+`ok: workbench package toggle (2 installs, 1 remove, exit 33)`.
 
 `make test-pkg` (gate 57) boots with `pkg.test=1` and `--expect-pkg=yes`, and
 `make test-caps` (gate 58) boots with `pkg.test=2` and `--expect-caps=yes`;
 both are flags too, so the positional expectations above are unchanged. The
-first proves the signed package installs and the untrusted one is refused; the
-second proves the installed bundle runs with `fs.read` only. See
+first proves the signed package installs, updates to 2.0.0, is refused when the
+header goes backwards, is removed and reinstalled, and that the untrusted one is
+refused; the second proves the installed bundle runs with `fs.read` only. See
 [packages.md](packages.md) and [build.md](build.md).
 
 The `audio` lines appear only on machines with a USB audio function: a default
@@ -1031,14 +1057,14 @@ replaced by the skip marker, and the USB device the firmware booted from shows
 up in the USB lines as an unsupported mass-storage function:
 
 ```
-CRUGOS: version 0.44.0
+CRUGOS: version 0.45.0
 CRUGOS: usb controller ready (xhci, 8 port(s))
 CRUGOS: usb device 46f4:0001 on port 1 (speed 4)
 CRUGOS: usb device class 8 on port 1 (unsupported)
 CRUGOS: storage skipped (storage=none)
 CRUGOS: heap check ok (6 slab(s), 8 object(s), 1 large block(s))
 CRUGOS: selftest ok
-CRUGOS: phase 7b boot ok
+CRUGOS: phase 7c boot ok
 ```
 
 `kernel/core/report.c` prints the machine description between them: kernel

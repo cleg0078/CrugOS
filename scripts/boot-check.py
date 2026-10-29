@@ -43,7 +43,7 @@ REQUIRED_MARKERS = (
     "CRUGOS: selftest ok",
     "CRUGOS: nvme ready",
     "CRUGOS: ahci ready",
-    "CRUGOS: phase 7b boot ok",
+    "CRUGOS: phase 7c boot ok",
 )
 # A rejected unlock stops before scheduling, storage mounting and self-tests.
 WRONG_CRYPT_MARKERS = (
@@ -694,10 +694,14 @@ def main() -> int:
             "CRUGOS: package registry ready",
             "CRUGOS: pkg selftest start",
             "CRUGOS: pkg selftest probe untrusted rejected (untrusted-key)",
+            "CRUGOS: pkg selftest updated captest 1.0.0 -> 2.0.0",
+            "CRUGOS: pkg selftest rejected downgrade (downgrade)",
             "CRUGOS: pkg selftest rejected second install (already-installed)",
+            "CRUGOS: pkg selftest removed captest",
+            "CRUGOS: pkg selftest rejected second remove (not-installed)",
             "CRUGOS: pkg selftest rejected untrusted (untrusted-key)",
             "CRUGOS: pkg selftest app registered captest",
-            "CRUGOS: pkg selftest ok (1 installed, 2 rejected)",
+            "CRUGOS: pkg selftest ok (2 installed, 1 updated, 1 removed)",
         ):
             if marker not in text:
                 return fail(f"missing serial marker: {marker!r}", text)
@@ -705,8 +709,13 @@ def main() -> int:
             return fail("expected the signed package to probe as trusted", text)
         if not re.search(r"CRUGOS: pkg installed captest 1\.0\.0 \(\d+ file\(s\), \d+ cap\(s\)\)", text):
             return fail("expected the installer to materialise the bundle", text)
+        if not re.search(r"CRUGOS: pkg updated captest 1\.0\.0 -> 2\.0\.0 "
+                         r"\(\d+ file\(s\), \d+ cap\(s\)\)", text):
+            return fail("expected the newer package to replace the old bundle", text)
+        if not re.search(r"CRUGOS: pkg removed captest \(0 package\(s\)\)", text):
+            return fail("expected removal to empty the registry", text)
         if not re.search(r"CRUGOS: pkg selftest installed captest 1\.0\.0", text):
-            return fail("expected the installed package in the registry", text)
+            return fail("expected the reinstalled package in the registry", text)
     elif "CRUGOS: pkg selftest ok" in text:
         return fail("unexpected package selftest without --expect-pkg=yes", text)
 
@@ -735,6 +744,7 @@ def main() -> int:
             "CRUGOS: wb desktop ready",
             "CRUGOS: wb pkg ready",
             "CRUGOS: wb pkg installed /System/packages/captest.crpkg",
+            "CRUGOS: wb pkg removed captest",
             "CRUGOS: wb pkg selftest ok",
             "CRUGOS: wb selftest ok",
         ):
@@ -745,8 +755,11 @@ def main() -> int:
         if not re.search(r"CRUGOS: wb pkg installed /System/packages/captest\.crpkg "
                          r"\(1 package\(s\)\)", text):
             return fail("expected one body click to install the signed package", text)
-        if not re.search(r"CRUGOS: wb pkg selftest ok \(1 install\(s\), 1 package\(s\)\)", text):
-            return fail("expected the desktop to count exactly one install", text)
+        if not re.search(r"CRUGOS: wb pkg removed captest \(0 package\(s\)\)", text):
+            return fail("expected the second body click to remove the package", text)
+        if not re.search(r"CRUGOS: wb pkg selftest ok \(2 install\(s\), 1 remove\(s\), "
+                         r"1 package\(s\)\)", text):
+            return fail("expected the desktop to count two installs and one removal", text)
     elif "CRUGOS: wb pkg installed" in text:
         return fail("unexpected package install without --expect-wbpkg=yes", text)
 

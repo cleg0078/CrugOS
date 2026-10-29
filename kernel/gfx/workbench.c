@@ -120,6 +120,7 @@ static int g_pkg_window = -1;
 static int g_pkg_result;
 static const char *g_pkg_reason;
 static u32 g_pkg_installs;
+static u32 g_pkg_removes;
 static u32 g_pkg_ops;
 
 static void wb_open_drawer(void);
@@ -735,7 +736,7 @@ static void wb_pkg_paint(int id, i32 x, i32 y, u32 w, u32 h, void *ctx)
     fb_draw_text((u32)x + 6u, (u32)y + 6u, "CrugOS Packages",
                  INTUITION_BODY_TEXT_RGB, INTUITION_WINDOW_RGB);
     fb_draw_text((u32)x + 6u, (u32)y + 6u + WB_PKG_ROW_H,
-                 "click to install captest.crpkg", INTUITION_TITLE_IDLE_RGB,
+                 "click to install or remove captest", INTUITION_TITLE_IDLE_RGB,
                  INTUITION_WINDOW_RGB);
     for (i = 0u; i < count; i++) {
         const struct pkg *p = pkg_at(i);
@@ -753,6 +754,9 @@ static void wb_pkg_paint(int id, i32 x, i32 y, u32 w, u32 h, void *ctx)
     if (h > 60u && g_pkg_result == 1) {
         fb_draw_text((u32)x + 6u, (u32)y + h - 16u, "installed",
                      INTUITION_MENU_HIGHLIGHT_RGB, INTUITION_WINDOW_RGB);
+    } else if (h > 60u && g_pkg_result == 3) {
+        fb_draw_text((u32)x + 6u, (u32)y + h - 16u, "removed",
+                     INTUITION_MENU_HIGHLIGHT_RGB, INTUITION_WINDOW_RGB);
     } else if (h > 60u && g_pkg_result == 2) {
         fb_draw_text((u32)x + 6u, (u32)y + h - 16u,
                      pkg_reason_text(g_pkg_reason), INTUITION_BODY_TEXT_RGB,
@@ -760,18 +764,29 @@ static void wb_pkg_paint(int id, i32 x, i32 y, u32 w, u32 h, void *ctx)
     }
 }
 
-/* One body press installs the package that scripts/mkpkgtest.sh signed.  A
-   second press is a no-op: the registry already holds the id, so the gate can
-   click twice without turning the run into a rejection. */
-static void wb_pkg_install(void)
+/* One body press toggles the package that scripts/mkpkgtest.sh signed:
+   absent -> installed, installed -> removed.  The gates press it install,
+   remove and install again, so pkg_install, pkg_remove, the pkgdb record and
+   app_init all run on the desktop path. */
+static void wb_pkg_toggle(void)
 {
     const char *reason = 0;
     int rc;
 
     g_pkg_ops++;
     if (pkg_find_id(WB_PKG_DEMO_ID) != 0) {
-        kprintf("CRUGOS: wb pkg already installed (%s)\n", WB_PKG_DEMO_ID);
-        g_pkg_result = 1;
+        rc = pkg_remove(WB_PKG_DEMO_ID, &reason);
+        g_pkg_reason = reason;
+        if (rc == 0) {
+            g_pkg_result = 3;
+            g_pkg_removes++;
+            kprintf("CRUGOS: wb pkg removed %s (%u package(s))\n",
+                    WB_PKG_DEMO_ID, (unsigned)pkg_count());
+            return;
+        }
+        g_pkg_result = 2;
+        kprintf("CRUGOS: wb pkg rejected %s (%s)\n", WB_PKG_DEMO_ID,
+                reason ? reason : "unknown");
         return;
     }
     rc = pkg_install(WB_PKG_DEMO, &reason);
@@ -796,7 +811,7 @@ static void wb_pkg_input(int id, u32 kind, i32 x, i32 y, void *ctx)
     if (kind != INTUITION_BODY_PRESS) {
         return;
     }
-    wb_pkg_install();
+    wb_pkg_toggle();
     if (id == g_pkg_window) {
         intuition_redraw_window(id);
     }
@@ -1631,7 +1646,8 @@ int wb_selftest(void)
     /* App mode waits for the launched bundle to be reaped, which also proves
        the desktop keeps pumping while the child runs. */
     want_app = g_app_mode ? (g_want_actions ? g_want_actions : 1u) : 0u;
-    /* Package mode waits for one signed install to land in the registry. */
+    /* Package mode waits for the clicks (install, remove, install) the gate
+       drives, not for a registry state, so a toggle cannot satisfy it early. */
     want_pkg = g_pkg_mode ? (g_want_actions ? g_want_actions : 1u) : 0u;
     deadline = timer_monotonic_ns() +
                (u64)(g_wait_seconds ? g_wait_seconds : 5u) * 1000000000ull;
@@ -1641,7 +1657,7 @@ int wb_selftest(void)
            g_select_ops < want_select ||
            g_cx_ops < want_cx ||
            g_app_reaps < want_app ||
-           g_pkg_installs < want_pkg ||
+           g_pkg_ops < want_pkg ||
            g_commands_seen < want_commands) {
         /* input_poll() runs the console hook, which pumps the USB mouse and
            then drains the pointer state into intuition.device; the shell pump
@@ -1672,9 +1688,9 @@ int wb_selftest(void)
             } else if (g_app_reaps < want_app) {
                 kprintf("CRUGOS: wb app timeout (%u/%u)\n",
                         (unsigned)g_app_reaps, (unsigned)want_app);
-            } else if (g_pkg_installs < want_pkg) {
+            } else if (g_pkg_ops < want_pkg) {
                 kprintf("CRUGOS: wb pkg timeout (%u/%u)\n",
-                        (unsigned)g_pkg_installs, (unsigned)want_pkg);
+                        (unsigned)g_pkg_ops, (unsigned)want_pkg);
             } else {
                 kprintf("CRUGOS: sh command timeout (%u/%u)\n",
                         (unsigned)g_commands_seen, (unsigned)want_commands);
@@ -1725,8 +1741,10 @@ int wb_selftest(void)
                 (unsigned)g_app_clicks, (unsigned)g_app_launches);
     }
     if (g_pkg_mode) {
-        kprintf("CRUGOS: wb pkg selftest ok (%u install(s), %u package(s))\n",
-                (unsigned)g_pkg_installs, (unsigned)pkg_count());
+        kprintf("CRUGOS: wb pkg selftest ok (%u install(s), %u remove(s), "
+                "%u package(s))\n",
+                (unsigned)g_pkg_installs, (unsigned)g_pkg_removes,
+                (unsigned)pkg_count());
     }
     /* Keep the finished desktop on screen for a moment so the gate's last
        screendump does not race the rest of the boot to the exit. */

@@ -758,6 +758,12 @@ void syscall_dispatch(trap_frame *frame)
             ret = SYS_EINVAL;
             break;
         }
+        /* Phase 7C: a narrowed process must not regain CAP_ALL by spawning
+           /bin/sh, so the child inherits the caller's mask. */
+        if (!syscall_caps_ok(user, CAP_APP_LAUNCH)) {
+            ret = SYS_EPERM;
+            break;
+        }
         path = syscall_path(frame, user, frame->rdi);
         if (!path || path[0] == 0) {
             ret = SYS_EFAULT;
@@ -780,7 +786,8 @@ void syscall_dispatch(trap_frame *frame)
             break;
         }
         memset(&res, 0, sizeof(res));
-        if (!elf_spawn_user(pathbuf, argc, av, cur->id, &res)) {
+        if (!elf_spawn_user_caps(pathbuf, argc, av, cur->id, cur->caps,
+                                 &res)) {
             ret = SYS_EIO;
             break;
         }
@@ -818,6 +825,10 @@ void syscall_dispatch(trap_frame *frame)
            leads back to CPL3, so a CPL0 caller has nothing to rewrite. */
         if (!user || !cur) {
             ret = SYS_EINVAL;
+            break;
+        }
+        if (!syscall_caps_ok(user, CAP_APP_LAUNCH)) {
+            ret = SYS_EPERM;
             break;
         }
         path = syscall_path(frame, user, frame->rdi);
@@ -1036,6 +1047,34 @@ void syscall_dispatch(trap_frame *frame)
             break;
         }
         if (pkg_install(path, &reason) != 0) {
+            ret = SYS_EIO;
+            break;
+        }
+        ret = 0;
+        break;
+    }
+    case SYS_PKG_REMOVE: {
+        const char *id;
+        const char *reason = 0;
+        char idbuf[SYS_USER_NAME_MAX];
+        usize ilen;
+
+        if (!syscall_caps_ok(user, CAP_PKG_INSTALL)) {
+            ret = SYS_EPERM;
+            break;
+        }
+        id = syscall_path(frame, user, frame->rdi);
+        if (!id || id[0] == 0) {
+            ret = SYS_EFAULT;
+            break;
+        }
+        ilen = strlen(id);
+        if (ilen + 1u > sizeof(idbuf)) {
+            ret = SYS_EINVAL;
+            break;
+        }
+        memcpy(idbuf, id, ilen + 1u);
+        if (pkg_remove(idbuf, &reason) != 0) {
             ret = SYS_EIO;
             break;
         }

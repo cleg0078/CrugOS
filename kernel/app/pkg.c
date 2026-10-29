@@ -529,6 +529,12 @@ const char *pkg_reason_text(const char *reason)
     if (strcmp(reason, "already-installed") == 0) {
         return "already installed";
     }
+    if (strcmp(reason, "downgrade") == 0) {
+        return "newer version installed";
+    }
+    if (strcmp(reason, "not-installed") == 0) {
+        return "package not installed";
+    }
     if (strcmp(reason, "io") == 0) {
         return "filesystem error";
     }
@@ -540,6 +546,9 @@ const char *pkg_reason_text(const char *reason)
     }
     if (strcmp(reason, "record") == 0) {
         return "cannot record install";
+    }
+    if (strcmp(reason, "read-only") == 0) {
+        return "the root is read-only";
     }
     return reason;
 }
@@ -716,6 +725,28 @@ static int pkg_registry_add(const struct pkg *candidate)
     memcpy(&g_pkgs[pos], candidate, sizeof(g_pkgs[pos]));
     g_count++;
     return 0;
+}
+
+static int pkg_registry_remove(const char *id)
+{
+    u32 i;
+
+    if (!id) {
+        return -1;
+    }
+    for (i = 0u; i < g_count; i++) {
+        if (strcmp(g_pkgs[i].id, id) == 0) {
+            u32 j;
+
+            for (j = i + 1u; j < g_count; j++) {
+                memcpy(&g_pkgs[j - 1u], &g_pkgs[j], sizeof(g_pkgs[j]));
+            }
+            g_count--;
+            memset(&g_pkgs[g_count], 0, sizeof(g_pkgs[g_count]));
+            return 0;
+        }
+    }
+    return -1;
 }
 
 void pkg_reset(void)
@@ -989,7 +1020,10 @@ int pkg_install(const char *path, const char **reason)
     char record[PKG_RECORD_MAX];
     char recpath[PKG_PATH_BUF_MAX];
     char recname[PKG_ID_MAX + 8u];
+    char backup[PKG_PATH_BUF_MAX];
+    char oldver[PKG_VERSION_MAX];
     int remounted = 0;
+    int is_update = 0;
 
     if (!reason) {
         return -1;
@@ -1068,9 +1102,42 @@ int pkg_install(const char *path, const char **reason)
         }
         memcpy(target + tlen, ".app", 5u);
     }
-    if (ext4_lookup(fs, target, &ino) == 0) {
-        *reason = "already-installed";
+    {
+        usize idlen = strlen(h.id);
+
+        /* pkg_join inserts a separator, so the suffix is appended by hand. */
+        if (idlen + 5u > sizeof(recname)) {
+            *reason = "id";
+            goto reject;
+        }
+        memcpy(recname, h.id, idlen);
+        memcpy(recname + idlen, ".txt", 5u);
+    }
+    if (pkg_join(recpath, sizeof(recpath), PKG_DB_DIR, recname) != 0) {
+        *reason = "id";
         goto reject;
+    }
+    if (ext4_lookup(fs, target, &ino) == 0) {
+        struct pkg existing;
+        int cmp;
+
+        /* Phase 7C: a bundle already at this path is an update when the
+           incoming version is newer and a refusal otherwise. */
+        if (pkg_read_record(recpath, &existing) != 0) {
+            *reason = "record";
+            goto reject;
+        }
+        cmp = app_version_compare(h.version, existing.version);
+        if (cmp == 0) {
+            *reason = "already-installed";
+            goto reject;
+        }
+        if (cmp < 0) {
+            *reason = "downgrade";
+            goto reject;
+        }
+        memcpy(oldver, existing.version, sizeof(oldver));
+        is_update = 1;
     }
     /* The boot mounts the root read-only; an install needs a short
        read-write window, exactly like the shell's write command. */
@@ -1090,6 +1157,16 @@ int pkg_install(const char *path, const char **reason)
     if (pkg_mkdir_p(fs, stage, 0x41EDu) != 0) {
         *reason = "io";
         goto reject;
+    }
+    {
+        usize slen = strlen(stage);
+
+        if (slen + 5u > sizeof(backup)) {
+            *reason = "id";
+            goto rollback;
+        }
+        memcpy(backup, stage, slen);
+        memcpy(backup + slen, ".old", 5u);
     }
     for (;;) {
         int n = pkg_payload_next(image + PKG_HEADER_SIZE, h.payload_size, &off,
@@ -1141,24 +1218,23 @@ int pkg_install(const char *path, const char **reason)
         goto rollback;
     }
     (void)ext4_fsync(fs);
+    if (is_update) {
+        /* Park the old bundle next to the stage directory: the rename below
+           still fails if the record cannot be written, and rollback puts the
+           old version back. */
+        (void)pkg_rm_tree(backup, 0u);
+        (void)ext4_rmdir(fs, backup);
+        if (ext4_rename(fs, target, backup) != 0) {
+            *reason = "io";
+            goto rollback;
+        }
+    }
     if (ext4_rename(fs, stage, target) != 0) {
         *reason = "io";
-        goto rollback;
-    }
-    {
-        usize idlen = strlen(h.id);
-
-        /* pkg_join inserts a separator, so the suffix is appended by hand. */
-        if (idlen + 5u > sizeof(recname)) {
-            *reason = "id";
-            goto undo;
+        if (is_update) {
+            (void)ext4_rename(fs, backup, target);
         }
-        memcpy(recname, h.id, idlen);
-        memcpy(recname + idlen, ".txt", 5u);
-    }
-    if (pkg_join(recpath, sizeof(recpath), PKG_DB_DIR, recname) != 0) {
-        *reason = "id";
-        goto undo;
+        goto rollback;
     }
     if (pkg_record_format(&h, target, record, sizeof(record)) < 0) {
         *reason = "record";
@@ -1180,12 +1256,23 @@ int pkg_install(const char *path, const char **reason)
     memcpy(entry.prog, target, sizeof(entry.prog));
     entry.cap_mask = h.cap_mask;
     (void)pkg_registry_add(&entry);
-    kprintf("CRUGOS: pkg installed %s %s (%u file(s), %u cap(s))\n", h.id,
-            h.version, (unsigned)files, (unsigned)h.cap_mask);
+    if (is_update) {
+        (void)pkg_rm_tree(backup, 0u);
+        (void)ext4_rmdir(fs, backup);
+        kprintf("CRUGOS: pkg updated %s %s -> %s (%u file(s), %u cap(s))\n",
+                h.id, oldver, h.version, (unsigned)files,
+                (unsigned)h.cap_mask);
+    } else {
+        kprintf("CRUGOS: pkg installed %s %s (%u file(s), %u cap(s))\n", h.id,
+                h.version, (unsigned)files, (unsigned)h.cap_mask);
+    }
     goto done;
 
 undo:
     (void)ext4_rename(fs, target, stage);
+    if (is_update) {
+        (void)ext4_rename(fs, backup, target);
+    }
 rollback:
     (void)pkg_rm_tree(stage, 0u);
     (void)ext4_rmdir(fs, stage);
@@ -1197,5 +1284,104 @@ done:
         (void)storage_remount_ro();
     }
     kfree(image);
+    return *reason ? -1 : 0;
+}
+
+static int pkg_id_ok(const char *id)
+{
+    usize i;
+    usize len;
+
+    if (!id || !id[0]) {
+        return 0;
+    }
+    len = strlen(id);
+    if (len >= PKG_ID_MAX) {
+        return 0;
+    }
+    for (i = 0u; i < len; i++) {
+        char c = id[i];
+
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-') {
+            continue;
+        }
+        return 0;
+    }
+    return 1;
+}
+
+int pkg_remove(const char *id, const char **reason)
+{
+    struct ext4_fs *fs = pkg_fs();
+    const struct pkg *installed;
+    char target[PKG_PATH_BUF_MAX];
+    char recname[PKG_ID_MAX + 8u];
+    char recpath[PKG_PATH_BUF_MAX];
+    u32 ino = 0u;
+    usize idlen;
+    int present;
+    int remounted = 0;
+
+    if (!reason) {
+        return -1;
+    }
+    *reason = 0;
+    if (!fs || !id || !pkg_id_ok(id)) {
+        *reason = "id";
+        goto reject;
+    }
+    if (pkg_join(target, sizeof(target), APP_DIR, id) != 0) {
+        *reason = "id";
+        goto reject;
+    }
+    {
+        usize tlen = strlen(target);
+
+        if (tlen + 5u >= sizeof(target)) {
+            *reason = "id";
+            goto reject;
+        }
+        memcpy(target + tlen, ".app", 5u);
+    }
+    installed = pkg_find_id(id);
+    present = ext4_lookup(fs, target, &ino) == 0;
+    if (!installed && !present) {
+        *reason = "not-installed";
+        goto reject;
+    }
+    if (!(fs->flags & EXT4_MOUNT_RW)) {
+        if (storage_remount_rw() != 0) {
+            *reason = "read-only";
+            goto reject;
+        }
+        remounted = 1;
+    }
+    if (present) {
+        (void)pkg_rm_tree(target, 0u);
+        (void)ext4_rmdir(fs, target);
+    }
+    idlen = strlen(id);
+    if (idlen + 5u <= sizeof(recname)) {
+        memcpy(recname, id, idlen);
+        memcpy(recname + idlen, ".txt", 5u);
+        if (pkg_join(recpath, sizeof(recpath), PKG_DB_DIR, recname) == 0) {
+            (void)ext4_unlink(fs, recpath);
+        }
+    }
+    (void)ext4_fsync(fs);
+    (void)pkg_registry_remove(id);
+    (void)app_init();
+    kprintf("CRUGOS: pkg removed %s (%u package(s))\n", id,
+            (unsigned)pkg_count());
+    goto done;
+
+reject:
+    kprintf("CRUGOS: pkg remove rejected %s (%s)\n", id ? id : "-",
+            *reason ? *reason : "io");
+done:
+    if (remounted) {
+        (void)storage_remount_ro();
+    }
     return *reason ? -1 : 0;
 }
