@@ -1,4 +1,4 @@
-/* Minimal freestanding syscall library for CrugOS ring-3 programs (U1..U4). */
+/* Minimal freestanding syscall library for CrugOS ring-3 programs (U1..U5). */
 #ifndef CRUG_USER_LIB_H
 #define CRUG_USER_LIB_H
 
@@ -15,6 +15,7 @@
 #define U_SYS_SPAWN 21u
 #define U_SYS_WAIT 22u
 #define U_SYS_EXEC 23u
+#define U_SYS_FORK 24u
 
 /* SYS_OPEN flags (phase U3). U_O_RDONLY is the zero flag. */
 #define U_O_RDONLY 0u
@@ -167,6 +168,13 @@ static inline i64 u_exec(const char *path, u32 argc, const char *const *argv)
 {
     return u_syscall3(U_SYS_EXEC, (u64)(uintptr)path, (u64)argc,
                       (u64)(uintptr)argv);
+}
+
+/* Doubles the calling program: the child continues at the same instruction in
+   its own copy of the address space and sees 0 here, the parent sees the tid. */
+static inline i64 u_fork(void)
+{
+    return u_syscall3(U_SYS_FORK, 0, 0, 0);
 }
 
 static inline i64 u_gettid(void)

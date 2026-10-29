@@ -29,7 +29,8 @@
 #define SYS_SPAWN 21u
 #define SYS_WAIT 22u
 #define SYS_EXEC 23u
-#define SYS_MAX 24u
+#define SYS_FORK 24u
+#define SYS_MAX 25u
 
 /* Open flags for SYS_OPEN (phase U3). SYS_O_RDONLY is the zero flag. */
 #define SYS_O_RDONLY 0u

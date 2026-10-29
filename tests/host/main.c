@@ -40,6 +40,7 @@ void test_uaccess_functions(void);
 void test_exec_functions(void);
 void test_vm_space_functions(void);
 void test_vm_space_oom(void);
+void test_vm_space_clone(void);
 
 int main(void)
 {
@@ -74,6 +75,7 @@ int main(void)
     RUN(test_exec_functions);
     RUN(test_vm_space_functions);
     RUN(test_vm_space_oom);
+    RUN(test_vm_space_clone);
     printf("%d checks, %d failure(s)\n", tests_run, tests_failed);
     return tests_failed == 0 ? 0 : 1;
 }

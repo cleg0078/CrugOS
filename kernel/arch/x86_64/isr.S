@@ -75,6 +75,10 @@ isr_common:
     movq %rsp, %rdi
     call trap_dispatch
 
+/* Phase U5: a forked child rebuilds its parent's trap frame and jumps here so
+   the epilogue below returns it to ring 3 in one path with every trap. */
+.global isr_return
+isr_return:
     popq %r15
     popq %r14
     popq %r13

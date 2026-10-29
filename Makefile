@@ -23,6 +23,7 @@
 #   make test-user2          run two ring-3 programs at once and prove their spaces are isolated
 #   make test-user3          run a ring-3 shell that reads a script and writes a file
 #   make test-user4          spawn and exec ring-3 programs and wait for their exit codes
+#   make test-user5          fork a ring-3 program and prove the child gets a private copy
 #   make test-raid  boot RAID1 (two members) and verify member disks
 #   make test-raid10  boot RAID10 (four members) and verify member disks
 #   make test-nvme   boot from an NVMe namespace and verify the disk
@@ -116,6 +117,7 @@ EXPECT_USER ?= no
 EXPECT_USERS ?= no
 EXPECT_USHELL ?= no
 EXPECT_SPAWN ?= no
+EXPECT_FORK ?= no
 
 # QEMU / firmware options.
 MEMORY_MB ?= 512
@@ -200,6 +202,9 @@ SHELL_RUN_TIMEOUT_SEC ?= 240
 
 # Spawn gate (make test-user4): SYS_SPAWN, SYS_WAIT and SYS_EXEC at CPL3.
 SPAWN_RUN_TIMEOUT_SEC ?= 240
+
+# Fork gate (make test-user5): SYS_FORK copies the parent's address space.
+FORK_RUN_TIMEOUT_SEC ?= 240
 
 # Interactive demo (make demo): a real QEMU window with a USB keyboard and
 # mouse, the Workbench desktop and a hold so the window stays open.
@@ -327,7 +332,7 @@ KERNEL_DEPS := $(KERNEL_OBJECTS:.o=.d)
 
 USER_ELF_DIR := $(BUILD)/user
 USER_OBJ := $(BUILD)/user/obj
-USER_PROGRAMS := hello badptr fault iso sh spawn child
+USER_PROGRAMS := hello badptr fault iso sh spawn child fork
 USER_ELF := $(patsubst %,$(USER_ELF_DIR)/%,$(USER_PROGRAMS))
 USER_FLAGS := -std=gnu11 -fcrug-kernel -ffreestanding -fno-pic -fno-pie \
               -mcmodel=large -fno-stack-protector -fno-builtin -fno-ident \
@@ -358,7 +363,7 @@ HOST_CRYPT_SOURCES := tools/mkcrypt.c kernel/block/crypt_meta.c \
         test-raid test-raid-degraded test-raid10 test-raid10-degraded test-nvme test-ahci \
         test-raid-repair test-raid10-repair test-journal-csum test-journal-replay \
         test-hardening test-heap test-trap test-fuzz test-user test-user2 test-user3 \
-        test-user4 \
+        test-user4 test-user5 \
         test-crypt test-crypt-recovery test-crypt-wrongkey test-crypt-tamper test-crypt-ni \
         test-crypt-prompt test-crypt-prompt-wrong test-crypt-prompt-timeout \
         test-crypt-keyboard test-crypt-keyboard-wrong crypt-run test-net test-tcp \
@@ -1043,6 +1048,25 @@ test-user4: esp user
 		$(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no no \
 		$(EXPECT_USER) $(EXPECT_USERS) $(EXPECT_USHELL) $(EXPECT_SPAWN)
 	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
+# Fork gate: boot with user.test=5, so /bin/fork calls SYS_FORK. The child
+# overwrites a private global and exits 3; the parent must still read its own
+# copy (0x1111), which only holds if vm_space_clone gave it a fresh frame.
+test-user5: EXPECT_USER := yes
+test-user5: EXPECT_USERS := yes
+test-user5: EXPECT_USHELL := yes
+test-user5: EXPECT_SPAWN := yes
+test-user5: EXPECT_FORK := yes
+test-user5: esp user
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(MAKE) --no-print-directory disk
+	$(Q)$(MAKE) --no-print-directory run TIMEOUT_SEC=$(FORK_RUN_TIMEOUT_SEC) \
+		CMDLINE_EXTRA="user.test=5"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION \
+		$(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no no \
+		$(EXPECT_USER) $(EXPECT_USERS) $(EXPECT_USHELL) $(EXPECT_SPAWN) $(EXPECT_FORK)
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
 check-disk:
 	@if [ -n "$(DISK_IMG)" ] && [ ! -f "$(DISK_IMG)" ]; then \
 		$(MAKE) --no-print-directory disk; \
@@ -1162,6 +1186,8 @@ options:
 	@printf '  %-16s %s\n' SHELL_RUN_TIMEOUT_SEC "$(SHELL_RUN_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' EXPECT_SPAWN "$(EXPECT_SPAWN)"
 	@printf '  %-16s %s\n' SPAWN_RUN_TIMEOUT_SEC "$(SPAWN_RUN_TIMEOUT_SEC) (seconds)"
+	@printf '  %-16s %s\n' EXPECT_FORK "$(EXPECT_FORK)"
+	@printf '  %-16s %s\n' FORK_RUN_TIMEOUT_SEC "$(FORK_RUN_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' FUZZ_CASES "$(FUZZ_CASES)"
 	@printf '  %-16s %s\n' FUZZ_CRYPT_CASES "$(FUZZ_CRYPT_CASES)"
 	@printf '  %-16s %s\n' FUZZ_SEED "$(FUZZ_SEED)"

@@ -11,18 +11,22 @@ the ext4 root, the kernel passes `argc`/`argv` on the initial stack, and
 `/bin/sh` reads a script from the disk and writes a file back. Phase U4 adds a
 process model to ring 3: `SYS_SPAWN` starts a program image as a child thread,
 `SYS_WAIT` blocks for its exit code, and `SYS_EXEC` replaces the calling image
-in place while keeping its tid.
+in place while keeping its tid. Phase U5 adds the other half of the process
+model: `SYS_FORK` copies the caller's whole user window into a new address
+space and resumes the child immediately after the `int 0x80`, so a program can
+duplicate itself and the two copies stop sharing memory.
 
-The current gate is `make test-user4` (gate 51): it boots with `user.test=4`,
-runs the U1 trio, the U2 isolation pair, the U3 shell and then `/bin/spawn`,
-which spawns `/bin/child`, waits for exit 5 and execs the child image. The
-earlier gates keep their levels: `make test-user3` (gate 50) stops at the shell,
-`make test-user2` (gate 49) at the isolation pair.
+The current gate is `make test-user5` (gate 52): it boots with `user.test=5`,
+runs the U1 trio, the U2 isolation pair, the U3 shell, the U4 spawn/exec probe
+and then `/bin/fork`, which forks itself, overwrites a global in the child and
+proves the parent still reads its own copy. The earlier gates keep their levels:
+`make test-user4` (gate 51) stops after the spawn/exec probe, `make test-user3`
+(gate 50) at the shell, `make test-user2` (gate 49) at the isolation pair.
 
 Nothing in these phases changes the boot paths, the disk image format or the
 loaded program ABI the UEFI loader uses. The kernel gains `SYS_WRITE`, the file
-syscalls and the spawn/wait/exec calls plus one syscall mode switch; every
-non-user gate still boots with no user program at all.
+syscalls, the spawn/wait/exec calls and `SYS_FORK` plus one syscall mode switch;
+every non-user gate still boots with no user program at all.
 
 ## Why ring 3 now
 
@@ -278,7 +282,7 @@ scans past `cap`.
 4096 bytes, and the kernel copies in 256-byte chunks into a stack buffer
 (`SYS_BOUNCE_MAX` covers the larger message ports) and `kprintf`s each chunk. In
 U3 the same call also writes to an open file when `fd >= 3`; the console
-behaviour is unchanged. `SYS_MAX` is 24. `SYS_EXIT` (8) from CPL3 records the exit
+behaviour is unchanged. `SYS_MAX` is 25. `SYS_EXIT` (8) from CPL3 records the exit
 code and ends only that thread; the kernel continues. `SYS_EBUSY` (-16) is the
 error a caller gets when a thread cannot be created.
 
@@ -332,7 +336,7 @@ pending write should remount it; the serial log shows
 
 `SYS_LISTDIR` copies newline-separated names into the user buffer and NUL
 terminates the result, so a user program can list `/` without knowing the
-on-disk directory format. `SYS_MAX` is 24, and any number at or above it returns
+on-disk directory format. `SYS_MAX` is 25, and any number at or above it returns
 `SYS_ENOSYS`. `SYS_ENOENT` (-2) is the new error for a path that does not exist.
 
 ## Scheduler and user threads
@@ -389,8 +393,9 @@ exactly which program died.
 `user/` holds the sources and the linker scripts; `make user` builds them and
 `scripts/mkdisk.sh` writes them into `/bin` when `USER_DIR` is set. The U1 three
 run one after another; the U2 isolation pair runs at the same time; the U3 shell
-runs on its own, after the pair has been joined; and the U4 spawn test runs last,
-after the shell, because it starts and reaps a program of its own.
+runs on its own, after the pair has been joined; and the U4 spawn test runs
+after the shell, because it starts and reaps a program of its own; the U5 fork
+probe runs last, because its child must be reaped before the boot ends.
 
 | Program | What it proves | Expected exit |
 | --- | --- | --- |
@@ -401,6 +406,7 @@ after the shell, because it starts and reaps a program of its own.
 | `/bin/sh` | a user program reads a script from ext4 and writes a file back | 7 |
 | `/bin/spawn` | spawn, wait and in-place exec all work from ring 3 | 5 |
 | `/bin/child` | a spawned image receives its argv and exits for its parent | 5 |
+| `/bin/fork` | a forked child writes its own frame, not the parent's | 0 |
 
 `hello.c` prints `CRUGOS: user hello from ring 3` and returns 0. `badptr.c` calls
 `SYS_WRITE` with `0x00100000` (a kernel address) and checks that the return value
@@ -424,6 +430,12 @@ replacement. `child.c` prints its tid, `argc` and `argv[1]`, then returns 5.
 A spawn failure makes spawn return 1, a wrong child code 2 and an exec failure 3,
 so the gate can tell which step broke.
 
+`fork.c` calls `SYS_FORK` and branches on the return value: 0 means it is the
+child, which writes 8738 into the global and exits 3; anything else is the
+parent, which waits for that tid, checks exit 3 and checks that its own global
+is still 4369. It exits 0 when the copy is real and 1, 2 or 3 when the fork, the
+wait or the memory check failed.
+
 ## The ring-3 shell
 
 `user/sh.c` is `/bin/sh`, linked by `user/sh.ld` (text R+X at
@@ -440,7 +452,7 @@ path. It executes one command per line:
 
 | Command | Effect |
 | --- | --- |
-| `ver` | print `CrugOS ring-3 shell (phase u4)` |
+| `ver` | print `CrugOS ring-3 shell (phase u5)` |
 | `echo TEXT` | print `TEXT` |
 | `cat FILE` | read the file and write its bytes to the console |
 | `ls PATH` | list a directory |
@@ -533,6 +545,81 @@ allocate a space. `exec_args_build()` then lays out the strings, `envp[]`,
 `argv[]` and the `argc` word in a 4 KiB block at the top of the new user stack,
 16-byte aligned, and `rsp` points at the `argc` word.
 
+## Fork: copying an address space
+
+`SYS_FORK` (24, so `SYS_MAX` is 25) takes no arguments. In the parent it
+returns the new child's tid; in the child it returns 0 and the first user
+instruction is the one right after the `int 0x80`, exactly as if the call had
+returned twice. The child is a new thread with its own `vm_space`, its own
+kernel stack and its own descriptor table.
+
+The copy is `vm_space_clone()` in `kernel/mm/vm_space.c` (declared in
+`include/crug/vm.h` with the cap `VM_SPACE_FORK_MAX_PAGES` = 256 pages):
+
+- the new root gets slot 0 from the shared supervisor identity map, so kernel
+  code, stacks and MMIO stay present;
+- the walk descends the parent's slot-1 page tables and, for every present leaf,
+  allocates a fresh frame, copies the parent's `PRESENT`/`WRITE`/`NX` bits
+  and `memcpy`s exactly one page;
+- any allocation or mapping failure destroys the half-built space, so the
+  destination is either a complete clone or gone - never partial;
+- a parent with more than 256 user pages is refused before anything is copied.
+
+The child does not enter through `thread_entry`. `thread_create_forked()`
+keeps a copy of the parent's `trap_frame` in the thread (`THREAD_FLAG_FORKED`,
+`fork_frame`) with `rax` set to 0, and starts the thread at
+`kernel/arch/x86_64/user.S:thread_fork_enter`:
+
+```asm
+thread_fork_enter:
+    cli
+    call thread_fork_resume
+    movq %rax, %rsp
+    jmp  isr_return
+```
+
+`thread_fork_resume()` parks the saved frame `THREAD_FORK_FRAME_GAP` (1024)
+bytes below the top of the child's kernel stack, restores `%ds`/`%es` to
+`SEG_USER_DS`, calls `cpu_set_kernel_stack()` with the child's stack top and
+returns the frame pointer in `%rax`. `kernel/arch/x86_64/isr.S` now exports
+the label `isr_return` just before its `popq %r15`, so the trampoline shares
+the normal interrupt epilogue (`pop` r15 down to rax, `addq $16`, `iretq`)
+and returns to CPL3 through the same path as any interrupt.
+
+The child's descriptor table is deliberately empty - `thread_create` calls
+`ufile_table_init`. Inherited descriptors cannot be shared safely between two
+threads, and an empty table guarantees a buffered file write is never flushed
+twice.
+
+`user/fork.c` is the ring-3 probe. It holds `static volatile u64 g_word =
+0x1111` as a global; the child stores `0x2222` (8738) into its copy and calls
+`u_exit(3)`; the parent `u_wait()`s the tid, requires exit code 3, and then
+re-reads `g_word` and requires its own `0x1111` (4369). If the child had
+aliased the parent's frame instead of receiving a copy, the parent would read
+`0x2222`. The program returns 0 on success and 1, 2 or 3 when the fork, the
+wait or the word check fails.
+
+```
+CRUGOS: user fork test start
+CRUGOS: user fork start
+CRUGOS: user fork tid 16 -> 17 (6 page(s))
+CRUGOS: user fork tid 17
+CRUGOS: user fork child word 8738
+CRUGOS: user fork reap exit 3
+CRUGOS: user fork parent word 4369
+CRUGOS: user fork ok (child exit 3, memory isolated)
+CRUGOS: user fork test ok (child exit 3, memory isolated)
+```
+
+One trap is worth recording. `vm_space_map_user_pages()` only ORs `VM_USER`
+into the flag word it is given; it does not add `PRESENT`. A clone that passed
+`VM_WRITE | VM_NX` therefore built a child whose leaf was never present - the
+first version ended with `dst->user_pages` 1 against the parent's 2,
+`vm_space_translate()` returned 0 for the missing page and the host clone test
+segfaulted afterwards. `vm_space_clone()` must pass
+`VM_PRESENT | VM_WRITE | VM_NX`, keeping the parent leaf's writability and
+`NX` bits, which is what the committed code does.
+
 ## Building a user program
 
 A user program is a freestanding ELF64 linked by `user/user.ld`. The isolation
@@ -559,7 +646,7 @@ The build rule is a single Makefile target:
 make user
 ```
 
-`USER_PROGRAMS` is `hello badptr fault iso sh spawn child`. The common rule
+`USER_PROGRAMS` is `hello badptr fault iso sh spawn child fork`. The common rule
 compiles `user/*.c` with `-fcrug-kernel -ffreestanding -mcmodel=large -nostdlib
 -no-pie -Wl,-T,user/user.ld` into `build/x86_64/user/<name>`; `iso` and `sh` have
 explicit rules of their own because they link with `user/iso.ld` and
@@ -607,63 +694,73 @@ warning at disk-build time and a "did not start" failure at run time.
 | `CRUGOS: user spawn exec` | from `/bin/spawn` | it is about to replace its own image |
 | `CRUGOS: user exec <path> (tid <n>)` | kernel syscall path | `SYS_EXEC` replaced the image in the same thread |
 | `CRUGOS: user spawn test ok (child exit 5, exec exit 5)` | end of level 4 | both the child and the exec path behaved |
+| `CRUGOS: user fork test start` | `user.test=5` | the kernel is about to run `/bin/fork` |
+| `CRUGOS: user fork start` | from `/bin/fork` | before `SYS_FORK` |
+| `CRUGOS: user fork tid <n> -> <m> (N page(s))` | from `/bin/fork` | parent tid, child tid and the pages copied |
+| `CRUGOS: user fork tid <n>` | from `/bin/fork` | the child is alive and knows its tid |
+| `CRUGOS: user fork child word <n>` | from `/bin/fork` | the child's copy holds 8738 |
+| `CRUGOS: user fork reap exit <n>` | from `/bin/fork` | `SYS_WAIT` returned the child's code |
+| `CRUGOS: user fork parent word <n>` | from `/bin/fork` | the parent still reads its own 4369 |
+| `CRUGOS: user fork ok (child exit 3, memory isolated)` | from `/bin/fork` | the child's write did not reach the parent |
+| `CRUGOS: user fork test ok (child exit 3, memory isolated)` | end of level 5 | the whole fork probe behaved |
 | `CRUGOS: user selftest ok (3 program(s), 1 fault(s))` | end | the U1 programs behaved |
 
 The counting line is unchanged: it counts the sequential U1 programs, not the
-isolation pair, the shell or the spawn test. The crash report lines
+isolation pair, the shell, the spawn test or the fork test. The crash report lines
 (`CRUGOS: trap report ...`) are documented in [traps.md](traps.md) and appear
 between `user fault writing above the window` and the
 `user fault page fault at rip=...` line.
 
 ## The gate
 
-`make test-user4` is gate 51 and the only gate that sets
-`EXPECT_SPAWN=yes`; it needs the three earlier user flags as well:
+`make test-user5` is gate 52 and the only gate that sets `EXPECT_FORK=yes`; it
+needs the four earlier user flags as well:
 
 ```sh
-make test-user4
+make test-user5
 ```
 
-It rebuilds the ESP and the disk with all seven programs (`disk` depends on
-`user`), boots with `user.test=4` on the kernel command line under a
-`SPAWN_RUN_TIMEOUT_SEC` (240) budget, then runs `scripts/boot-check.py` with the
-new final argument `EXPECT_SPAWN` (`argv[30]`; `EXPECT_USER` is `argv[27]`,
-`EXPECT_USERS` is `argv[28]` and `EXPECT_USHELL` is `argv[29]`). The
-argument-count guard is now `tuple(range(3, 32))`. The gate then runs the plain
-`check-disk` pass: it does not pass `--expect-shell-write`, so its check-disk
-line has no `/shout.txt` clause, and that write proof stays with gate 50. Every
-other gate keeps all four flags at `no`, so boot-check fails a plain boot that
-prints any user, isolation, shell or spawn marker - the feature must be dormant
-unless the token is present.
+It rebuilds the ESP and the disk with all eight programs (`disk` depends on
+`user`), boots with `user.test=5` on the kernel command line under a
+`FORK_RUN_TIMEOUT_SEC` (240) budget, then runs `scripts/boot-check.py` with the
+new final argument `EXPECT_FORK` (`argv[31]`; `EXPECT_USER` is `argv[27]`,
+`EXPECT_USERS` is `argv[28]`, `EXPECT_USHELL` is `argv[29]` and
+`EXPECT_SPAWN` is `argv[30]`). The argument-count guard is now
+`tuple(range(3, 33))`. The gate then runs the plain `check-disk` pass: it does
+not pass `--expect-shell-write`, so its check-disk line has no `/shout.txt`
+clause, and that write proof stays with gate 50. Every other gate keeps all five
+flags at `no`, so boot-check fails a plain boot that prints any user, isolation,
+shell, spawn or fork marker - the feature must be dormant unless the token is
+present.
 
-`make test-user` (gate 48), `make test-user2` (gate 49) and `make test-user3`
-(gate 50) still run their own levels: `user.test=1` is the three U1 programs,
-`user.test=2` adds the isolation pair, `user.test=3` adds the shell, and
-`user.test=4` adds `/bin/spawn`.
+`make test-user` (gate 48), `make test-user2` (gate 49), `make test-user3`
+(gate 50) and `make test-user4` (gate 51) still run their own levels:
+`user.test=1` is the three U1 programs, `user.test=2` adds the isolation pair,
+`user.test=3` adds the shell, `user.test=4` adds `/bin/spawn`, and
+`user.test=5` adds `/bin/fork`.
 
 Captured output from the gate in order (the report's `trap rip=` line and the two
 `trap regs` lines are elided - they carry the same frame the `user fault` line
-repeats; the `...` stands for the U1-U3 markers, which are unchanged from
-gate 50):
+repeats; the first `...` stands for the U1-U3 markers, unchanged from gate 50,
+and the second for the U4 spawn/exec stage, unchanged from gate 51):
 
 ```
 CRUGOS: user selftest start
 ...
 CRUGOS: user spawn test start
-CRUGOS: user spawn start
-CRUGOS: user spawn tid 15
-CRUGOS: user child running (tid 15)
-CRUGOS: user child argc 2
-CRUGOS: user child arg from-spawn
-CRUGOS: user spawn child exit 5
-CRUGOS: user spawn exec
-CRUGOS: user exec /bin/child (tid 14)
-CRUGOS: user child running (tid 14)
-CRUGOS: user child argc 2
-CRUGOS: user child arg from-exec
+...
 CRUGOS: user spawn test ok (child exit 5, exec exit 5)
+CRUGOS: user fork test start
+CRUGOS: user fork start
+CRUGOS: user fork tid 16 -> 17 (6 page(s))
+CRUGOS: user fork tid 17
+CRUGOS: user fork child word 8738
+CRUGOS: user fork reap exit 3
+CRUGOS: user fork parent word 4369
+CRUGOS: user fork ok (child exit 3, memory isolated)
+CRUGOS: user fork test ok (child exit 3, memory isolated)
 CRUGOS: user selftest ok (3 program(s), 1 fault(s))
-CRUGOS: phase u4 boot ok
+CRUGOS: phase u5 boot ok
 ```
 
 Between `user fault writing above the window` and the `user fault page fault`
@@ -674,15 +771,15 @@ bits, same `cr2`).
 The boot check that accepts it:
 
 ```
-ok: boot markers found, version 0.38.0 avx2 yes raid no nvme no rebuild no ahci no crypt no aes any net no tcp no dns no usb no mouse no audio no gfx no wb no menu no shell no keys no desk no icons no drawer no select no heap no user yes isolated yes ushell yes spawn yes storage disk QEMU exit status 33
+ok: boot markers found, version 0.39.0 avx2 yes raid no nvme no rebuild no ahci no crypt no aes any net no tcp no dns no usb no mouse no audio no gfx no wb no menu no shell no keys no desk no icons no drawer no select no heap no user yes isolated yes ushell yes spawn yes fork yes storage disk QEMU exit status 33
 ```
 
-The `user yes`, `isolated yes`, `ushell yes` and `spawn yes` fields are the
-user fields; all others are the same as the H4 gate. The boot timing line has the
-same shape (values vary by run):
+The `user yes`, `isolated yes`, `ushell yes`, `spawn yes` and `fork yes`
+fields are the user fields; all others are the same as the H4 gate. The boot
+timing line has the same shape (values vary by run):
 
 ```
-boot   : pmm=28772 us cpu=395 us vm=638 us traps=340 us timer=65291 us heap=471 us storage=95931 us sched=326 us syscall=96 us total=192263 us
+boot   : pmm=27755 us cpu=397 us vm=663 us traps=321 us timer=65329 us heap=477 us storage=95269 us sched=373 us syscall=129 us total=190716 us
 ```
 
 `check-disk` runs after the boot and reports the root filesystem intact:
@@ -691,7 +788,7 @@ boot   : pmm=28772 us cpu=395 us vm=638 us traps=340 us timer=65291 us heap=471 
 ok: ext4 root is clean, /hello.txt and /selftest/b.txt persisted
 ```
 
-That is the plain pass. Gate 51 does not pass `--expect-shell-write`, so it
+That is the plain pass. Gate 52 does not pass `--expect-shell-write`, so it
 never asserts `/shout.txt`; that clause in the check-disk output belongs to
 gate 50 only.
 
@@ -722,7 +819,18 @@ Reading a failure:
   spawner's, means `SYS_EXEC` did not replace the image in place - the tid must
   survive the exec, and the new `vm_space` must be activated before the old one
   is destroyed;
-- a `check-disk` complaint about `/shout.txt` belongs to gate 50: gate 51 runs
+- no `user fork test start` line means `user.test=5` did not reach
+  `user_test.c`, `/bin/fork` is missing from the disk, or `SYS_FORK` failed
+  before the child existed;
+- a missing `user fork tid 16 -> 17` line means `SYS_FORK` returned an error:
+  the parent is over the 256-page cap or a page allocation failed;
+- a child that never prints `user fork child word` means the trampoline did not
+  reach CPL3 - check `thread_fork_enter`, `isr_return` and the parked frame;
+- a `user fork parent word` other than 4369 means the child's write reached the
+  parent's frame: the clone aliased pages instead of copying them;
+- a `user fork reap exit` other than 3 means the child exited through another
+  path or `SYS_WAIT` returned the wrong code;
+- a `check-disk` complaint about `/shout.txt` belongs to gate 50: gate 52 runs
   the plain pass and expects only `/hello.txt` and `/selftest/b.txt`.
   A missing `/hello.txt` or `/selftest/b.txt`, or an unclean ext4, means the
   disk build or the umount path broke;
@@ -737,10 +845,20 @@ Reading a failure:
   the kernel: slot 0 is still the shared supervisor identity map in every space.
 - The user window's intermediate page tables (the PML4 slot 1 PDPT, its PD and
   its PTs) are created once per space and released only at `vm_space_destroy`;
-  `vm_space_unmap_user_pages` frees the leaf frame, not the tables.
-- There is no `fork`: `SYS_SPAWN` starts a new image from a path, so a child
-  inherits neither the caller's memory nor its file descriptors. `SYS_EXEC`
-  replaces only the calling image, so a program cannot duplicate itself.
+  `vm_space_unmap_user_pages` frees the leaf frame, not the tables. A fork
+  builds a second set for the child's space, so every fork leaves the parent's
+  tables in place and adds a new tree that is freed only when the child dies.
+- Fork copies eagerly: there is no copy-on-write, so `SYS_FORK` allocates and
+  `memcpy`s every user page at call time, and the cost grows with the window the
+  parent actually uses.
+- A fork is capped at `VM_SPACE_FORK_MAX_PAGES` (256 pages): a parent with more
+  user pages is refused with an error rather than given a partial copy.
+- The forked child inherits memory only. Its descriptor table starts empty
+  (`ufile_table_init`), so an open file is not shared and a buffered write is
+  never flushed twice; there are no pending signals or timers to inherit either.
+- `SYS_SPAWN` still starts a new image from a path, so a spawn child inherits
+  neither the caller's memory nor its file descriptors, and `SYS_EXEC` replaces
+  only the calling image.
 - `SYS_WAIT` works only for direct children: `parent_id` must name the caller,
   there is no wait-any, no notification other than the blocking call, and no
   signals. A child that exits stays in the all-threads list as a zombie until

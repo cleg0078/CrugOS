@@ -29,3 +29,17 @@ thread_user_start:
     movw %ax, %es
     iretq
     .size thread_user_start, . - thread_user_start
+
+/* Phase U5: a forked child enters here from cpu_switch() on its own kernel
+ * stack. thread_fork_resume() copies the parent's saved frame into place and
+ * returns its address; the shared isr_return epilogue pops the general
+ * registers, drops the vector/error pair and iretqs to ring 3 with rax == 0.
+ */
+    .globl thread_fork_enter
+    .type thread_fork_enter, @function
+thread_fork_enter:
+    cli
+    call thread_fork_resume
+    movq %rax, %rsp
+    jmp isr_return
+    .size thread_fork_enter, . - thread_fork_enter

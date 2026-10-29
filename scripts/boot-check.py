@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Verify a CrugOS boot: serial markers, guest version, CPU policy, storage mode, encryption, networking, TCP, DNS, USB, HID mice, audio, the framebuffer cursor, the Workbench desktop, its menus and gadgets, its shell window, its keyboard
 navigation, its desktop objects, its scrollable drawer, the ring-3 userspace
-selftest, the ring-3 shell that reads a script and writes a file and the ring-3
-spawn/exec/wait path, then the exit code.
+selftest, the ring-3 shell that reads a script and writes a file, the ring-3
+spawn/exec/wait path and the ring-3 fork path, then the exit code.
 
 Pass --storage=none anywhere on the command line when the boot medium ships no
 block device (the hybrid ISO does): the storage, journal, GPT and ext4 markers
@@ -14,7 +14,7 @@ usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE \
     [EXPECT_DNS [EXPECT_USB [EXPECT_MOUSE [EXPECT_AUDIO \
     [EXPECT_GFX [EXPECT_WB [EXPECT_MENU [EXPECT_SHELL [EXPECT_KEYS [EXPECT_DESK \
     [EXPECT_ICONS [EXPECT_DRAWER [EXPECT_SELECT [EXPECT_HEAP \
-    [EXPECT_USER [EXPECT_USERS [EXPECT_USHELL [EXPECT_SPAWN]]]]]]]]]]]]]]]]]]]]]]]]] \
+    [EXPECT_USER [EXPECT_USERS [EXPECT_USHELL [EXPECT_SPAWN [EXPECT_FORK]]]]]]]]]]]]]]]]]]]]]]]]]] \
     [--storage=none]
 """
 
@@ -43,7 +43,7 @@ REQUIRED_MARKERS = (
     "CRUGOS: selftest ok",
     "CRUGOS: nvme ready",
     "CRUGOS: ahci ready",
-    "CRUGOS: phase u4 boot ok",
+    "CRUGOS: phase u5 boot ok",
 )
 # A rejected unlock stops before scheduling, storage mounting and self-tests.
 WRONG_CRYPT_MARKERS = (
@@ -115,7 +115,7 @@ def main() -> int:
             argv.append(arg)
     sys.argv = [sys.argv[0]] + argv
 
-    if len(sys.argv) not in tuple(range(3, 32)):
+    if len(sys.argv) not in tuple(range(3, 33)):
         print("usage: boot-check.py SERIAL_LOG EXIT_CODE_FILE "
               "[VERSION_FILE [EXPECT_AVX2 [EXPECT_RAID [EXPECT_NVME "
               "[EXPECT_REBUILD [EXPECT_AHCI [EXPECT_CRYPT [EXPECT_AES "
@@ -123,7 +123,7 @@ def main() -> int:
               "[EXPECT_MOUSE [EXPECT_AUDIO [EXPECT_GFX [EXPECT_WB "
               "[EXPECT_MENU [EXPECT_SHELL [EXPECT_KEYS [EXPECT_DESK "
               "[EXPECT_ICONS [EXPECT_DRAWER [EXPECT_SELECT [EXPECT_HEAP "
-              "[EXPECT_USER [EXPECT_USERS [EXPECT_USHELL [EXPECT_SPAWN]]]]]]]]]]]]]]]]]]]]]]]]] "
+              "[EXPECT_USER [EXPECT_USERS [EXPECT_USHELL [EXPECT_SPAWN [EXPECT_FORK]]]]]]]]]]]]]]]]]]]]]]]]]] "
               "[--storage=none]",
               file=sys.stderr)
         return 2
@@ -158,6 +158,7 @@ def main() -> int:
     expect_users = sys.argv[28] if len(sys.argv) >= 29 else "no"
     expect_ushell = sys.argv[29] if len(sys.argv) >= 30 else "no"
     expect_spawn = sys.argv[30] if len(sys.argv) >= 31 else "no"
+    expect_fork = sys.argv[31] if len(sys.argv) >= 32 else "no"
 
     if not serial_path.exists():
         return fail(f"missing serial log {serial_path}", "")
@@ -214,6 +215,8 @@ def main() -> int:
         return fail(f"invalid EXPECT_USHELL {expect_ushell!r}", text)
     if expect_spawn not in ("no", "yes"):
         return fail(f"invalid EXPECT_SPAWN {expect_spawn!r}", text)
+    if expect_fork not in ("no", "yes"):
+        return fail(f"invalid EXPECT_FORK {expect_fork!r}", text)
 
     required = list(REQUIRED_MARKERS)
     if storage_mode == "none":
@@ -662,6 +665,28 @@ def main() -> int:
     elif "CRUGOS: user spawn test start" in text:
         return fail("unexpected spawn selftest without EXPECT_SPAWN=yes", text)
 
+    if expect_fork == "yes":
+        for marker in (
+            "CRUGOS: user fork test start",
+            "CRUGOS: user fork child word 8738",
+            "CRUGOS: user fork parent word 4369",
+            "CRUGOS: user fork test ok (child exit 3, memory isolated)",
+        ):
+            if marker not in text:
+                return fail(f"missing serial marker: {marker!r}", text)
+        if not re.search(r"CRUGOS: user fork tid \d+ -> \d+", text):
+            return fail("expected the kernel to report the fork parent and child tid",
+                        text)
+        if not re.search(r"CRUGOS: user fork tid \d+", text):
+            return fail("expected the forking program to report the child tid", text)
+        for marker in ("CRUGOS: user fork failed",
+                       "CRUGOS: user fork wrong child exit",
+                       "CRUGOS: user fork memory not isolated"):
+            if marker in text:
+                return fail(f"the fork program reported {marker!r}", text)
+    elif "CRUGOS: user fork test start" in text:
+        return fail("unexpected fork selftest without EXPECT_FORK=yes", text)
+
     if expect_rebuild == "no" and "CRUGOS: raid rebuilt" in text:
         return fail("unexpected RAID member rebuild during boot", text)
     if expect_rebuild != "no":
@@ -699,7 +724,7 @@ def main() -> int:
           "icons", expect_icons, "drawer", expect_drawer,
           "select", expect_select, "heap", expect_heap, "user", expect_user,
           "isolated", expect_users, "ushell", expect_ushell,
-          "spawn", expect_spawn,
+          "spawn", expect_spawn, "fork", expect_fork,
           "storage", storage_mode,
           "QEMU exit status", status)
     for line in boot_report:

@@ -249,3 +249,143 @@ void test_vm_space_oom(void)
     after = host_pmm_free_pages_count();
     CHECK(after == before);
 }
+
+/* Phase U5: vm_space_clone() copies a parent's user pages into a brand new
+ * address space. The tests here pin the contract the SYS_FORK path relies on:
+ * a private copy of every page, identical permissions, a fresh slot-0
+ * inheritance, a clean refusal for bad input and for a space past the clone
+ * cap, and no leaked frame in any failure path. */
+void test_vm_space_clone(void)
+{
+    vm_space src;
+    vm_space dst;
+    vm_space bad;
+    vm_space big;
+    vm_space src2;
+    u64 *kroot;
+    u64 *pte;
+    u64 before;
+    u64 after;
+    u64 pa;
+    u64 pb;
+    u8 *p;
+    u8 *q;
+
+    memset(&src, 0, sizeof(src));
+    memset(&dst, 0, sizeof(dst));
+    memset(&bad, 0, sizeof(bad));
+    memset(&big, 0, sizeof(big));
+    memset(&src2, 0, sizeof(src2));
+
+    kroot = make_kernel_root();
+    CHECK(kroot != 0);
+    if (!kroot)
+        return;
+    vm_space_set_kernel_root(kroot);
+
+    before = host_pmm_free_pages_count();
+
+    /* A parent with one text page and one data page. */
+    CHECK(vm_space_create(&src) == 0);
+    CHECK(vm_space_map_user_pages(&src, USER_BASE, 1, SPACE_TEXT) == 0);
+    CHECK(vm_space_map_user_pages(&src, USER_BASE + 2 * SPACE_PAGE, 1, SPACE_DATA) == 0);
+    CHECK(src.user_pages == 2);
+    pa = vm_space_translate(&src, USER_BASE);
+    pb = vm_space_translate(&src, USER_BASE + 2 * SPACE_PAGE);
+    CHECK(pa != 0);
+    CHECK(pb != 0);
+    p = (u8 *)pmm_phys_to_virt(pa);
+    q = (u8 *)pmm_phys_to_virt(pb);
+    p[0] = 0x5au;
+    p[SPACE_PAGE - 1] = 0xa5u;
+    q[16] = 0x3cu;
+    q[SPACE_PAGE - 1] = 0xc3u;
+
+    /* The clone succeeds and reports the same page count. */
+    CHECK(vm_space_clone(&dst, &src) == 0);
+    CHECK(dst.pml4 != 0);
+    CHECK(src.pml4 != 0);
+    CHECK(dst.pml4 != src.pml4);
+    CHECK(dst.user_pages == src.user_pages);
+    /* Slot 0 stays the shared supervisor identity map. */
+    CHECK(dst.pml4[0] == kroot[0]);
+    CHECK((dst.pml4[0] & VM_USER) == 0);
+
+    /* Every virtual address maps to a different frame holding the same bytes;
+     * a shallow copy would alias the parent's frame here. */
+    CHECK(vm_space_translate(&dst, USER_BASE) != 0);
+    CHECK(vm_space_translate(&dst, USER_BASE) != pa);
+    p = (u8 *)pmm_phys_to_virt(vm_space_translate(&dst, USER_BASE));
+    q = (u8 *)pmm_phys_to_virt(vm_space_translate(&dst, USER_BASE + 2 * SPACE_PAGE));
+    CHECK(p[0] == 0x5au);
+    CHECK(p[SPACE_PAGE - 1] == 0xa5u);
+    CHECK(q[16] == 0x3cu);
+    CHECK(q[SPACE_PAGE - 1] == 0xc3u);
+
+    /* Permissions travel with the pages: text stays read only and executable,
+     * data stays writable and non-executable, nothing is global. */
+    pte = leaf_pte(&dst, USER_BASE);
+    CHECK(pte != 0);
+    if (pte) {
+        CHECK((*pte & VM_PRESENT) != 0);
+        CHECK((*pte & VM_USER) != 0);
+        CHECK((*pte & VM_GLOBAL) == 0);
+        CHECK((*pte & VM_WRITE) == 0);
+        CHECK((*pte & VM_NX) == 0);
+    }
+    pte = leaf_pte(&dst, USER_BASE + 2 * SPACE_PAGE);
+    CHECK(pte != 0);
+    if (pte) {
+        CHECK((*pte & VM_USER) != 0);
+        CHECK((*pte & VM_GLOBAL) == 0);
+        CHECK((*pte & VM_WRITE) != 0);
+        CHECK((*pte & VM_NX) != 0);
+    }
+    /* The hole between the two pages stays unmapped in the clone. */
+    CHECK(vm_space_translate(&dst, USER_BASE + SPACE_PAGE) == 0);
+
+    /* A write in the parent must not show up in the child. */
+    ((u8 *)pmm_phys_to_virt(pa))[0] = 0x11u;
+    CHECK(((u8 *)pmm_phys_to_virt(vm_space_translate(&dst, USER_BASE)))[0] == 0x5au);
+    /* ... and destroying the parent leaves the child intact. */
+    vm_space_destroy(&src);
+    CHECK(vm_space_translate(&dst, USER_BASE) != 0);
+    CHECK(((u8 *)pmm_phys_to_virt(vm_space_translate(&dst, USER_BASE)))[0] == 0x5au);
+    vm_space_destroy(&dst);
+
+    /* Bad arguments are refused before anything is allocated. */
+    CHECK(vm_space_create(&src) == 0);
+    CHECK(vm_space_map_user_pages(&src, USER_BASE, 1, SPACE_DATA) == 0);
+    CHECK(vm_space_clone(0, &src) == -1);
+    CHECK(vm_space_clone(&bad, 0) == -1);
+    CHECK(bad.pml4 == 0);
+    CHECK(bad.user_pages == 0);
+
+    /* A clone without a published kernel root cannot inherit slot 0, so it must
+     * fail and leave nothing behind. */
+    vm_space_set_kernel_root(0);
+    CHECK(vm_space_clone(&bad, &src) == -1);
+    CHECK(bad.pml4 == 0);
+    CHECK(bad.user_pages == 0);
+    vm_space_set_kernel_root(kroot);
+
+    /* One page is fine; the cap is VM_SPACE_FORK_MAX_PAGES. */
+    CHECK(vm_space_clone(&bad, &src) == 0);
+    CHECK(bad.user_pages == 1);
+    vm_space_destroy(&bad);
+    vm_space_destroy(&src);
+
+    /* A parent past the cap is refused, and the half-built child is released. */
+    CHECK(vm_space_create(&src2) == 0);
+    CHECK(vm_space_map_user_pages(&src2, USER_BASE,
+                                  (u64)VM_SPACE_FORK_MAX_PAGES + 1ull,
+                                  SPACE_DATA) == 0);
+    CHECK(src2.user_pages == (u32)VM_SPACE_FORK_MAX_PAGES + 1u);
+    CHECK(vm_space_clone(&big, &src2) == -1);
+    CHECK(big.pml4 == 0);
+    CHECK(big.user_pages == 0);
+    vm_space_destroy(&src2);
+
+    after = host_pmm_free_pages_count();
+    CHECK(after == before);
+}

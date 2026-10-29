@@ -136,6 +136,15 @@ the `harden_range_ok()` identity path, so the `SYS_EXEC` selftests behave as
 before. The block is then built at the top of the new stack by
 `exec_args_build()`, never by trusting a user pointer directly.
 
+Phase U5 keeps a forked child inside the same window. `vm_space_clone()` in
+`kernel/mm/vm_space.c` copies the parent's slot-1 leaves by calling
+`vm_space_map_user_pages()` for every present page, so each destination frame is
+re-validated (page aligned, inside `USER_BASE`..`USER_TOP`, not already
+present) before it is mapped - the clone never writes a page-table entry
+directly. The copy is capped at `VM_SPACE_FORK_MAX_PAGES` (256 pages), and any
+allocation or mapping failure destroys the half-built space instead of leaving
+it reachable.
+
 ## Image gate
 
 `make test-hardening` is the 44th gate. It is not a fuzzer: it is a
@@ -153,7 +162,7 @@ must print.
 
 | Case | Patch | Required marker | Exit |
 | --- | --- | --- | --- |
-| `control` | none | `CRUGOS: phase u4 boot ok` (any phase id matches), `CRUGOS: ext4 ready`, `CRUGOS: storage ready`, `CRUGOS: writable storage ok`, `CRUGOS: selftest ok` | 33 |
+| `control` | none | `CRUGOS: phase u5 boot ok` (any phase id matches), `CRUGOS: ext4 ready`, `CRUGOS: storage ready`, `CRUGOS: writable storage ok`, `CRUGOS: selftest ok` | 33 |
 | `geometry-bpg` | superblock `+0x20` (`s_blocks_per_group`) = 100000 | `CRUGOS: ext4 mount rejected (geometry)` | 35 |
 | `geometry-ipg` | superblock `+0x28` (`s_inodes_per_group`) = 100000 | `CRUGOS: ext4 mount rejected (geometry)` | 35 |
 | `root-extent` | root inode `eh_max` (`inode + 44`) = 5, inode checksum recomputed | `CRUGOS: ext4 mount rejected (root extent)` | 35 |
@@ -320,7 +329,10 @@ ok: hardening pass 1 rejected 6 crafted image(s) (control boot exit 33)
   object the caller cannot corrupt (the table is per thread). Phase U4 lets a
   program start another image and wait for its exit code, but the child still
   starts from an empty address space and inherits no memory, so nothing crosses
-  via spawn that the copy boundary has not checked. What remains is that slot 0
-  of every space is still the shared kernel identity map: this is isolation
-  between user programs, not kernel-address isolation, and there is no
-  per-process resource accounting.
+  via spawn that the copy boundary has not checked. Phase U5 forks a copy of the
+  calling window instead: the child shares no frames with the parent, but it
+  inherits memory only (its descriptor table starts empty), and the clone passes
+  every page back through the same `vm_space_map_user_pages()` validator. What
+  remains is that slot 0 of every space is still the shared kernel identity map:
+  this is isolation between user programs, not kernel-address isolation, and
+  there is no per-process resource accounting.

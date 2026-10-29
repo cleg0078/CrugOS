@@ -33,6 +33,7 @@ static struct scheduler g_sched;
 static thread g_boot_thread;
 
 extern void thread_user_start(void);
+extern void thread_fork_enter(void);
 
 static const u8 g_quanta[SCHED_CLASSES] = { 1, 4, 2, 8 };
 
@@ -438,6 +439,59 @@ void thread_user_frame(u64 *out)
     out[1] = t->user_rsp;
     out[2] = (u64)SEG_USER_DS;
     out[3] = (u64)SEG_USER_CS;
+}
+
+thread *thread_create_forked(const char *name, vm_space *space,
+                            const trap_frame *frame, u32 parent_id)
+{
+    thread *t;
+    u64 *sp;
+
+    if (!space || !space->pml4 || !frame)
+        return 0;
+    /* A forked child must resume at CPL3; anything else is a kernel thread
+       asking for a fork, which SYS_FORK already rejects. */
+    if ((frame->cs & 3u) != 3u)
+        return 0;
+    t = thread_create(name, thread_user_never, 0, SCHED_NORMAL);
+    if (!t)
+        return 0;
+    t->flags |= THREAD_FLAG_USER | THREAD_FLAG_FORKED;
+    t->fork_frame = *frame;
+    t->fork_frame.rax = 0; /* the child reads 0 from fork() */
+    t->space = space;
+    t->parent_id = parent_id;
+    t->user_rip = frame->rip;
+    t->user_rsp = frame->rsp;
+    sp = (u64 *)(uintptr)(t->stack_base + t->stack_size - 72ull);
+    sp[7] = (u64)(uintptr)thread_fork_enter;
+    t->rsp = (u64)(uintptr)sp;
+    return t;
+}
+
+/* Rebuild the saved ring-3 frame on the current kernel stack. The frame sits
+   THREAD_FORK_FRAME_GAP below the stack top so the assembly trampoline can use
+   the space in between before it iretqs. */
+u64 thread_fork_resume(void)
+{
+    thread *t = g_sched.current;
+    trap_frame *f;
+    u64 top;
+    u16 sel;
+
+    if (!t || (t->flags & THREAD_FLAG_FORKED) == 0)
+        panic("sched: fork trampoline without a forked thread");
+    top = t->stack_base + t->stack_size;
+    f = (trap_frame *)(uintptr)(top - THREAD_FORK_FRAME_GAP);
+    *f = t->fork_frame;
+    f->rax = 0;
+    cpu_set_kernel_stack(top);
+    /* The child returns to CPL3 straight from iretq, but %ds/%es still hold
+       the kernel selectors of whoever ran last. */
+    sel = (u16)SEG_USER_DS;
+    __asm__ volatile("movw %0, %%ds" :: "rm"(sel) : "memory");
+    __asm__ volatile("movw %0, %%es" :: "rm"(sel) : "memory");
+    return (u64)(uintptr)f;
 }
 
 void thread_kill_current(i64 code)

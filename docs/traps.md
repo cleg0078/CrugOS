@@ -187,6 +187,15 @@ its tid stay the same, so a fault taken after an exec is reported against the
 same thread id, and the kill path above ends that thread exactly as it does for
 any other ring-3 program.
 
+Phase U5 adds a second way into ring 3. A forked child is started by
+`kernel/arch/x86_64/user.S:thread_fork_enter`, which parks the copied parent
+frame and jumps to the `isr_return` label that `kernel/arch/x86_64/isr.S`
+exports just before its `popq %r15` - the same epilogue (`popq` r15 down to
+rax, `addq $16`, `iretq`) every interrupt return uses. A ring-3 fault taken by
+a forked child therefore arrives through the same IDT entry and the same
+`trap_classify()` decision as any other user fault, and the `TRAP_USER` path
+above kills only that child.
+
 ## IST stacks
 
 A fault that arrives while the CPU is on a broken stack cannot be reported on

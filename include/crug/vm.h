@@ -25,6 +25,10 @@
 #define USER_TOP  0x0000010000000000ull
 #define USER_PAGE CRUG_PAGE_SIZE
 
+/* vm_space_clone() refuses to copy more than this many user pages (phase U5):
+   a fork must be bounded so a runaway child cannot exhaust the allocator. */
+#define VM_SPACE_FORK_MAX_PAGES 256u
+
 static inline u64 vm_pml4_index(u64 va) { return (va >> 39) & 0x1ffu; }
 static inline u64 vm_pdpt_index(u64 va) { return (va >> 30) & 0x1ffu; }
 static inline u64 vm_pd_index(u64 va)   { return (va >> 21) & 0x1ffu; }
@@ -59,6 +63,11 @@ void vm_space_set_kernel_root(u64 *root);
 int vm_space_create(vm_space *s);
 void vm_space_destroy(vm_space *s);
 int vm_space_map_user_pages(vm_space *s, u64 va, u64 pages, u64 flags);
+
+/* Copy every user leaf of SRC into DST, content and protection flags included
+   (phase U5: fork). DST is created here; on failure it is already destroyed and
+   the caller only frees the vm_space struct. */
+int vm_space_clone(vm_space *dst, const vm_space *src);
 void vm_space_unmap_user_pages(vm_space *s, u64 va, u64 pages);
 u64 vm_space_translate(const vm_space *s, u64 va);
 void vm_space_activate(vm_space *s);

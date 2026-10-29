@@ -16,6 +16,10 @@
  * SYS_WAIT for the child's exit code, then replaces itself with /bin/child
  * through SYS_EXEC.
  *
+ * `user.test=5` adds /bin/fork: the program calls SYS_FORK, so it continues
+ * in two address spaces, the child overwrites a private word and exits 3 and
+ * the parent must still read its own copy of that word.
+ *
  * `user.test=2` runs those three and then two concurrent instances of
  * /bin/iso, which write the SAME virtual address (0x8000030000, pinned by
  * user/iso.ld) and yield between write and check. The kernel asserts the two
@@ -34,7 +38,7 @@
 #define USER_ISO_WORD 0x0000008000030000ull
 
 /* 0 = off, 1 = U1 programs, 2 = U1 programs plus the isolation pair,
-   3 = plus the ring-3 shell, 4 = plus spawn/wait/exec. */
+   3 = plus the ring-3 shell, 4 = plus spawn/wait/exec, 5 = plus fork. */
 static int g_user_test;
 
 static int user_space(char c)
@@ -210,6 +214,32 @@ static int user_spawn(void)
     return 0;
 }
 
+/* Phase U5: /bin/fork duplicates itself, the child writes to a private word
+   and exits 3, and the parent has to observe both the exit code and its own
+   unchanged word, which only holds if the address space was copied. */
+static int user_fork(void)
+{
+    elf_exec_result res;
+    thread *t;
+    i64 code;
+
+    kprintf("CRUGOS: user fork test start\n");
+    memset(&res, 0, sizeof(res));
+    t = elf_exec_run("/bin/fork", &res);
+    if (!t) {
+        kprintf("CRUGOS: user selftest failed (/bin/fork did not start)\n");
+        return -1;
+    }
+    code = thread_join_code(t);
+    if (code != 0) {
+        kprintf("CRUGOS: user selftest failed (/bin/fork exited %lld, expected 0)\n",
+                code);
+        return -1;
+    }
+    kprintf("CRUGOS: user fork test ok (child exit 3, memory isolated)\n");
+    return 0;
+}
+
 int user_selftest(void)
 {
     if (!g_user_test)
@@ -227,6 +257,8 @@ int user_selftest(void)
     if (g_user_test >= 3 && user_shell() != 0)
         return -1;
     if (g_user_test >= 4 && user_spawn() != 0)
+        return -1;
+    if (g_user_test >= 5 && user_fork() != 0)
         return -1;
     kprintf("CRUGOS: user selftest ok (3 program(s), 1 fault(s))\n");
     return 0;

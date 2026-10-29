@@ -157,7 +157,7 @@ marker, exit status 33) still has to hold. The gate prints
 ok: iso hybrid UEFI boot (volume CRUGOS, ... fsck clean)
 run-qemu: booting build/x86_64/usb-stick.img ... usb build/x86_64/usb-stick.img, net none
 run-qemu: guest exited successfully (isa-debug-exit 0x10 -> status 33)
-ok: boot markers found, version 0.38.0 ... heap no user no isolated no ushell no spawn no storage none QEMU exit status 33
+ok: boot markers found, version 0.39.0 ... heap no user no isolated no ushell no spawn no fork no storage none QEMU exit status 33
   boot   : pmm=28698 us cpu=434 us vm=636 us traps=356 us timer=65318 us heap=325 us storage=111825 us sched=669 us syscall=139 us total=208405 us
   OK    iso boots from a USB stick (exit 33)
   OK    iso boots from a CD-ROM (exit 33)
@@ -173,7 +173,7 @@ CRUGOS: usb device 46f4:0001 on port 1 (speed 4)
 CRUGOS: usb device class 8 on port 1 (unsupported)
 CRUGOS: storage skipped (storage=none)
 CRUGOS: selftest ok
-CRUGOS: phase u4 boot ok
+CRUGOS: phase u5 boot ok
 ```
 
 Class 8 is mass storage: the firmware read the FAT image, the kernel's xHCI

@@ -1,6 +1,6 @@
 # Roadmap
 
-The specification defines 51 phases/gates. Phase 0 established the smallest
+The specification defines 52 phases/gates. Phase 0 established the smallest
 end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
 phase 1 makes the kernel own physical memory, page tables, exceptions and
 timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
@@ -971,10 +971,12 @@ phase U2 gave every ring-3 thread its own PML4, so two programs now run at the
 same time without sharing a window, phase U3 put a real shell in ring 3 with
 file descriptors and an exec-time `argv` block, and phase U4 let a user program
 start another one, wait for its exit code and replace its own image in place.
-What remains is `fork` (a child still gets an empty address space and inherits
-nothing), a populated environment, weak EFI entropy, and the AHCI timeout bounce
-reuse. Those are the prerequisites for a shell that builds process trees, and
-several of the remaining Mediums stay reachable until then.
+Phase U5 then added `fork`: `SYS_FORK` copies the caller's user window into a
+new address space, so a child owns its pages and neither side sees the other's
+writes. What remains is copy-on-write (fork still copies every page eagerly, up
+to 256 of them), a populated environment, weak EFI entropy, and the AHCI timeout
+bounce reuse. Those are the prerequisites for a shell that builds process trees,
+and several of the remaining Mediums stay reachable until then.
 
 ## Phase H2 - hardened kernel heap (done)
 
@@ -1402,6 +1404,59 @@ several of the remaining Mediums stay reachable until then.
   plus README, roadmap, versioning, build, boot, traps, hardening, iso, workbench,
   fuzzing and heap.
 - All 51 gates pass at `v0.38.0`.
+
+## Phase U5 - fork (done)
+
+- Phase U5 adds the second half of the process model: `SYS_FORK` copies the
+  caller's whole user window into a new address space and resumes the child
+  immediately after the `int 0x80`. The child owns its pages, so the parent's
+  later writes are invisible to it and its writes are invisible to the parent.
+  The kernel image layout, the `BootInfo` v1 handoff and every boot path are
+  unchanged.
+- `include/crug/syscall.h` adds `SYS_FORK` (24), so `SYS_MAX` becomes 25. The
+  call returns the child's tid in the parent and 0 in the child.
+- `include/crug/vm.h` and `kernel/mm/vm_space.c` add `vm_space_clone()`, capped
+  at `VM_SPACE_FORK_MAX_PAGES` (256 pages). The child PML4 inherits slot 0, the
+  shared supervisor identity map, and every present slot-1 leaf is copied into a
+  fresh frame with the parent's `PRESENT`/`WRITE`/`NX` bits. Any failure
+  destroys the half-built space, and a parent above the cap is refused rather
+  than partly cloned.
+- `kernel/core/thread.c` gains `thread_create_forked()`: it keeps a copy of
+  the parent's trap frame in `THREAD_FLAG_FORKED`/`fork_frame` with `rax = 0`,
+  so the child's first user instruction is the one after the `int 0x80`, and the
+  thread carries the child's own kernel stack and the cloned `vm_space`.
+- `kernel/arch/x86_64/user.S` gains `thread_fork_enter` (`cli`,
+  `thread_fork_resume`, `movq %rax, %rsp`, `jmp isr_return`), and
+  `kernel/arch/x86_64/isr.S` exports the `isr_return` label just before its
+  `popq %r15`. `thread_fork_resume()` parks the saved frame
+  `THREAD_FORK_FRAME_GAP` (1024) bytes below the child's kernel stack top,
+  restores `%ds`/`%es` to `SEG_USER_DS`, and installs the child's stack through
+  `cpu_set_kernel_stack()`; the trampoline then returns to CPL3 through the normal
+  interrupt epilogue.
+- `thread_create` calls `ufile_table_init`, so a forked child starts with an
+  empty descriptor table. An inherited descriptor cannot be shared safely, and
+  an empty table guarantees a buffered file write is never flushed twice.
+- `user/fork.c` is the ring-3 probe: the child writes `0x2222` into a volatile
+  word and exits 3; the parent waits for the tid, requires exit 3 and then must
+  still read its own `0x1111`, which proves the pages were copied instead of
+  aliased.
+- `kernel/core/user_test.c` understands `user.test=5`: the U1 trio, the U2
+  isolation pair, the U3 shell, the U4 spawn/exec probe and then `user_fork()`,
+  which joins `/bin/fork` and requires exit 3. `scripts/mkdisk.sh` now installs
+  eight programs.
+- `make test-user5` is the 52nd gate: it rebuilds the disk with all eight
+  programs, boots with `user.test=5` under `FORK_RUN_TIMEOUT_SEC` (240 s), and
+  passes boot-check the new final `EXPECT_FORK` argument (`argv[31]`, guard
+  `tuple(range(3, 33))`) along with the four earlier `EXPECT_*` user flags, so
+  the line reports `user yes isolated yes ushell yes spawn yes fork yes`. It then
+  runs the plain check-disk pass.
+- `make test-host` reports 3723 checks; the kernel is 276616 B (270 KiB) on disk
+  and 846206 B (826 KiB) loaded (`.text` 194310 B, `.rodata` 29248 B, `.bss`
+  622592 B), inside the 1 MiB stretch and 2 MiB hard budgets.
+- docs: `docs/userspace.md` (fork, the clone cap, the trampoline and the empty
+  descriptor table) plus README, roadmap, versioning, build, boot, traps,
+  hardening, iso, workbench, fuzzing and heap.
+- All 52 gates pass at `v0.39.0`.
 
 ## Bootable media - hybrid UEFI ISO (done, `v0.23.1`)
 

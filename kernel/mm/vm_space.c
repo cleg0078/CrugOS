@@ -226,6 +226,81 @@ void vm_space_unmap_user_pages(vm_space *s, u64 va, u64 pages)
     }
 }
 
+int vm_space_clone(vm_space *dst, const vm_space *src)
+{
+    u64 *pdpt;
+    u64 *pd;
+    u64 *pt;
+    u64 i;
+    u64 j;
+    u64 k;
+    u64 entry;
+
+    if (!dst || !src || !src->pml4)
+        return -1;
+    if (src->user_pages > VM_SPACE_FORK_MAX_PAGES)
+        return -1;
+    if (vm_space_create(dst) != 0)
+        return -1;
+    entry = src->pml4[SPACE_SLOT];
+    if (!(entry & VM_PRESENT))
+        return 0;
+    if (entry & VM_HUGE) {
+        vm_space_destroy(dst);
+        return -1;
+    }
+    pdpt = (u64 *)pmm_phys_to_virt(entry & VM_ADDR_MASK);
+    for (i = 0; i < 512; i++) {
+        u64 e1 = pdpt[i];
+
+        if (!(e1 & VM_PRESENT))
+            continue;
+        if (e1 & VM_HUGE)
+            goto fail;
+        pd = (u64 *)pmm_phys_to_virt(e1 & VM_ADDR_MASK);
+        for (j = 0; j < 512; j++) {
+            u64 e2 = pd[j];
+
+            if (!(e2 & VM_PRESENT))
+                continue;
+            if (e2 & VM_HUGE)
+                goto fail;
+            pt = (u64 *)pmm_phys_to_virt(e2 & VM_ADDR_MASK);
+            for (k = 0; k < 512; k++) {
+                u64 e3 = pt[k];
+                u64 va;
+                u64 dst_pa;
+
+                if (!(e3 & VM_PRESENT))
+                    continue;
+                va = ((u64)SPACE_SLOT << 39) | (i << 30) | (j << 21) | (k << 12);
+                /* Keep only the protection bits a user leaf may carry; the
+                   allocator gives DST its own frame. */
+                /* Keep PRESENT: vm_space_map_user_pages() only ORs in the
+                   protection bits the caller passes and VM_USER, so a
+                   PRESENT-less flag word would map an invisible leaf. */
+                if (vm_space_map_user_pages(dst, va, 1,
+                                            e3 & (VM_PRESENT | VM_WRITE | VM_NX)) != 0)
+                    goto fail;
+                dst_pa = vm_space_translate(dst, va);
+                if (dst_pa == 0)
+                    goto fail;
+                memcpy(pmm_phys_to_virt(dst_pa),
+                       pmm_phys_to_virt(e3 & VM_ADDR_MASK), CRUG_PAGE_SIZE);
+            }
+        }
+    }
+    if (dst->user_pages != src->user_pages) {
+        vm_space_destroy(dst);
+        return -1;
+    }
+    return 0;
+
+fail:
+    vm_space_destroy(dst);
+    return -1;
+}
+
 u64 vm_space_translate(const vm_space *s, u64 va)
 {
     u64 *pte = space_find_pte(s, va);

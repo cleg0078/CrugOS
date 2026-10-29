@@ -5,6 +5,7 @@
 #include <crug/types.h>
 #include <crug/compiler.h>
 #include <crug/vm.h>
+#include <crug/trap.h>
 
 typedef enum thread_state {
     THREAD_RUNNING = 0,
@@ -31,6 +32,13 @@ typedef enum sched_class {
 
 /* A thread that enters ring 3 owns a private address space (phase U2). */
 #define THREAD_FLAG_USER 1u
+/* Set on a child produced by SYS_FORK (phase U5): it resumes through
+   thread_fork_enter() and its first instruction is the parent's syscall. */
+#define THREAD_FLAG_FORKED 2u
+
+/* Where thread_fork_resume() parks the saved frame: a fixed gap below the
+   top of the thread's kernel stack, clear of the trampoline's own use. */
+#define THREAD_FORK_FRAME_GAP 1024u
 
 typedef struct wait_queue {
     struct thread *head;
@@ -65,6 +73,9 @@ typedef struct thread {
     u32 parent_id;
     /* Private address space; 0 for every kernel thread. */
     vm_space *space;
+    /* Parent's ring-3 frame, saved by SYS_FORK and replayed in the child
+       (phase U5). Only meaningful with THREAD_FLAG_FORKED. */
+    trap_frame fork_frame;
     /* Open files: fds 3..10 index this table (phase U3). */
     ufile_table files;
 } thread;
@@ -75,6 +86,13 @@ thread *thread_create(const char *name, void (*entry)(void *), void *arg,
                       sched_class cls);
 thread *thread_create_user(const char *name, u64 entry, u64 user_rsp,
                            vm_space *space, sched_class cls);
+/* Phase U5: a child that will iretq back into the parent's instruction after
+   int 0x80 with rax == 0. SPACE becomes the child's own address space. */
+thread *thread_create_forked(const char *name, vm_space *space,
+                            const trap_frame *frame, u32 parent_id);
+/* Called from kernel/arch/x86_64/user.S on a forked child's kernel stack;
+   returns the trap frame to iretq through. */
+u64 thread_fork_resume(void);
 int thread_join(thread *t);
 i64 thread_join_code(thread *t);
 void thread_exit(void) CRUG_NORETURN;

@@ -788,6 +788,43 @@ void syscall_dispatch(trap_frame *frame)
         kprintf("CRUGOS: user exec %s (tid %u)\n", pathbuf, cur->id);
         return;
     }
+    case SYS_FORK: {
+        thread *cur = sched_current();
+        vm_space *space;
+        trap_frame child_frame;
+        thread *child;
+
+        /* Fork is a user-image operation: the child resumes at CPL3 at the
+           instruction after this int 0x80, so a CPL0 caller has no frame to
+           copy and no address space to duplicate. */
+        if (!user || !cur || (cur->flags & THREAD_FLAG_USER) == 0 ||
+            !cur->space) {
+            ret = SYS_EINVAL;
+            break;
+        }
+        space = (vm_space *)kmalloc(sizeof(vm_space));
+        if (!space) {
+            ret = SYS_ENOMEM;
+            break;
+        }
+        if (vm_space_clone(space, cur->space) != 0) {
+            kfree(space);
+            ret = SYS_ENOMEM;
+            break;
+        }
+        child_frame = *frame;
+        child = thread_create_forked(cur->name, space, &child_frame, cur->id);
+        if (!child) {
+            vm_space_destroy(space);
+            kfree(space);
+            ret = SYS_ENOMEM;
+            break;
+        }
+        ret = (i64)child->id;
+        kprintf("CRUGOS: user fork tid %u -> %u (%u page(s))\n",
+                cur->id, child->id, space->user_pages);
+        break;
+    }
     case SYS_WRITE:
         if (frame->rdi >= UFILE_FD_BASE)
             ret = syscall_file_write(frame, user);
