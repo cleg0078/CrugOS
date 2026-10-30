@@ -165,6 +165,43 @@ static void test_dhcp_parse(void)
     CHECK(net_dhcp_parse(packet, len, xid, NULL) == 0);
 }
 
+static void test_udp_checksum(void)
+{
+    /* 10.0.2.15:53000 -> 10.0.2.2:53, one 5-byte DNS-shaped payload. */
+    u8 dat[13];
+    u16 sum;
+
+    net_put16(dat + 0, 53000);
+    net_put16(dat + 2, 53);
+    net_put16(dat + 4, 13);
+    net_put16(dat + 6, 0u);
+    dat[8] = 0x12u;
+    dat[9] = 0x34u;
+    dat[10] = 0x01u;
+    dat[11] = 0x00u;
+    dat[12] = 0x01u;
+
+    sum = net_udp_checksum(0x0A00020Fu, 0x0A000202u, dat, sizeof(dat));
+    CHECK(sum != 0u);
+    CHECK(net_udp_checksum_ok(0x0A00020Fu, 0x0A000202u, dat, sizeof(dat)) == 0);
+
+    net_put16(dat + 6, sum);
+    CHECK(net_udp_checksum_ok(0x0A00020Fu, 0x0A000202u, dat, sizeof(dat)) == 1);
+
+    /* A flipped payload byte must fail verification. */
+    dat[8] ^= 0xFFu;
+    CHECK(net_udp_checksum_ok(0x0A00020Fu, 0x0A000202u, dat, sizeof(dat)) == 0);
+    dat[8] ^= 0xFFu;
+
+    /* The pseudo header binds the datagram to its endpoints, so a reply from
+       another address cannot reuse the checksum. */
+    CHECK(net_udp_checksum_ok(0x0A000203u, 0x0A000202u, dat, sizeof(dat)) == 0);
+
+    /* A zero checksum is legal for IPv4 UDP and must verify as present-zero,
+       which udp_receive treats as "sender supplied none". */
+    net_put16(dat + 6, 0u);
+    CHECK(net_udp_checksum_ok(0x0A00020Fu, 0x0A000202u, dat, sizeof(dat)) == 0);
+}
 static void test_tcp_checksum(void)
 {
     /* 10.0.2.15:49152 -> 10.0.2.2:4444, SYN, 6-byte payload "crugos". */
@@ -209,4 +246,5 @@ void test_net_functions(void)
     test_checksum();
     test_dhcp_parse();
     test_tcp_checksum();
+    test_udp_checksum();
 }

@@ -56,6 +56,9 @@
 #   make test-gpu-cursor-sw  show the software sprite inside the GPU scanout (the demo pointer)
 #   make test-pkg    install, update and remove a signed package
 #   make test-caps   launch an installed bundle and prove its capability wall
+#   make test-dns-hostile  reject forged DNS replies and deep compression chains
+#   make test-trap-vector  kill only the program that issues a DPL-3 vector 4
+#   make test-net-synflood  reap half-open SYNs and answer RST on overflow
 #   make crypt-disk  build the AES-256-XTS crypt test disk
 #   make test-crypt  boot from an encrypted root and verify the disk
 #   make test-crypt-recovery  unlock the encrypted root with the recovery keyslot
@@ -266,6 +269,10 @@ HEAP_RUN_TIMEOUT_SEC ?= 240
 # Trap gate (make test-trap): how long one crafted fault may boot.
 TRAP_TIMEOUT_SEC ?= 60
 
+# Security gates (phase S1): each one boots the unmodified kernel with a
+# selftest token, so the only knob is how long that boot may take.
+S1_RUN_TIMEOUT_SEC ?= 240
+
 # Userspace gate (make test-user): how long the ring-3 selftest may take.
 USER_RUN_TIMEOUT_SEC ?= 240
 
@@ -429,7 +436,7 @@ KERNEL_DEPS := $(KERNEL_OBJECTS:.o=.d)
 
 USER_ELF_DIR := $(BUILD)/user
 USER_OBJ := $(BUILD)/user/obj
-USER_PROGRAMS := hello badptr fault iso sh spawn child fork forkbig captest
+USER_PROGRAMS := hello badptr fault iso sh spawn child fork forkbig trap4 captest
 # Phase 7A: these two are installed as .app bundle payloads, not in /bin.
 APP_PROGRAMS := app_hello app_orbit
 USER_ELF := $(patsubst %,$(USER_ELF_DIR)/%,$(USER_PROGRAMS) $(APP_PROGRAMS))
@@ -479,6 +486,7 @@ HOST_MKPKG_SOURCES := tools/mkpkg.c kernel/crypto/ed25519.c \
         test-workbench-pkg test-app-bundles test-gpu test-gpu-usb \
         test-gpu-edid test-gpu-cursor test-gpu-cursor-shape \
         test-gpu-cursor-sw test-pkg \
+        test-dns-hostile test-trap-vector test-net-synflood \
         test-caps packages mkpkg \
         iso check-iso test-iso usb \
         crash-disk \
@@ -1286,6 +1294,41 @@ test-hardening: esp
 		--exit-code $(abspath $(QEMU_EXIT)) \
 		--timeout $(HARDEN_TIMEOUT_SEC)
 
+# Security gates (phase S1).  Every one boots the stock kernel with a selftest
+# token and proves a finding from specs/fix-p2 with serial evidence only, so no
+# input has to be scripted from the host.
+test-dns-hostile: esp
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(MAKE) --no-print-directory disk
+	$(Q)$(MAKE) --no-print-directory run TIMEOUT_SEC=$(S1_RUN_TIMEOUT_SEC) \
+		CMDLINE_EXTRA="dns.test=hostile"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no --expect-dnshostile=yes
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
+test-trap-vector: EXPECT_USER := yes
+test-trap-vector: EXPECT_USERS := yes
+test-trap-vector: EXPECT_USHELL := yes
+test-trap-vector: EXPECT_SPAWN := yes
+test-trap-vector: EXPECT_FORK := yes
+test-trap-vector: EXPECT_FORKBIG := yes
+test-trap-vector: esp user
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(MAKE) --no-print-directory disk
+	$(Q)$(MAKE) --no-print-directory run TIMEOUT_SEC=$(S1_RUN_TIMEOUT_SEC) \
+		CMDLINE_EXTRA="user.test=8"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION \
+		$(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no no \
+		$(EXPECT_USER) $(EXPECT_USERS) $(EXPECT_USHELL) $(EXPECT_SPAWN) \
+	$(EXPECT_FORK) $(EXPECT_FORKBIG) --expect-trapvector=yes
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
+test-net-synflood: esp
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(MAKE) --no-print-directory disk
+	$(Q)$(MAKE) --no-print-directory run TIMEOUT_SEC=$(S1_RUN_TIMEOUT_SEC) \
+		CMDLINE_EXTRA="net.synflood=1"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no --expect-synflood=yes
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 # Heap gate: boot with heap.stress= and heap.guard=1 so the kernel churns the
 # allocator and then plants three corruptions (a forged free-list link, a zeroed
 # slab cookie and a zeroed large-block cookie) that heap_check() must catch.
@@ -1562,6 +1605,7 @@ options:
 	@printf '  %-16s %s\n' HEAP_STRESS_OPS "$(HEAP_STRESS_OPS)"
 	@printf '  %-16s %s\n' HEAP_RUN_TIMEOUT_SEC "$(HEAP_RUN_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' TRAP_TIMEOUT_SEC "$(TRAP_TIMEOUT_SEC) (seconds)"
+	@printf '  %-16s %s\n' S1_RUN_TIMEOUT_SEC "$(S1_RUN_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' EXPECT_USER "$(EXPECT_USER)"
 	@printf '  %-16s %s\n' USER_RUN_TIMEOUT_SEC "$(USER_RUN_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' EXPECT_USERS "$(EXPECT_USERS)"

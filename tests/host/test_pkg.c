@@ -683,6 +683,43 @@ static void test_pkg_info(void)
     CHECK_STR(out, "captest|CapTest|1.0.0|Crug Labs|none|bin/x86_64/captest");
 }
 
+/* ---- the package id as a path component ------------------------------- */
+
+static void test_pkg_ids(void)
+{
+    char long_id[PKG_ID_MAX + 4u];
+    usize i;
+
+    CHECK(pkg_id_valid("captest"));
+    CHECK(pkg_id_valid("a.b"));
+    CHECK(pkg_id_valid("a_b-c"));
+    CHECK(pkg_id_valid("Caps1"));
+    /* An empty id, or one that names the parent directory, would address
+       /Applications itself or a sibling of it. */
+    CHECK(!pkg_id_valid(0));
+    CHECK(!pkg_id_valid(""));
+    CHECK(!pkg_id_valid("."));
+    CHECK(!pkg_id_valid(".."));
+    CHECK(!pkg_id_valid("a..b"));
+    CHECK(!pkg_id_valid(".hidden"));
+    CHECK(!pkg_id_valid("trailing."));
+    CHECK(!pkg_id_valid("-leading"));
+    CHECK(!pkg_id_valid("trailing-"));
+    CHECK(!pkg_id_valid("a/b"));
+    CHECK(!pkg_id_valid("a b"));
+    CHECK(!pkg_id_valid("a\tb"));
+    /* The length limit is exclusive of PKG_ID_MAX, as pkg_join assumes. */
+    for (i = 0u; i < PKG_ID_MAX + 3u; i++) {
+        long_id[i] = 'a';
+    }
+    long_id[PKG_ID_MAX + 3u] = '\0';
+    long_id[PKG_ID_MAX - 1u] = '\0';
+    CHECK(pkg_id_valid(long_id));
+    long_id[PKG_ID_MAX - 1u] = 'a';
+    long_id[PKG_ID_MAX] = '\0';
+    CHECK(!pkg_id_valid(long_id));
+}
+
 static void test_pkg_reasons(void)
 {
     CHECK(pkg_reason_text("magic") != 0);
@@ -711,5 +748,6 @@ void test_pkg_functions(void)
     RUN(test_pkg_header);
     RUN(test_pkg_container);
     RUN(test_pkg_info);
+    RUN(test_pkg_ids);
     RUN(test_pkg_reasons);
 }

@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 8B EDID and the hardware cursor (`v0.47.1`)
+## Status: phase S1 security pass 1 (`v0.48.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -103,7 +103,10 @@ Phase 8B parses the display's EDID and prefers the monitor's own timing when
 VNC after the first cut of the cursor commands turned out to be mislaid on the
 wire. The default since `v0.47.1` is `gpu.cursor=sw`, the guest's own sprite
 painted into the scanout, which gate 65 (`make test-gpu-cursor-sw`) proves is
-real scanout content.
+real scanout content. Phase S1 is the first security pass: it closes one
+Critical and four High findings from a review of the ring-3 and network
+surface, adds the three gates that prove them (66, 67 and 68) and writes down
+the rest of the list it deliberately leaves for S2.
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -1690,6 +1693,60 @@ of phase 8 is both unimplemented and untestable here.
 See [docs/gpu.md](docs/gpu.md) for the EDID parser rules, the mode priority,
 the second virtqueue and the failure lines.
 
+Phase S1 is a fix pass, not a feature. The review in `specs/fix-p2/` (a tree
+at `a1a99df`) raised 1 Critical, 10 High, 16 Medium, 14 Low and 9 Info; S1
+closes the Critical, the four Highs a ring-3 program or a remote packet can
+reach, and the cheap Mediums, and leaves the rest written down for S2. The
+fixes, each with its own opt-in self-test and boot marker:
+
+- **DNS decompression is iterative.** `dns_decode_name()` in `kernel/net/dns.c`
+  replaced the recursive walk with one loop, a single `DNS_MAX_HOPS` budget for
+  the whole name and a rule that every pointer moves strictly backwards, so a
+  cycle cannot exist; 12 links decode, 1200 are rejected without touching the
+  16 KiB kernel stack (`dns.test=hostile`, gate 66).
+- **DNS replies are checked.** An answer is accepted only from the server and
+  port the query went to and only on our local port with a matching id; ids
+  come from an xorshift64 stream seeded from bootloader entropy and the TSC,
+  and two local ports replace the old fixed 53000.
+- **TCP exhaustion is survivable.** Four unsolicited SYNs could fill the
+  4-entry table; a failed allocation now answers RST|ACK and `tcp_reap_stale()`
+  releases half-open sockets older than 10 s from `tcp_socket_new()`, while
+  `tcp_rst_valid()` keeps an off-path RST from killing a healthy connection
+  (`net.synflood=1`, gate 68).
+- **Vector 4 no longer panics.** `#OF` from CPL3 was classified handled but the
+  dispatcher had no handled branch, and only vectors 0-32 and 128 had IDT
+  gates; gates 33-255 now share an `isr_ignore` stub, `trap_dispatch()` returns
+  for `TRAP_HANDLED`, and `/bin/trap4` runs `int $4` from ring 3 to prove the
+  thread dies and the system lives (`user.test=8`, gate 67).
+- **Package ids are validated.** `pkg_id_valid()` rejects empty ids, `.`, `..`
+  and path separators before the installer touches the filesystem, so an id
+  can no longer redirect the staging directory.
+- **Three Mediums:** UDP datagrams are accepted only for our address or
+  broadcast and a non-zero checksum is verified (zero stays legal), the
+  virtio-net driver clamps the device's `used_len` to its buffer, and
+  `msgport_recv()` returns the copied byte count instead of the full length.
+- The three gates are `make test-dns-hostile` (66), `make test-trap-vector`
+  (67) and `make test-net-synflood` (68), sharing `S1_RUN_TIMEOUT_SEC` (240);
+  their markers are forbidden in every other gate, so no ordinary boot runs
+  them.
+- `tests/host/test_pkg.c` covers the id validator, and the UDP checksum
+  helpers are shared by the transmit and receive paths in `net_util.c`.
+- One finding was rejected: `GET_EDID` reads `size` at offset 24 because
+  `struct virtio_gpu_ctrl_hdr` is 24 bytes, not 28; the reference is
+  `/usr/include/linux/virtio_gpu.h` lines 354-359.
+- Deferred to S2, with reasons: no network locking (`net_poll()` is not
+  re-entrant), ARP slot eviction and TCP ACK re-entry, message-port lifetime
+  (`SYS_HANDLE_CLOSE` never destroys a port, no teardown at thread exit), the
+  single global handle table with no rights checks, and the lost-wakeup /
+  use-after-free pair on a closed port.
+- `make test-host` now reports 8552 checks, 0 failure(s); `make size` reports a
+  357592 B (349 KiB) kernel file and a 1010298 B (986 KiB) load image
+  (`.text` 254310 B, `.rodata` 39072 B, `.data` 116 B, `.bss` 716800 B), and
+  all 68 gates pass.
+
+See [docs/security.md](docs/security.md) for the programme, the per-fix
+evidence, the rejected finding and the deferred list.
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -1698,9 +1755,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.47.1 (phase 8b) -- Amiga-inspired microkernel bring-up
+CrugOS 0.48.0 (phase s1) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.47.1
+CRUGOS: version 0.48.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -1749,7 +1806,7 @@ CRUGOS: tcp http served (72 bytes)
 CRUGOS: net selftest ok
 CRUGOS: gfx ready (1024x768, cursor at 512,384)
 CRUGOS: selftest ok
-kernel : 0x0000000000100000 size=344 KiB
+kernel : 0x0000000000100000 size=349 KiB
 boot   : cpu=0 acpi_rsdp=0x1f77e000 fdt=0x0 initrd=0x0
 memory : 36 regions, usable 474080 KiB (462 MiB)
 pmm    : total=118520 free=118462 bitmap=131072 B
@@ -1761,7 +1818,7 @@ heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
 boot   : pmm=27601 us cpu=408 us vm=624 us traps=333 us timer=65376 us heap=507 us storage=95213 us sched=5952 us syscall=107 us total=196126 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase 8b boot ok
+CRUGOS: phase s1 boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -1999,6 +2056,9 @@ make test-gpu-edid    # take the scanout mode from the display's EDID
 make test-gpu-cursor  # drive the hardware cursor plane and count its updates
 make test-gpu-cursor-shape  # prove the hardware cursor's pixels over VNC
 make test-gpu-cursor-sw  # prove the guest's software sprite is in the scanout
+make test-dns-hostile   # decode a hostile DNS compression chain and refuse forged replies
+make test-trap-vector   # execute int $4 from ring 3 and kill only the thread
+make test-net-synflood  # fill the TCP table and prove the reaper frees it
 make test-hardening  # craft hostile superblock/inode/crypt images and boot them
 make test-heap   # corrupt the kernel heap and prove the integrity checker catches it
 make test-trap   # inject eight crafted faults and check the report, IST and panic
@@ -2064,6 +2124,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `MKPKG`, `PKG_DATA_DIR`, `PKG_SEED`, `PKG_BAD_SEED`, `PKG_RUN_TIMEOUT_SEC`,
 `CAPS_RUN_TIMEOUT_SEC`, `HARDEN_TIMEOUT_SEC`,
 `HEAP_STRESS_OPS`, `HEAP_RUN_TIMEOUT_SEC`, `TRAP_TIMEOUT_SEC`, `FUZZ_CASES`,
+`S1_RUN_TIMEOUT_SEC`,
 `FUZZ_CRYPT_CASES`, `FUZZ_SEED`, `FUZZ_TIMEOUT_SEC`, `USER_RUN_TIMEOUT_SEC`,
 `USER2_RUN_TIMEOUT_SEC`, `SHELL_RUN_TIMEOUT_SEC`, `SPAWN_RUN_TIMEOUT_SEC`,
 `FORK_RUN_TIMEOUT_SEC`, `FORKBIG_RUN_TIMEOUT_SEC`, `APP_RUN_TIMEOUT_SEC`,
@@ -2111,7 +2172,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `tools/` | host-side development tools (`gen-font.py`, `mkcrypt.c`, `gen-crc32c.py`) |
 | `user/` | ring-3 programs and their freestanding runtime (`user.ld`, `start.S`, `lib.h`) |
 | `docs/` | [build](docs/build.md), [boot](docs/boot.md), [storage](docs/storage.md), [checksums](docs/checksums.md), [crypto](docs/crypto.md), [input](docs/input.md), [network](docs/network.md),
-[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [USB/xHCI](docs/usb.md), [audio](docs/audio.md), [graphics](docs/gfx.md), [virtio-gpu](docs/gpu.md), [Workbench](docs/workbench.md), [application bundles](docs/apps.md), [signed packages](docs/packages.md), [bootable ISO](docs/iso.md), [kernel heap](docs/heap.md), [trap policy](docs/traps.md), [mount-path fuzzing](docs/fuzzing.md), [ring 3](docs/userspace.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
+[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [USB/xHCI](docs/usb.md), [audio](docs/audio.md), [graphics](docs/gfx.md), [virtio-gpu](docs/gpu.md), [Workbench](docs/workbench.md), [application bundles](docs/apps.md), [signed packages](docs/packages.md), [bootable ISO](docs/iso.md), [kernel heap](docs/heap.md), [trap policy](docs/traps.md), [mount-path fuzzing](docs/fuzzing.md), [ring 3](docs/userspace.md), [security](docs/security.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
 
 ## Versioning
 

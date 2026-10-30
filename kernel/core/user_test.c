@@ -32,6 +32,9 @@
  * reads one bundle's info record and launches Orbit.app through the
  * SYS_APP_* syscalls, then exits 9.
  *
+ * `user.test=8` adds /bin/trap4, which executes `int $4` from CPL3: the
+ * DPL-3 vector-4 gate must kill only that program (phase S1, report H8).
+ *
  * Every default boot leaves the token out, so nothing here runs and no marker
  * is printed.  See docs/userspace.md. */
 #include <crug/exec.h>
@@ -45,7 +48,8 @@
 
 /* 0 = off, 1 = U1 programs, 2 = U1 programs plus the isolation pair,
    3 = plus the ring-3 shell, 4 = plus spawn/wait/exec, 5 = plus fork,
-   6 = plus a 300-page copy-on-write fork, 7 = plus the .app registry. */
+   6 = plus a 300-page copy-on-write fork, 7 = plus the .app registry,
+   8 = plus the ring-3 vector-4 probe. */
 static int g_user_test;
 
 static int user_space(char c)
@@ -301,6 +305,14 @@ static int user_app(void)
     return 0;
 }
 
+/* Phase S1 (report H8): `int $4` from ring 3 takes the vector-4 gate.  The
+   frame is a user frame, so the kernel must reap it as -4 and keep running. */
+static int user_trap4(void)
+{
+    kprintf("CRUGOS: user trap4 test start\n");
+    return user_run_one("/bin/trap4", -4);
+}
+
 int user_selftest(void)
 {
     if (!g_user_test)
@@ -324,6 +336,8 @@ int user_selftest(void)
     if (g_user_test >= 6 && user_forkbig() != 0)
         return -1;
     if (g_user_test >= 7 && user_app() != 0)
+        return -1;
+    if (g_user_test >= 8 && user_trap4() != 0)
         return -1;
     kprintf("CRUGOS: user selftest ok (3 program(s), 1 fault(s))\n");
     return 0;

@@ -28,10 +28,16 @@
 #define NET_TCP_MSS 1400u
 #define NET_TCP_DEFAULT_HTTP_PORT 8080u
 #define NET_TCP_RETRIES 5u
+/* Phase S1: a half-open connection older than this is reaped, and a SYN that
+   cannot be admitted is answered with RST|ACK instead of being dropped. */
+#define NET_TCP_SYN_TIMEOUT_NS 10000000000ull
 
 /* DNS (phase 4D): a caching stub resolver over UDP with a TCP fallback. */
 #define NET_DNS_PORT 53u
 #define NET_DNS_LOCAL_PORT 53000u
+/* Phase S1: two local ports, chosen per query, so an off-path attacker has
+ * no stable port to aim at. */
+#define NET_DNS_LOCAL_PORTS 2u
 #define NET_DNS_MSG_MAX 512u
 #define NET_DNS_NAME_MAX 128u
 #define NET_DNS_CACHE 8u
@@ -82,6 +88,7 @@ struct net_tcp_socket {
     u32 accepted;
     u32 used;
     u32 peer_closed;
+    u64 state_ns;             /* when the current state was entered */
     u32 rx_head;
     u32 rx_count;
     u8 rx[NET_TCP_RX_BYTES];
@@ -170,6 +177,8 @@ int net_dhcp_parse(const u8 *packet, usize len, u32 xid,
                    struct net_dhcp_lease *out);
 u16 net_tcp_checksum(u32 src, u32 dst, const u8 *seg, usize len);
 int net_tcp_checksum_ok(u32 src, u32 dst, const u8 *seg, usize len);
+u16 net_udp_checksum(u32 src, u32 dst, const u8 *dat, usize len);
+int net_udp_checksum_ok(u32 src, u32 dst, const u8 *dat, usize len);
 
 /* TCP transport, kernel/net/tcp.c. */
 void tcp_init(void);
@@ -177,6 +186,9 @@ void tcp_cmdline(const boot_info *bi);
 void tcp_receive_segment(u32 src_ip, u32 dst_ip, const u8 *seg, usize len);
 struct net_tcp_socket *tcp_socket_new(void);
 void tcp_socket_release(struct net_tcp_socket *s);
+int tcp_reap_stale(u64 now_ns);
+int tcp_synflood_requested(void);
+int tcp_synflood_selftest(void);
 int tcp_connect(struct net_tcp_socket *s, u32 ip, u16 port, u32 timeout_ms);
 int tcp_listen(struct net_tcp_socket *s, u16 port);
 struct net_tcp_socket *tcp_accept(struct net_tcp_socket *s, u32 timeout_ms);
@@ -198,6 +210,8 @@ void dns_cache_flush(void);
 int net_dns_resolve(const char *name, struct net_dns_answer *answer, u32 timeout_ms);
 const char *net_dns_transport(void);
 int dns_selftest(void);
+int dns_hostile_requested(void);
+int dns_hostile_selftest(void);
 usize dns_build_query(const char *name, u16 id, u8 *out, usize cap);
 int dns_parse_response(const u8 *msg, usize len, u16 id,
                        struct net_dns_answer *answer, char *cname, usize cname_cap);

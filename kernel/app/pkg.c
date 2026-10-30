@@ -1089,6 +1089,10 @@ int pkg_install(const char *path, const char **reason)
             goto reject;
         }
     }
+    if (!pkg_id_valid(h.id)) {
+        *reason = "id";
+        goto reject;
+    }
     if (pkg_join(target, sizeof(target), APP_DIR, h.id) != 0) {
         *reason = "id";
         goto reject;
@@ -1287,7 +1291,13 @@ done:
     return *reason ? -1 : 0;
 }
 
-static int pkg_id_ok(const char *id)
+/* Validate a package id before it becomes a path component.  The id is
+   signed, so a hostile package can choose any value the signer allowed;
+   '.' or '..' would make /Applications/<id>.app address an existing
+   directory, so a legal id is exactly one ordinary name: letters, digits,
+   '.', '_' and '-', not starting or ending with a dot or a dash, and never
+   containing an empty component. */
+int pkg_id_valid(const char *id)
 {
     usize i;
     usize len;
@@ -1299,6 +1309,10 @@ static int pkg_id_ok(const char *id)
     if (len >= PKG_ID_MAX) {
         return 0;
     }
+    if (id[0] == '.' || id[0] == '-' || id[len - 1u] == '.' ||
+        id[len - 1u] == '-') {
+        return 0;
+    }
     for (i = 0u; i < len; i++) {
         char c = id[i];
 
@@ -1307,6 +1321,11 @@ static int pkg_id_ok(const char *id)
             continue;
         }
         return 0;
+    }
+    for (i = 0u; i + 1u < len; i++) {
+        if (id[i] == '.' && id[i + 1u] == '.') {
+            return 0;
+        }
     }
     return 1;
 }
@@ -1327,7 +1346,7 @@ int pkg_remove(const char *id, const char **reason)
         return -1;
     }
     *reason = 0;
-    if (!fs || !id || !pkg_id_ok(id)) {
+    if (!fs || !id || !pkg_id_valid(id)) {
         *reason = "id";
         goto reject;
     }

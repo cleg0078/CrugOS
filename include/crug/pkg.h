@@ -158,6 +158,13 @@ int pkg_install(const char *path, const char **reason);
    ('not-installed', 'id', 'read-only', 'io'). */
 int pkg_remove(const char *id, const char **reason);
 
+/* Validate a package id: 1..PKG_ID_MAX-1 characters of [A-Za-z0-9._-] with
+   no leading or trailing dot or dash and no empty or '..' component, so an
+   id can never build a path outside /Applications/<id>.app.  A signed
+   package whose header id is '..' must be refused before any path is
+   built. */
+int pkg_id_valid(const char *id);
+
 /* Human readable name of a reason string, for the installer window. */
 const char *pkg_reason_text(const char *reason);
 

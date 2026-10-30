@@ -124,6 +124,11 @@ static void vnet_poll(struct net_device *nd)
 
         __sync_synchronize();
         v->rx_last_used++;
+        /* Phase S1: the device writes used_len, so it is untrusted input.
+           Clamp it to the buffer we actually posted before subtracting the
+           virtio-net header; otherwise a lying device reads past the ring. */
+        if (used_len > VIRTIO_NET_BUF_SIZE)
+            used_len = VIRTIO_NET_BUF_SIZE;
         if (id < VIRTIO_NET_RX_BUFFERS && used_len > VIRTIO_NET_HDR) {
             net_receive(nd, v->rx_bufs + (u64)id * VIRTIO_NET_BUF_SIZE + VIRTIO_NET_HDR,
                         (usize)(used_len - VIRTIO_NET_HDR));

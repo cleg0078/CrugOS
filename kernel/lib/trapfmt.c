@@ -107,7 +107,7 @@ enum trap_class trap_classify(u64 vector, u64 cs)
     if (vector == 3)
         return TRAP_HANDLED;
     if (vector == 4)
-        return user ? TRAP_HANDLED : TRAP_FATAL;
+        return user ? TRAP_USER : TRAP_FATAL;
     if (trap_user_killable(vector))
         return user ? TRAP_USER : TRAP_FATAL;
     return TRAP_FATAL;

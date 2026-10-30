@@ -121,9 +121,13 @@ live in `kernel/net/net_util.c` and are host-testable;
 - **TCP ingress.** Protocol 6 segments are handed to
   `tcp_receive_segment()` with the source and destination addresses the
   pseudo-header checksum needs; the transport owns the remainder.
-- **UDP.** Lengths are bounds-checked, the destination port selects one of four
-  handlers, and the source checksum is not verified. Transmit computes the
-  pseudo-header checksum and substitutes `0xFFFF` for a zero result.
+- **UDP.** Lengths are bounds-checked against the IP payload, the destination
+  port selects one of four handlers, and since phase S1 a datagram is only
+  accepted when its destination address is ours or the broadcast address and
+  its non-zero checksum verifies (`net_udp_checksum_ok` in
+  `kernel/net/net_util.c`); a zero checksum is legal per RFC 768 and accepted.
+  Transmit computes the pseudo-header checksum and substitutes `0xFFFF` for a
+  zero result.
 
 ## DHCP client
 
@@ -163,7 +167,10 @@ of receive ring per socket (`NET_TCP_RX_BYTES`), a 1400-byte segment limit
   (`net_tcp_checksum_ok`), matches the 4-tuple, handles RST, completes both
   handshakes, accepts in-order payload into the ring and acknowledges it, ACKs
   out-of-order payload without buffering it, and moves to `CLOSE_WAIT` or
-  `TIME_WAIT` on FIN.
+  `TIME_WAIT` on FIN. An RST is validated by `tcp_rst_valid()` before it may
+  close anything: in `SYN_SENT` its acknowledgement must equal `snd_nxt`, and
+  otherwise its sequence must land inside `[rcv_nxt, rcv_nxt +
+  max(rx_count, 1))`. A forged RST outside that window is ignored.
 - **Send.** `tcp_send()` splits the buffer into `NET_TCP_MSS` chunks and
   advances `snd_nxt` with each send (the peer's ACK must land inside
   `[snd_una, snd_nxt]`). Each chunk is retransmitted up to five times with a
@@ -178,13 +185,21 @@ of receive ring per socket (`NET_TCP_RX_BYTES`), a 1400-byte segment limit
 - **Listener.** `tcp_listen()` parks a socket in `LISTEN`; an incoming SYN
   allocates a child socket directly in `SYN_RECEIVED` and replies SYN+ACK, and
   `tcp_accept()` polls until such a child reaches `ESTABLISHED`, returning it
-  once.
-- **Command line.** `tcp_cmdline()` runs from `net_init()` and reads two
+  once. Phase S1 also closes the exhaustion case: when no socket is free the
+  listener answers the SYN with `RST|ACK` (`tcp_send_reset()`) instead of
+  leaking a half-state, and `tcp_reap_stale()` -- called from
+  `tcp_socket_new()` -- releases `SYN_SENT`/`SYN_RECEIVED` sockets older than
+  `NET_TCP_SYN_TIMEOUT_NS` (10 s). Four unsolicited SYNs therefore cannot keep
+  the table full.
+- **Command line.** `tcp_cmdline()` runs from `net_init()` and reads
   non-secret tokens from the loader command line: `net.tcp=<port>` names the
   remote peer for the client leg (1..65535), `net.serve=<seconds>` bounds how
-  long the guest listener waits for the gate's connection (1..3600). Without
-  `net.tcp=` the TCP self-test prints `CRUGOS: tcp selftest skipped` and the boot
-  still passes.
+  long the guest listener waits for the gate's connection (1..3600), and phase
+  S1's `net.synflood=1` runs the filled-table overflow and reaper self-test.
+  `dns_cmdline()` reads `dns.test=hostile`. Without `net.tcp=` the TCP self-test
+  prints `CRUGOS: tcp selftest skipped` and the boot still passes; when either
+  S1 self-test is requested, `net_init()` runs it immediately and panics on
+  `tcp syn flood selftest failed` or `dns hostile selftest failed`.
 
 `tcp_selftest()` runs inside `net_selftest()` after the ICMP check and walks
 four steps, every one of which must succeed:
@@ -238,10 +253,20 @@ from RFC 1035.
   `QCLASS=IN`. `dns_parse_response()` checks the id, the `QR` bit and
   `RCODE=0`, and returns `-2` when `TC` is set so the caller can fall back to
   TCP.
-- **Name compression.** `dns_decode_name()` follows pointers that must walk
-  strictly backwards, caps the walk at 16 hops and the decoded name at
-  `NET_DNS_NAME_MAX` (128 bytes). `dns_skip_name()` ends a compressed field at
-  `p+2`, which keeps the following records aligned.
+- **Name compression.** `dns_decode_name()` is iterative -- phase S1 removed
+  the recursion that a 16 KiB kernel stack could not survive. One hop budget
+  (`DNS_MAX_HOPS`, 16) covers the whole name and every pointer must move
+  strictly backwards, so a chain cannot loop; the decoded name is capped at
+  `NET_DNS_NAME_MAX` (128 bytes). A 12-link chain decodes, a 1200-link one is
+  rejected. `dns_skip_name()` ends a compressed field at `p+2`, which keeps the
+  following records aligned.
+- **Reply checks.** A reply is only taken from the server address and port the
+  query went to and only when it arrives on the local port the query used;
+  forged replies from anywhere else are dropped without touching the cache.
+  Query ids come from an xorshift64 stream (`dns_rng_next`), seeded from the
+  bootloader entropy seed mixed with the TSC, over two local ports
+  (`NET_DNS_LOCAL_PORTS`) instead of one fixed port. `dns.test=hostile` runs
+  this whole path as a self-test and panics if it fails.
 - **CNAME chains.** Up to `NET_DNS_MAX_CNAME` (4) aliases are followed; the
   final address, not the alias, is cached under the name the caller asked for.
 - **Cache.** Eight entries (`NET_DNS_CACHE`) keyed by the lowercased name with
@@ -342,7 +367,9 @@ the guest's own listener. `run-qemu.sh` maps that variable to
 | `make test-net` | slirp NIC: DHCP lease, gateway ARP, one ICMP echo, then `e2fsck` on the disk |
 | `make test-tcp` | A responding host peer plus a host fetch of the guest listener: two client connections complete an HTTP exchange, the socket syscalls work, the guest serves one request, then `e2fsck` |
 | `make test-net-dns` | A host DNS server reachable over slirp: one name resolves over TCP, the second lookup hits the cache and the socket syscall returns the same address, then `e2fsck` |
-| `make test-host` | Wire helpers, RFC 1071 checksums, TCP/UDP checksums, DHCP option parsing, DNS name walking/compression/cache (1042 checks) |
+| `make test-dns-hostile` | Gate 66: `dns.test=hostile` decodes a 12-link chain, rejects a 1200-link one and ignores three forged replies, then `e2fsck` |
+| `make test-net-synflood` | Gate 68: `net.synflood=1` fills the TCP table, the overflow RST and the half-open reaper recover it, then `e2fsck` |
+| `make test-host` | Wire helpers, RFC 1071 checksums, TCP/UDP checksums, DHCP option parsing, DNS name walking/compression/cache (8552 checks across the host suite) |
 
 `make test-net` runs the guest with `NET_MODE=user` and passes
 `EXPECT_NET=yes` to `scripts/boot-check.py`, which then requires
@@ -356,6 +383,17 @@ legs succeeded (`ok: tcp client/server http`). `make test-net-dns` runs
 `net.dns=10.0.2.2:<port> net.dns-tcp=1 net.name=<host>` to the guest and asks
 `boot-check.py` for `EXPECT_DNS=yes`, which requires the five `CRUGOS: dns ...`
 lines and a `resolved <name> -> <address> via tcp` shape.
+
+The two phase S1 gates are `make test-dns-hostile` (gate 66) and
+`make test-net-synflood` (gate 68); both rebuild the disk image, boot with one
+opt-in token under `S1_RUN_TIMEOUT_SEC` (240) and then run `e2fsck`.
+`make test-dns-hostile` needs `CRUGOS: dns hostile chain ok (12 link(s)
+decoded, 1200 link(s) rejected)`, `CRUGOS: dns hostile source check ok (3
+forged reply(ies) ignored)` and `CRUGOS: dns hostile selftest ok`, matched by
+`--expect-dnshostile=yes`. `make test-net-synflood` needs
+`CRUGOS: tcp syn flood selftest ok (N overflow(s), M reaped)`, matched by
+`--expect-synflood=yes`. Either selftest line in a boot that did not ask for it
+fails that gate.
 
 ## Known limits
 
@@ -374,6 +412,14 @@ lines and a `resolved <name> -> <address> via tcp` shape.
   are not implemented; the client is boot-time only.
 - One virtqueue pair per device, polling only, four devices, four UDP handlers,
   and no VLAN, checksum offload, scatter-gather or multi-queue negotiation.
-- UDP payload checksums are calculated on transmit but not verified on receive;
-  packets are not authenticated, so the stack is for bring-up and trusted
-  networks.
+- UDP payload checksums are verified on receive since phase S1 (a zero
+  checksum is still legal per RFC 768), but packets are not authenticated, so
+  the stack is for bring-up and trusted networks.
+- The shared ingress buffers (`g_l3`, `g_frame`, `g_udp_buf`, `g_sockets`) have
+  no locking and `net_poll()` is not re-entrant. ARP eviction of slot 0 and a
+  TCP receive path that emits an ACK can re-enter the poll loop and clobber
+  them, or grow the kernel stack without bound; report H2/H3 are deferred to
+  the next security pass.
+- Ephemeral ports and initial sequence numbers are deterministic
+  (`49152 + slot`, `timer_ticks() ^ counter`), so a blind off-path attacker can
+  predict them on a real network; only the DNS query ids are randomised in S1.

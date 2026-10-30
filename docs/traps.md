@@ -175,13 +175,23 @@ The table reads as one sentence in the source: `#BP` is handled in both rings,
 {0, 1, 6, 11, 12, 13, 14, 16, 17, 19, 21} is `TRAP_USER` when `cs & 3 == 3`
 and fatal otherwise, and everything else is fatal in both rings.
 
-Three vectors never reach `trap_classify()` in a running kernel: 32 is the
-LAPIC timer tick, 128 is the `int 0x80` syscall gate, and `#BP` (3) returns from
+Several vectors never reach `trap_classify()` in a running kernel: 32 is the
+LAPIC timer tick, 128 is the `int 0x80` syscall gate, `#BP` (3) returns from
 its own branch before the report path -- it sets `g_int3_seen`, prints
 `trap   : breakpoint handled at rip=...` and returns, which is what the
-breakpoint self-test asserts. `trap_classify(3, ...)` is still exercised on the
-host. That one legacy line is the only `trap   :`-prefixed output left in the
-kernel.
+breakpoint self-test asserts -- and every gate from 33 to 255 (128 excepted)
+is a shared ignore trampoline added in phase S1. `trap_classify(3, ...)` and the
+fatal classification of 33-255 are still exercised on the host. That one legacy
+line is the only `trap   :`-prefixed output left in the kernel.
+
+Phase S1 fills the rest of the IDT. `kernel/arch/x86_64/idt.c` points every gate
+from 33 to 255, except the syscall gate 128, at `isr_ignore`, a stub in
+`kernel/arch/x86_64/isr.S` that discards the frame and `iretq`s, and prints
+`CRUGOS: idt gates 256 present` after the last gate is installed. Before this a
+stray `int $N` or a spurious device interrupt in that range took a `#GP` for the
+missing gate, and the `#GP` handler could fault in turn, which is how one ring-3
+instruction (report H8) became a dead machine. A spurious vector is now a
+return.
 
 `TRAP_USER` prints the report and then ends only the offending thread:
 `kernel/arch/x86_64/idt.c` prints `CRUGOS: user fault <name> at rip=... err=...
@@ -206,6 +216,19 @@ rax, `addq $16`, `iretq`) every interrupt return uses. A ring-3 fault taken by
 a forked child therefore arrives through the same IDT entry and the same
 `trap_classify()` decision as any other user fault, and the `TRAP_USER` path
 above kills only that child.
+
+Phase S1 makes `TRAP_HANDLED` mean what it says. `trap_dispatch()` prints the
+report and then returns for a handled class instead of falling through to the
+kill path, so a user-frame `#OF` -- `int $4`, since `INTO` does not exist in
+64-bit mode -- resumes the interrupted instruction. The H8 report was the
+inverse: a ring-3 `int $4` panicked the kernel because the IDT only had gates
+for vectors 0-32 and 128, so the missing gate raised a `#GP` while the CPU was
+already delivering an exception. `kernel/core/user_test.c` now runs `/bin/trap4`
+at `user.test=8`: the kernel prints `CRUGOS: user trap4 test start`, the probe
+prints `CRUGOS: user trap4 probe (int $4 from ring 3)`, the kill path prints
+`CRUGOS: user fault overflow` and `CRUGOS: user fault killed tid N code -4`, and
+the boot prints `CRUGOS: user program /bin/trap4 finished (exit -4)` while still
+exiting 33. See [security.md](security.md).
 
 ## IST stacks
 
@@ -353,6 +376,18 @@ every `trap_classify()` and `trap_ist_for()` input and every report shape
 through `trap_format()`, including the `#PF`-only fault line, the
 no-zero-padding rule and a cap too small for the full text.
 
+`make test-trap-vector` (gate 67) is the S1 gate over the same policy. It boots
+with `user.test=8`, which runs `/bin/trap4`, and `scripts/boot-check.py
+--expect-trapvector=yes` insists on `CRUGOS: idt gates 256 present`,
+`CRUGOS: user trap4 probe (int $4 from ring 3)`, `CRUGOS: user fault overflow`,
+`CRUGOS: user fault killed tid`, the exact
+`CRUGOS: user program /bin/trap4 finished (exit -4)` line and the
+`user yes isolated yes ushell yes spawn yes fork yes forkbig yes` tags, while the
+boot must still exit 33. The same script fails any other gate that prints
+`CRUGOS: user trap4 test start` without the flag, so the probe cannot run in a
+boot that did not ask for it. The target rebuilds the disk image and shares
+`S1_RUN_TIMEOUT_SEC` (240) with the other two S1 gates.
+
 ## What is not covered
 
 - The window is private per thread but slot 0 is shared: phase U2 gives every
@@ -382,6 +417,9 @@ no-zero-padding rule and a cap too small for the full text.
 - There is no fault-injection fuzzer. The eight recipes are fixed and each boot
   injects exactly one fault; nothing mutates a frame, an address range or a
   sequence of faults.
+- The ignore trampoline is silent: a vector between 33 and 255 returns without
+  printing, counting or reporting anything, so a genuinely spurious interrupt
+  leaves no trace unless it breaks something later.
 - The report is bounded at 1024 bytes and ends silently at the cap. The five
   current lines fit with room to spare, but a future field that grows the text
   would be truncated without a marker.

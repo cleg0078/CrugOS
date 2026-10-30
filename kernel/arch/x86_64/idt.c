@@ -23,6 +23,7 @@ typedef struct idt_pointer {
 
 extern u64 isr_stub_table[33];
 extern void isr128(void);
+extern void isr_ignore(void);
 
 static idt_entry g_idt[256] __attribute__((aligned(16)));
 static idt_pointer g_idtr;
@@ -74,6 +75,15 @@ void idt_init(void)
         idt_set(i, isr_stub_table[i], ist, dpl);
     }
     idt_set(SYSCALL_VECTOR, (u64)(uintptr)isr128, 0, 3);
+    /* Phase S1: gate every remaining vector to the ignore trampoline.  A
+       half-built IDT turned a stray interrupt into a #GP/#DF storm that the
+       CPU could not describe; a full table turns it into a return. */
+    for (i = 33; i < 256; i++) {
+        if (i == SYSCALL_VECTOR)
+            continue;
+        idt_set(i, (u64)(uintptr)isr_ignore, 0, 0);
+    }
+    kprintf("CRUGOS: idt gates 256 present\n");
 
     g_idtr.limit = sizeof(g_idt) - 1;
     g_idtr.base = (u64)(uintptr)&g_idt[0];
@@ -144,6 +154,10 @@ void trap_dispatch(trap_frame *frame)
 
     trap_report(frame);
     cls = trap_classify(v, frame->cs);
+    /* Phase S1: a class the policy calls handled resumes the interrupted
+       instruction instead of falling through to the kill path below. */
+    if (cls == TRAP_HANDLED)
+        return;
     if (cls == TRAP_USER && v != 2 && v != 8 && v != 18) {
         thread *t = sched_current();
         i64 code = -(i64)v;

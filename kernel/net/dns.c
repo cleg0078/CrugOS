@@ -26,6 +26,8 @@
 #define DNS_MAX_HOPS 16u
 #define DNS_TTL_MAX 86400u
 #define DNS_ARP_TIMEOUT_MS 3000u
+/* Phase S1: room for a long backwards pointer chain in the hostile selftest. */
+#define DNS_HOSTILE_BYTES 4096u
 
 /* Idling uses sti; hlt; cli, which is privileged: the host unit tests compile
  * this file with CRUG_HOST_TEST and let net_poll() advance a fake clock. */
@@ -48,12 +50,20 @@ static struct dns_cache_entry g_cache[NET_DNS_CACHE];
 static u32 g_server;
 static u16 g_server_port = (u16)NET_DNS_PORT;
 static int g_force_tcp;
-static u16 g_id = 0x4352u;
 static char g_name[NET_DNS_NAME_MAX];
 static const char *g_transport = "udp";
 static u8 g_rx[NET_DNS_MSG_MAX];
 static volatile u32 g_rx_len;
 static u16 g_rx_id;
+/* Phase S1: a reply is only accepted when it comes from the server we asked
+ * and arrives on the port we sent it from.  Anything else arriving on our
+ * ports is an off-path forgery attempt, not an answer. */
+static u32 g_query_server;
+static u16 g_local_port = (u16)NET_DNS_LOCAL_PORT;
+/* Phase S1: the transaction id comes from this xorshift64 stream, seeded
+ * from the loader entropy and the monotonic clock, instead of a counter. */
+static u64 g_rng = 0x9E3779B97F4A7C15ull;
+static int g_hostile_test;
 
 static void dns_udp_handler(u32 src_ip, u16 src_port, u32 dst_ip, u16 dst_port,
                             const void *data, usize len);
@@ -271,9 +281,18 @@ static usize dns_skip_name(const u8 *msg, usize len, usize pos)
     }
 }
 
+/* Decode one possibly compressed name into out.
+ *
+ * Phase S1: this used to recurse once per compression pointer, and its hop
+ * budget was a local variable, so every frame started counting from zero and
+ * the budget never limited the depth.  A reply carrying a chain of backwards
+ * pointers therefore turned the 16 KiB kernel stack into a function of the
+ * packet.  The walk is one flat loop now, exactly like dns_skip_name: a
+ * pointer only moves p backwards, every jump spends one hop from a single
+ * budget, and next remembers the end of the first field. */
 usize dns_decode_name(const u8 *msg, usize len, usize pos, char *out, usize cap)
 {
-    usize p = pos, o = 0;
+    usize p = pos, o = 0, next = 0;
     u32 hops = 0;
 
     if (!msg || !out || cap == 0u)
@@ -286,7 +305,7 @@ usize dns_decode_name(const u8 *msg, usize len, usize pos, char *out, usize cap)
         l = msg[p];
         if (l == 0) {
             out[o] = 0;
-            return p + 1u;
+            return next ? next : p + 1u;
         }
         if ((l & 0xC0u) == 0xC0u) {
             u16 ptr;
@@ -294,26 +313,25 @@ usize dns_decode_name(const u8 *msg, usize len, usize pos, char *out, usize cap)
             if (p + 1u >= len)
                 return 0;
             ptr = (u16)(((u16)(l & 0x3Fu) << 8) | msg[p + 1u]);
-            if ((usize)ptr >= len || (usize)ptr >= p)
-                return 0;
+            if ((usize)ptr >= p)
+                return 0; /* backwards only, which also rules out cycles */
+            if (!next)
+                next = p + 2u;
             if (++hops > DNS_MAX_HOPS)
                 return 0;
-            if (o && o + 1u >= cap)
-                return 0;
-            if (o)
-                out[o++] = '.';
-            if (!dns_decode_name(msg, len, (usize)ptr, out + o, cap - o))
-                return 0;
-            return p + 2u;
+            p = (usize)ptr;
+            continue;
         }
         if (l > DNS_MAX_LABEL)
             return 0;
         if (p + 1u + (usize)l > len)
             return 0;
-        if (o + 1u + (usize)l >= cap)
+        if (o && o + 1u >= cap)
             return 0;
         if (o)
             out[o++] = '.';
+        if (o + (usize)l >= cap)
+            return 0;
         memcpy(out + o, msg + p + 1u, (usize)l);
         o += (usize)l;
         p += 1u + (usize)l;
@@ -390,12 +408,16 @@ static void dns_udp_handler(u32 src_ip, u16 src_port, u32 dst_ip, u16 dst_port,
 {
     const u8 *msg = (const u8 *)data;
 
-    (void)src_ip;
-    (void)src_port;
     (void)dst_ip;
-    if (dst_port != (u16)NET_DNS_LOCAL_PORT)
-        return;
     if (!msg || len < DNS_HEADER_BYTES || len > NET_DNS_MSG_MAX)
+        return;
+    /* Phase S1: the reply used to be accepted from any address and any
+     * source port on a fixed local port, so guessing the 16-bit id was
+     * enough.  Now the source address, the source port and the destination
+     * port all have to match the query in flight. */
+    if (!g_query_server || src_ip != g_query_server || src_port != g_server_port)
+        return;
+    if (dst_port != g_local_port)
         return;
     if (net_get16(msg) != g_rx_id)
         return;
@@ -403,16 +425,32 @@ static void dns_udp_handler(u32 src_ip, u16 src_port, u32 dst_ip, u16 dst_port,
     g_rx_len = (u32)len;
 }
 
+/* xorshift64: enough to keep the id unpredictable to an off-path attacker.
+ * A counter plus a fixed local port made a blind forgery practical. */
+static u64 dns_rng_next(void)
+{
+    u64 x = g_rng;
+
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    g_rng = x;
+    return x;
+}
+
 static u16 dns_next_id(void)
 {
-    g_id++;
-    if (g_id == 0u)
-        g_id = 0x4352u;
-    return g_id;
+    u16 id = (u16)(dns_rng_next() >> 32);
+
+    if (id == 0u)
+        id = 0x4352u;
+    return id;
 }
 
 void dns_init(void)
 {
+    u32 i;
+
     memset(g_cache, 0, sizeof(g_cache));
     g_server = 0;
     g_server_port = (u16)NET_DNS_PORT;
@@ -420,11 +458,16 @@ void dns_init(void)
     g_name[0] = 0;
     g_transport = "udp";
     g_rx_len = 0;
-    g_id = (u16)((timer_monotonic_ns() >> 8) & 0xFFFFu);
-    if (g_id == 0u)
-        g_id = 0x4352u;
-    g_rx_id = g_id;
-    net_udp_register((u16)NET_DNS_LOCAL_PORT, dns_udp_handler);
+    g_query_server = 0;
+    g_rng ^= (u64)(timer_monotonic_ns() >> 3);
+    if (g_rng == 0u)
+        g_rng = 0x9E3779B97F4A7C15ull;
+    g_rx_id = dns_next_id();
+    /* Phase S1: two local ports, picked per query.  A fixed port gave an
+     * off-path attacker a stable target; the second one is a spare slot in
+     * the UDP handler table (DHCP keeps the other). */
+    for (i = 0; i < NET_DNS_LOCAL_PORTS; i++)
+        (void)net_udp_register((u16)(NET_DNS_LOCAL_PORT + i), dns_udp_handler);
 }
 
 void dns_cache_flush(void)
@@ -451,12 +494,16 @@ static int dns_udp_query(const char *name, u32 server, u16 port, u32 timeout_ms,
         return -1;
     if (net_arp_resolve(server, mac, arp_ms) != 0)
         return -1;
+    /* Phase S1: remember where the answer must come from and which of the
+     * two local ports carries it, then send the query from that port. */
+    g_query_server = server;
+    g_local_port = (u16)(NET_DNS_LOCAL_PORT + (u16)(dns_rng_next() & 1u));
     g_rx_id = dns_next_id();
     g_rx_len = 0;
     qlen = dns_build_query(name, g_rx_id, query, sizeof(query));
     if (!qlen)
         return -1;
-    if (net_udp_send(mac, config->ip, server, (u16)NET_DNS_LOCAL_PORT, port,
+    if (net_udp_send(mac, config->ip, server, g_local_port, port,
                      query, qlen) != 0)
         return -1;
     deadline = timer_monotonic_ns() + (u64)timeout_ms * 1000000ull;
@@ -666,6 +713,7 @@ static void dns_cmdline_token(const char *tok, usize len)
     static const char server_prefix[] = "net.dns=";
     static const char tcp_prefix[] = "net.dns-tcp=";
     static const char name_prefix[] = "net.name=";
+    static const char test_prefix[] = "dns.test=";
     usize i;
 
     if (dns_prefix(tok, len, server_prefix)) {
@@ -689,7 +737,31 @@ static void dns_cmdline_token(const char *tok, usize len)
             n = sizeof(g_name) - 1u;
         memcpy(g_name, tok + off, n);
         g_name[n] = 0;
+    } else if (dns_prefix(tok, len, test_prefix)) {
+        /* dns.test=hostile runs the S1 hostile-chain and forged-reply
+         * checks in the kernel (see dns_hostile_selftest). */
+        usize off = sizeof(test_prefix) - 1u;
+
+        if (len - off == 7u && memcmp(tok + off, "hostile", 7u) == 0)
+            g_hostile_test = 1;
     }
+}
+
+/* Phase S1: mix the loader entropy into the id and port generator.  A
+ * firmware without an RNG hands over an all-zero seed, in which case the
+ * monotonic clock is the only source we have. */
+static void dns_seed_entropy(const boot_info *bi)
+{
+    u64 mix = 0xD1B54A32D192ED03ull;
+    usize i;
+
+    if (!bi)
+        return;
+    for (i = 0; i < sizeof(bi->entropy_seed); i++)
+        mix = (mix ^ (u64)bi->entropy_seed[i]) * 0x100000001B3ull;
+    g_rng ^= mix;
+    if (g_rng == 0u)
+        g_rng = 0x9E3779B97F4A7C15ull;
 }
 
 void dns_cmdline(const boot_info *bi)
@@ -697,6 +769,7 @@ void dns_cmdline(const boot_info *bi)
     const char *cmd;
     usize i, len;
 
+    dns_seed_entropy(bi);
     if (!bi || !bi->command_line || bi->command_line_len == 0)
         return;
     cmd = bi->command_line;
@@ -759,5 +832,96 @@ int dns_selftest(void)
     }
     kprintf("CRUGOS: dns socket syscall ok\n");
     kprintf("CRUGOS: dns selftest ok\n");
+    return 1;
+}
+/* Phase S1: the hostile selftest for the resolver.  It runs from net_init
+ * when the command line carries dns.test=hostile, and proves two things the
+ * audit asked for: a long backwards pointer chain is rejected by a flat
+ * walk instead of eating the kernel stack, and a reply is only accepted
+ * from the server and the port the query went to. */
+static usize dns_hostile_chain(u8 *buf, usize links)
+{
+    usize base = DNS_HEADER_BYTES;
+    usize p = base + 3u;
+    usize i;
+
+    memset(buf, 0, DNS_HOSTILE_BYTES);
+    buf[base] = 1u;
+    buf[base + 1u] = (u8)'a';
+    buf[base + 2u] = 0u;
+    for (i = 0; i < links; i++) {
+        usize target = (i == 0u) ? base : (p - 2u);
+
+        if (p + 2u > DNS_HOSTILE_BYTES)
+            return 0;
+        buf[p] = (u8)(0xC0u | (u8)((target >> 8) & 0x3Fu));
+        buf[p + 1u] = (u8)(target & 0xFFu);
+        p += 2u;
+    }
+    return p - 2u;
+}
+
+int dns_hostile_requested(void)
+{
+    return g_hostile_test;
+}
+
+int dns_hostile_selftest(void)
+{
+    static u8 buf[DNS_HOSTILE_BYTES];
+    char name[64];
+    u8 reply[DNS_HEADER_BYTES + 8u];
+    usize pos;
+
+    pos = dns_hostile_chain(buf, 12u);
+    if (!pos || !dns_decode_name(buf, DNS_HOSTILE_BYTES, pos, name, sizeof(name)) ||
+        strcmp(name, "a") != 0) {
+        kprintf("CRUGOS: net selftest failed (dns hostile chain)\n");
+        return 0;
+    }
+    pos = dns_hostile_chain(buf, 1200u);
+    if (!pos) {
+        kprintf("CRUGOS: net selftest failed (dns hostile chain)\n");
+        return 0;
+    }
+    if (dns_decode_name(buf, DNS_HOSTILE_BYTES, pos, name, sizeof(name)) != 0) {
+        kprintf("CRUGOS: net selftest failed (dns hostile chain)\n");
+        return 0;
+    }
+    kprintf("CRUGOS: dns hostile chain ok (12 link(s) decoded, 1200 link(s) rejected)\n");
+
+    memset(reply, 0, sizeof(reply));
+    net_put16(reply, g_rx_id);
+    g_query_server = 0x0A000202u;
+    g_server_port = (u16)NET_DNS_PORT;
+    g_local_port = (u16)NET_DNS_LOCAL_PORT;
+    g_rx_len = 0;
+    dns_udp_handler(0x0A0002FFu, (u16)NET_DNS_PORT, 0x0A00020Fu, g_local_port,
+                    reply, sizeof(reply));
+    if (g_rx_len != 0u) {
+        kprintf("CRUGOS: net selftest failed (dns hostile source)\n");
+        return 0;
+    }
+    dns_udp_handler(0x0A000202u, 54u, 0x0A00020Fu, g_local_port, reply, sizeof(reply));
+    if (g_rx_len != 0u) {
+        kprintf("CRUGOS: net selftest failed (dns hostile source)\n");
+        return 0;
+    }
+    dns_udp_handler(0x0A000202u, (u16)NET_DNS_PORT, 0x0A00020Fu,
+                    (u16)(g_local_port + 1u), reply, sizeof(reply));
+    if (g_rx_len != 0u) {
+        kprintf("CRUGOS: net selftest failed (dns hostile source)\n");
+        return 0;
+    }
+    dns_udp_handler(0x0A000202u, (u16)NET_DNS_PORT, 0x0A00020Fu, g_local_port,
+                    reply, sizeof(reply));
+    if (g_rx_len == 0u) {
+        kprintf("CRUGOS: net selftest failed (dns hostile source)\n");
+        return 0;
+    }
+    g_rx_len = 0;
+    g_query_server = 0;
+    kprintf("CRUGOS: dns hostile source check ok (3 forged reply(ies) ignored)\n");
+    kprintf("CRUGOS: dns hostile selftest ok\n");
     return 1;
 }

@@ -42,10 +42,12 @@ static void test_trap_classify(void)
                                      24, 25, 26, 27, 28, 29, 30, 31};
     u32 i;
 
-    /* #BP is handled for both rings and #OF only for a user frame. */
+    /* #BP is handled for both rings; #OF kills the user frame that raised
+       it and stays fatal in the kernel, because a bad shift count in
+       kernel code is a bug, not a recoverable signal. */
     CHECK(trap_classify(3, 0x08) == TRAP_HANDLED);
     CHECK(trap_classify(3, 0x3b) == TRAP_HANDLED);
-    CHECK(trap_classify(4, 0x3b) == TRAP_HANDLED);
+    CHECK(trap_classify(4, 0x3b) == TRAP_USER);
     CHECK(trap_classify(4, 0x08) == TRAP_FATAL);
     for (i = 0; i < sizeof(user_killable) / sizeof(user_killable[0]); i++) {
         CHECK(trap_classify(user_killable[i], 0x3b) == TRAP_USER);

@@ -55,6 +55,9 @@ make test-gpu-edid  # take the scanout mode from the display's EDID
 make test-gpu-cursor  # drive the hardware cursor plane and count the updates
 make test-gpu-cursor-shape  # prove the cursor sprite's pixels arrive over VNC
 make test-gpu-cursor-sw  # prove the guest's software sprite is in the scanout
+make test-dns-hostile  # decode a hostile DNS compression chain and refuse forged replies
+make test-trap-vector  # execute int $4 from ring 3 and kill only the thread
+make test-net-synflood  # fill the TCP table and prove the reaper frees it
 make test-hardening  # boot crafted superblock/inode/crypt images and assert the rejections
 make test-heap   # corrupt the kernel heap and prove the integrity checker catches it
 make test-trap   # inject eight crafted faults and check the report, IST and panic
@@ -91,7 +94,7 @@ make test-crypt-keyboard  # type the passphrase on the PS/2 keyboard and boot
 make test-crypt-keyboard-wrong  # three wrong keyboard passphrases must lock the volume
 make crypt-run   # boot the encrypted disk in a QEMU window for real typing
 make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
-make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/USB HID keyboard and mouse descriptors and reports/pointer state/IPv4/TCP/UDP checksums/DHCP parsing/DNS/audio mixer, tone and PCM ring/framebuffer cursor/intuition windows, menus and gadgets, icon dragging, the send-to-front gadget and keyboard icon focus, the drawer viewport, scrollbar and refresh, the drawer body-input handler, the seven hardening validators, the heap integrity checker, the trap report formatter and classification policy, the user-window and uaccess validators, the ELF exec mapper, the per-space page-table tests, the argv predicates, the fork clone cases, the screen model, the commodity registry, the app manifest parser, the capability mask and permission policy, the package container and its Ed25519 signatures, the virtio-gpu command and damage helpers, the EDID parser, 8528 checks
+make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/USB HID keyboard and mouse descriptors and reports/pointer state/IPv4/TCP/UDP checksums/DHCP parsing/DNS/audio mixer, tone and PCM ring/framebuffer cursor/intuition windows, menus and gadgets, icon dragging, the send-to-front gadget and keyboard icon focus, the drawer viewport, scrollbar and refresh, the drawer body-input handler, the seven hardening validators, the heap integrity checker, the trap report formatter and classification policy, the user-window and uaccess validators, the ELF exec mapper, the per-space page-table tests, the argv predicates, the fork clone cases, the screen model, the commodity registry, the app manifest parser, the capability mask and permission policy, the package container and its Ed25519 signatures, the virtio-gpu command and damage helpers, the EDID parser, the package id validator, 8552 checks
 make user        # build the ring-3 programs and .app payloads the disk image carries
 make packages    # sign the test bundles the installer gates install
 make mkpkg       # build the host package signer (tools/mkpkg.c)
@@ -229,6 +232,7 @@ options` prints the complete resolved set (including paths derived from
 | `HEAP_STRESS_OPS` | `4000` | operations the `heap.stress=` pass churns inside `make test-heap` |
 | `HEAP_RUN_TIMEOUT_SEC` | `240` | wall-clock budget for the `make test-heap` boot |
 | `TRAP_TIMEOUT_SEC` | `60` | wall-clock budget in seconds for each boot of `make test-trap` |
+| `S1_RUN_TIMEOUT_SEC` | `240` | wall-clock budget shared by the three phase S1 boots (`make test-dns-hostile`, `make test-trap-vector` and `make test-net-synflood`) |
 | `FUZZ_CASES` | `20000` | ext4 cases the `make test-fuzz` sweep runs |
 | `FUZZ_CRYPT_CASES` | `2000` | crypt-header cases the same sweep runs |
 | `FUZZ_SEED` | `1337` | seed for the harness PRNG, so a finding reproduces exactly |
@@ -747,8 +751,8 @@ script takes a `screendump` and checks the Exchange body (700,250) against
 `scripts/boot-check.py --expect-cx=yes` (a flag, not an extra positional, so the
 argv layout is unchanged) then requires the ready/action/selftest markers and
 `scripts/check-disk.py` runs a clean `e2fsck`. The tree's `make test-host`
-suite reports 8528 checks, and `make size` reports a 352528 B (344 KiB) file and
-a 1002890 B (979 KiB) load image.
+suite reports 8552 checks, and `make size` reports a 357592 B (349 KiB) file and
+a 1010298 B (986 KiB) load image.
 
 `make test-hardening` is gate 44 and proves the phase H1 hardening pass against
 crafted images. [scripts/run-hardening.py](../scripts/run-hardening.py) copies
@@ -760,7 +764,7 @@ the pristine test disk and encrypted disk per case, patches exactly one field
 35 -- `CRUGOS: ext4 mount rejected (geometry)`, `CRUGOS: ext4 mount rejected
 (root extent)`, `CRUGOS: crypt unlock failed (kdf policy)` or `CRUGOS: crypt
 unlock failed (volume exceeds partition)` -- while the unpatched control must
-still reach `CRUGOS: phase 8b boot ok` (the driver accepts any phase id) and
+still reach `CRUGOS: phase s1 boot ok` (the driver accepts any phase id) and
 exit 33. Every case forbids
 `CRUGOS: panic` and `trap   : page fault`, a hostile case must not print
 `CRUGOS: ext4 ready` or `CRUGOS: storage ready`, and a QEMU timeout fails the
@@ -786,7 +790,7 @@ disk copies under `build/x86_64/trap/`, each with
 a `TRAP_TIMEOUT_SEC` (60 s) budget. Every hostile boot must print
 `CRUGOS: trap test <recipe>`, the report's vector, IST and `from=kernel`
 fragments, `CRUGOS PANIC: <name>` and `CRUGOS: panic`, and exit 35; the control
-must reach `CRUGOS: phase 8b boot ok` and `CRUGOS: selftest ok`, exit 33 and
+must reach `CRUGOS: phase s1 boot ok` and `CRUGOS: selftest ok`, exit 33 and
 never panic. No case may print `trap test unknown` or `trap test survived`, an
 exit 33 from a hostile case means the injection never ran, and a missing exit
 file or a 124 timeout is a hang. The driver prints
@@ -794,8 +798,8 @@ file or a 124 timeout is a hang. The driver prints
 `ok: trap policy reported 8 crafted fault(s) (control boot exit 33)`;
 `run-trap.py` accepts `--keep` to leave those disks in the serial-log
 directory, and `tests/host/test_trap.c` covers the same matrix on the host, so
-`make test-host` reports 8528 checks. `make size` reports a 352528 B (344 KiB)
-file and a 1002890 B (979 KiB) load image.
+`make test-host` reports 8552 checks. `make size` reports a 357592 B (349 KiB)
+file and a 1010298 B (986 KiB) load image.
 
 `make test-fuzz` is gate 47 and proves the phase H4 host mount-path fuzzer.
 Unlike every other gate it never boots QEMU: it deletes
@@ -836,7 +840,7 @@ runs `scripts/boot-check.py` with `EXPECT_USER=yes` plus `scripts/check-disk.py`
 The serial log must carry `CRUGOS: user hello from ring 3`,
 `CRUGOS: user badptr blocked (EFAULT)`, a `CRUGOS: user fault killed tid N
 code -14` line and `CRUGOS: user selftest ok (3 program(s), 1 fault(s))`, reach
-`CRUGOS: phase 8b boot ok` and exit 33; the boot in practice also shows the
+`CRUGOS: phase s1 boot ok` and exit 33; the boot in practice also shows the
 `CRUGOS: user selftest start` line and, before the kill line, the phase H3
 report with `from=user` and `cr2=0x10000000000`. A kernel/user exit-code
 mismatch ends the boot with status 35 before the report and the phase marker,
@@ -847,8 +851,8 @@ Every other gate runs with `EXPECT_USER=no`, and `boot-check.py` fails any of
 them that prints `user selftest ok`, so the userspace selftest cannot leak into
 an unrelated boot. `tests/host/test_uaccess.c` and `tests/host/test_exec.c`
 cover the same window, segment and entry validators and the ELF segment policy
-on the host. `make test-host` reports 8528 checks and `make size` a 352528 B
-(344 KiB) file and a 1002890 B (979 KiB) load image. The marker set, the
+on the host. `make test-host` reports 8552 checks and `make size` a 357592 B
+(349 KiB) file and a 1010298 B (986 KiB) load image. The marker set, the
 syscall boundary, the loader pipeline and the limits are documented in
 [userspace.md](userspace.md).
 
@@ -864,7 +868,7 @@ then `/bin/iso` twice; the serial log must carry the gate-48 markers plus
 `CRUGOS: user isolation start`, `CRUGOS: user isolation frames 0x28000 vs
 0x38000 at 0x8000030000`, `CRUGOS: iso tid 11 word 0x15500b00 ok`,
 `CRUGOS: iso tid 12 word 0x15500c00 ok` and `CRUGOS: user isolation ok
-(2 program(s), 0 mismatch(es))`, reach `CRUGOS: phase 8b boot ok` and exit 33,
+(2 program(s), 0 mismatch(es))`, reach `CRUGOS: phase s1 boot ok` and exit 33,
 and `boot-check.py` prints `user yes isolated yes` in its `ok: boot markers
 found` line. A wrong frame pair or an iso instance that reads back the other
 instance's word fails the gate with a non-zero `mismatch(es)` count and a
@@ -887,7 +891,7 @@ the disk image with all nine programs and `/etc/sh.rc`, boots with
 `CRUGOS: storage remounted read-write`/`read-only` lines,
 `CRUGOS: sh write /shout.txt 22 byte(s)`, `CRUGOS: sh exit 7` and
 `CRUGOS: user shell finished (exit 7)`, and it must reach
-`CRUGOS: phase 8b boot ok` and exit 33 while boot-check reports
+`CRUGOS: phase s1 boot ok` and exit 33 while boot-check reports
 `user yes isolated yes ushell yes`. `check-disk --expect-shell-write`
 asserts `/shout.txt` is exactly `hello-from-user-shell` plus a newline after
 a clean umount and `e2fsck`, and ends with `ok: ext4 root is clean,
@@ -912,7 +916,7 @@ rebuilds the disk image with all nine programs, boots with
 `CRUGOS: user spawn child exit 5`, `CRUGOS: user spawn exec`,
 `CRUGOS: user exec /bin/child (tid 14)`, `CRUGOS: user child arg from-exec`
 and `CRUGOS: user spawn test ok (child exit 5, exec exit 5)`, and it must reach
-`CRUGOS: phase 8b boot ok` and exit 33 while boot-check reports
+`CRUGOS: phase s1 boot ok` and exit 33 while boot-check reports
 `user yes isolated yes ushell yes spawn yes`. The two tids are the assertion:
 the spawned child runs as a new thread (tid 15), while the exec'd child keeps the
 spawner's tid (14), so a `SYS_EXEC` that started a new thread instead of
@@ -939,7 +943,7 @@ from `user_fork()`. The log must carry `CRUGOS: user fork test start`,
 `CRUGOS: user fork reap exit 3`, `CRUGOS: user fork parent word 4369`,
 `CRUGOS: user fork ok (child exit 3, memory isolated)` and
 `CRUGOS: user fork test ok (child exit 3, memory isolated)`, and it must reach
-`CRUGOS: phase 8b boot ok` and exit 33 while boot-check reports
+`CRUGOS: phase s1 boot ok` and exit 33 while boot-check reports
 `user yes isolated yes ushell yes spawn yes fork yes`. The two word lines are
 the assertion: the child writes `0x2222` (8738) into the page it cloned and
 exits 3, so a parent that still reads `0x1111` (4369) afterwards proves the
@@ -966,11 +970,11 @@ two `user cow fault ... (copy)` lines and one `... (sole owner)` line, then
 `user fork parent write 17476`), the forkbig block
 (`CRUGOS: user forkbig start` through
 `CRUGOS: user forkbig ok (child exit 7, 300 page(s) isolated)`) and the usual
-`CRUGOS: user selftest ok` line, and it must reach `CRUGOS: phase 8b boot ok`
+`CRUGOS: user selftest ok` line, and it must reach `CRUGOS: phase s1 boot ok`
 and exit 33 while boot-check reports
 `user yes isolated yes ushell yes spawn yes fork yes forkbig yes`. The host
-suite covers the reference table and the clone: `make test-host` reports 8528
-checks and `make size` a 352528 B (344 KiB) file and a 1002890 B (979 KiB) load
+suite covers the reference table and the clone: `make test-host` reports 8552
+checks and `make size` a 357592 B (349 KiB) file and a 1010298 B (986 KiB) load
 image. Every other gate runs with `EXPECT_FORKBIG=no`, and `boot-check.py`
 fails any boot that prints a forkbig marker. The copy-on-write bit, the
 reference table and the fault taxonomy are documented in
@@ -997,9 +1001,9 @@ s): `/etc/app.rc` makes the shell print `CRUGOS: sh app count N`,
 kernel ends the level with `CRUGOS: user app ok (exit 9)` because the script
 exits 9. Both legs finish with `scripts/check-disk.py`, and the driver prints
 `ok: app bundles and tool types (exit 33)`. The tree's `make test-host` suite
-reports 8528 checks, and `make size` reports a 352528 B (344 KiB) file and a
-1002890 B (979 KiB) load image (`.text` 251622 B, `.rodata` 38464 B, `.data`
-100 B, `.bss` 712704 B).
+reports 8552 checks, and `make size` reports a 357592 B (349 KiB) file and a
+1010298 B (986 KiB) load image (`.text` 254310 B, `.rodata` 39072 B, `.data`
+116 B, `.bss` 716800 B).
 
 `make test-pkg` is gate 57 and proves the signed package lifecycle. It rebuilds
 the disk with `make disk` (which needs `make packages` first), boots with
@@ -1148,8 +1152,44 @@ flush(es), exit 33)
 
 then `boot-check.py --expect-gpu=yes` and `check-disk.py`. It reuses
 `GPU_WB_WAIT`, `GPU_RUN_TIMEOUT_SEC` and `GPU_QEMU_EXTRA`, and like gates
-60-64 it rebuilds neither disk image. The suite is now 65 gates.
+60-64 it rebuilds neither disk image. The suite is now 68 gates.
 
+`make test-dns-hostile` is gate 66 and proves the two DNS fixes from phase S1.
+It rebuilds the disk image, boots the stock kernel with `dns.test=hostile`,
+then runs `scripts/boot-check.py --expect-dnshostile=yes`. The boot must print
+the exact chain markers
+
+```
+CRUGOS: dns hostile chain ok (12 link(s) decoded, 1200 link(s) rejected)
+CRUGOS: dns hostile source check ok (3 forged reply(ies) ignored)
+CRUGOS: dns hostile selftest ok
+```
+
+and the summary line `dnshostile yes` before `QEMU exit status 33`; the disk
+check then runs. The chain case proves the iterative decoder against a deep
+pointer cycle, and the source case proves that three forged replies from the
+wrong address or port are ignored. `S1_RUN_TIMEOUT_SEC` (240) bounds the boot,
+and the token is the only input, so nothing is scripted from the host.
+
+`make test-trap-vector` is gate 67 and proves the ring-3 trap hole from phase
+S1. It rebuilds the disk, boots with `user.test=8`, which runs the whole ring-3
+chain from the earlier user gates and then `/bin/trap4`, and runs
+`boot-check.py --expect-trapvector=yes` with the user flags already on. The
+acceptance needs `CRUGOS: idt gates 256 present`, `CRUGOS: user trap4 probe (int
+$4 from ring 3)`, a `CRUGOS: user fault overflow` line, a `CRUGOS: user fault
+killed tid` line and the exact `CRUGOS: user program /bin/trap4 finished (exit
+-4)` marker, on top of `user yes isolated yes ushell yes spawn yes fork yes
+forkbig yes`; every other gate rejects any boot that prints the probe line
+without the flag.
+
+`make test-net-synflood` is gate 68 and proves the TCP table fix from phase S1.
+It rebuilds the disk, boots with `net.synflood=1` and runs
+`boot-check.py --expect-synflood=yes`. The self-test fills the four-entry TCP
+table with unsolicited SYNs, checks that the overflow is answered and counted,
+then lets the reaper release the half-open sockets; the line is matched as
+`CRUGOS: tcp syn flood selftest ok (N overflow(s), M reaped)` and the boot must
+still end `synflood yes ... QEMU exit status 33`, after which `check-disk.py`
+runs. All three S1 gates share `S1_RUN_TIMEOUT_SEC`.
 ## Interactive demo
 
 `make demo` is not a gate but a way to watch the system: it boots
@@ -1189,7 +1229,7 @@ wb.shell=1 wb.fill=$(DEMO_FILL_FILES) wb.hold=$(DEMO_HOLD_SEC)
 - `wb.wait=0` turns the desktop self-test into a no-op, so the demo does not
   require a title-bar drag or a fired action before the boot marker; the
   interactive desktop is the point, not the self-test.
-- `wb.hold=<seconds>` keeps the guest alive after `CRUGOS: phase 8b boot ok`
+- `wb.hold=<seconds>` keeps the guest alive after `CRUGOS: phase s1 boot ok`
   (`wb_hold()`), polling input once per timer tick, so the window stays on
   screen until the deadline or until you close it.
 

@@ -48,6 +48,15 @@ void net_init(const boot_info *bi)
     tcp_cmdline(bi);
     dns_init();
     dns_cmdline(bi);
+    /* Phase S1: dns.test=hostile runs the resolver's hostile selftest.  Its
+     * failure is fatal on purpose: a gate that accepts a stack-eating name
+     * decoder or a forged reply would be worse than no gate at all. */
+    if (dns_hostile_requested() && !dns_hostile_selftest())
+        panic("dns hostile selftest failed");
+    /* Phase S1: net.synflood=1 fills the connection table and proves the
+       overflow RST and the half-open reaper actually recover it. */
+    if (tcp_synflood_requested() && !tcp_synflood_selftest())
+        panic("tcp syn flood selftest failed");
     dhcp_init();
     virtio_net_init();
 }
@@ -317,6 +326,7 @@ static void udp_receive(const u8 *src, const u8 *dst, const u8 *udp, usize len)
     u16 src_port;
     u16 dst_port;
     u16 udp_len;
+    u32 dst_ip;
     u32 i;
 
     if (len < 8)
@@ -325,6 +335,15 @@ static void udp_receive(const u8 *src, const u8 *dst, const u8 *udp, usize len)
     dst_port = net_get16(udp + 2);
     udp_len = net_get16(udp + 4);
     if (udp_len < 8 || (usize)udp_len > len)
+        return;
+    /* Phase S1: only datagrams addressed to us (or broadcast) are accepted,
+       and the UDP checksum is verified when the sender supplied one.  A zero
+       checksum is legal on IPv4 per RFC 768 and stays accepted. */
+    dst_ip = net_get32(dst);
+    if (dst_ip != net_config_get()->ip && dst_ip != 0xFFFFFFFFu)
+        return;
+    if (net_get16(udp + 6) != 0 &&
+        !net_udp_checksum_ok(net_get32(src), dst_ip, udp, (usize)udp_len))
         return;
     for (i = 0; i < NET_UDP_HANDLERS; i++) {
         if (g_udp[i].handler && g_udp[i].port == dst_port) {

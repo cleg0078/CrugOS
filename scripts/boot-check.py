@@ -44,7 +44,7 @@ REQUIRED_MARKERS = (
     "CRUGOS: selftest ok",
     "CRUGOS: nvme ready",
     "CRUGOS: ahci ready",
-    "CRUGOS: phase 8b boot ok",
+    "CRUGOS: phase s1 boot ok",
 )
 # A rejected unlock stops before scheduling, storage mounting and self-tests.
 WRONG_CRYPT_MARKERS = (
@@ -114,6 +114,9 @@ def main() -> int:
     gpu_mode = "no"
     gpu_edid_mode = "no"
     gpu_cursor_mode = "no"
+    dnshostile_mode = "no"
+    trapvector_mode = "no"
+    synflood_mode = "no"
     argv = []
     for arg in sys.argv[1:]:
         if arg == "--storage=none":
@@ -166,6 +169,21 @@ def main() -> int:
         elif arg.startswith("--expect-gpu-cursor="):
             print(f"FAIL: invalid gpu cursor expectation {arg!r}", file=sys.stderr)
             return 2
+        elif arg == "--expect-dnshostile=yes":
+            dnshostile_mode = "yes"
+        elif arg.startswith("--expect-dnshostile="):
+            print(f"FAIL: invalid DNS hostile expectation {arg!r}", file=sys.stderr)
+            return 2
+        elif arg == "--expect-trapvector=yes":
+            trapvector_mode = "yes"
+        elif arg.startswith("--expect-trapvector="):
+            print(f"FAIL: invalid trap vector expectation {arg!r}", file=sys.stderr)
+            return 2
+        elif arg == "--expect-synflood=yes":
+            synflood_mode = "yes"
+        elif arg.startswith("--expect-synflood="):
+            print(f"FAIL: invalid syn flood expectation {arg!r}", file=sys.stderr)
+            return 2
         else:
             argv.append(arg)
     sys.argv = [sys.argv[0]] + argv
@@ -183,7 +201,9 @@ def main() -> int:
               "[--storage=none] [--expect-screen=yes] [--expect-cx=yes] "
               "[--expect-app=yes] [--expect-pkg=yes] [--expect-caps=yes] "
               "[--expect-wbpkg=yes] [--expect-gpu=yes] "
-              "[--expect-gpu-edid=yes] [--expect-gpu-cursor=yes]",
+              "[--expect-gpu-edid=yes] [--expect-gpu-cursor=yes] "
+              "[--expect-dnshostile=yes] [--expect-trapvector=yes] "
+              "[--expect-synflood=yes]",
               file=sys.stderr)
         return 2
 
@@ -297,6 +317,11 @@ def main() -> int:
         return fail(f"invalid gpu cursor mode {gpu_cursor_mode!r}", text)
     if gpu_edid_mode == "yes" and gpu_mode != "yes":
         return fail("--expect-gpu-edid=yes also needs --expect-gpu=yes", text)
+    for name, value in (("DNS hostile", dnshostile_mode),
+                        ("trap vector", trapvector_mode),
+                        ("syn flood", synflood_mode)):
+        if value not in ("no", "yes"):
+            return fail(f"invalid {name} mode {value!r}", text)
     if gpu_cursor_mode == "yes" and gpu_mode != "yes":
         return fail("--expect-gpu-cursor=yes also needs --expect-gpu=yes", text)
 
@@ -406,6 +431,29 @@ def main() -> int:
         if not re.search(r"dns resolved \S+ -> \d+\.\d+\.\d+\.\d+ via (udp|tcp|cache)",
                          text):
             return fail("expected the resolver to report a resolved name", text)
+
+    if dnshostile_mode == "yes":
+        for marker in (
+            "CRUGOS: dns hostile chain ok (12 link(s) decoded, "
+            "1200 link(s) rejected)",
+            "CRUGOS: dns hostile source check ok ("
+            "3 forged reply(ies) ignored)",
+            "CRUGOS: dns hostile selftest ok",
+        ):
+            if marker not in text:
+                return fail(f"missing serial marker: {marker!r}", text)
+    elif "CRUGOS: dns hostile selftest ok" in text:
+        return fail("unexpected DNS hostile selftest without "
+                    "--expect-dnshostile=yes", text)
+
+    if synflood_mode == "yes":
+        if not re.search(r"CRUGOS: tcp syn flood selftest ok "
+                         r"\(\d+ overflow\(s\), \d+ reaped\)", text):
+            return fail("expected the SYN-flood selftest to reap the "
+                        "half-open sockets", text)
+    elif "CRUGOS: tcp syn flood selftest ok" in text:
+        return fail("unexpected SYN-flood selftest without "
+                    "--expect-synflood=yes", text)
 
     if expect_usb == "yes":
         for marker in (
@@ -1033,6 +1081,22 @@ def main() -> int:
         return fail("unexpected large-fork selftest without EXPECT_FORKBIG=yes",
                     text)
 
+    if trapvector_mode == "yes":
+        for marker in (
+            "CRUGOS: idt gates 256 present",
+            "CRUGOS: user trap4 probe (int $4 from ring 3)",
+            "CRUGOS: user fault overflow",
+            "CRUGOS: user fault killed tid",
+        ):
+            if marker not in text:
+                return fail(f"missing serial marker: {marker!r}", text)
+        if "CRUGOS: user program /bin/trap4 finished (exit -4)" not in text:
+            return fail("expected the vector-4 probe to be reaped as -4",
+                        text)
+    elif "CRUGOS: user trap4 test start" in text:
+        return fail("unexpected vector-4 probe without "
+                    "--expect-trapvector=yes", text)
+
     if expect_rebuild == "no" and "CRUGOS: raid rebuilt" in text:
         return fail("unexpected RAID member rebuild during boot", text)
     if expect_rebuild != "no":
@@ -1072,6 +1136,8 @@ def main() -> int:
           "app", app_mode, "pkg", pkg_mode, "caps", caps_mode,
           "wbpkg", wbpkg_mode, "gpu", gpu_mode,
           "gpuedid", gpu_edid_mode, "gpucursor", gpu_cursor_mode,
+          "dnshostile", dnshostile_mode, "trapvector", trapvector_mode,
+          "synflood", synflood_mode,
           "heap", expect_heap, "user", expect_user,
           "isolated", expect_users, "ushell", expect_ushell,
           "spawn", expect_spawn, "fork", expect_fork,

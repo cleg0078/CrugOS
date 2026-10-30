@@ -97,6 +97,13 @@ isr_return:
     addq $16, %rsp
     iretq
 
+    /* Phase S1: one shared trampoline for every vector the kernel does not
+       expect to fire.  It exists so no IDT gate is null: a stray interrupt
+       now returns instead of escalating to #GP or #DF inside the CPU. */
+    .global isr_ignore
+isr_ignore:
+    iretq
+
     .section .rodata
     .global isr_stub_table
     .align 8

@@ -1,6 +1,6 @@
 # Roadmap
 
-The specification defines 65 phases/gates. Phase 0 established the smallest
+The specification defines 68 phases/gates. Phase 0 established the smallest
 end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
 phase 1 makes the kernel own physical memory, page tables, exceptions and
 timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
@@ -2061,6 +2061,59 @@ reachable until then.
   and the gate 62/63/64/65 paragraphs, alongside README, boot and build.
 - All 65 gates pass at `v0.47.1`.
 
+## Phase S1 - security pass 1 (done)
+
+A review of the ring-3 and network surface (`specs/fix-p2/`, a tree at
+`a1a99df`) raised 1 Critical, 10 High, 16 Medium, 14 Low and 9 Info items.
+Phase S1 closes the Critical, four Highs and the cheap Mediums, proves each one
+with an opt-in self-test and a gate, and writes the rest down for S2. It is a
+fix pass rather than a feature, so the phase number is `S1` and the boot marker
+is `CRUGOS: phase s1 boot ok`.
+
+- C1: `dns_decode_name()` in `kernel/net/dns.c` is now iterative, with one
+  `DNS_MAX_HOPS` (16) budget for the whole name and pointers that must move
+  strictly backwards; a 12-link chain decodes and a 1200-link chain is
+  rejected without touching the 16 KiB kernel stack (`dns.test=hostile`).
+- H1: a DNS reply is accepted only from the server address and port the query
+  went to, on the local port it used, with a matching id; ids come from an
+  xorshift64 stream seeded from bootloader entropy and the TSC, and the
+  resolver keeps two local ports instead of the old fixed 53000.
+- H4: `tcp_listen_input()` answers a failed allocation with RST|ACK and counts
+  an overflow, `tcp_reap_stale()` releases `SYN_SENT`/`SYN_RECEIVED` sockets
+  older than `NET_TCP_SYN_TIMEOUT_NS` (10 s) from `tcp_socket_new()`, and
+  `tcp_rst_valid()` keeps an off-path RST from killing a healthy connection
+  (`net.synflood=1`).
+- H8: `kernel/arch/x86_64/idt.c` installs a shared `isr_ignore` stub on gates
+  33-255 (syscall vector excluded) and prints `CRUGOS: idt gates 256 present`;
+  a user-mode vector 4 is `TRAP_USER`, `trap_dispatch()` returns for
+  `TRAP_HANDLED`, and `/bin/trap4` executes `int $4` from CPL3 to prove only the
+  thread dies (`user.test=8`).
+- H9: `pkg_id_valid()` (declared in `include/crug/pkg.h`) rejects empty ids,
+  `.`, `..` and any path separator before the installer touches the
+  filesystem, closing the `..` staging-directory redirect.
+- Mediums: UDP datagrams are accepted only for our address or broadcast and a
+  non-zero checksum is verified over the pseudo-header (`net_udp_checksum()` /
+  `net_udp_checksum_ok()` in `kernel/net/net_util.c`; zero stays legal), the
+  virtio-net driver clamps the device's `used_len` to `VIRTIO_NET_BUF_SIZE`,
+  and `msgport_recv()` returns the copied byte count instead of the full
+  length, repairing the P1-F12 truncation report.
+- Gates 66, 67 and 68 are `make test-dns-hostile`, `make test-trap-vector` and
+  `make test-net-synflood`, sharing `S1_RUN_TIMEOUT_SEC` (240); each boot
+  token is opt-in, and every other gate fails if the markers appear without
+  the matching flag.
+- One finding is rejected rather than fixed: the claim that `GET_EDID` reads
+  `size` at offset 28 is wrong, because `struct virtio_gpu_ctrl_hdr` is 24
+  bytes (see `/usr/include/linux/virtio_gpu.h` lines 354-359). Deferred to S2
+  are the two network Highs (no `net_poll()` locking, ARP slot eviction and
+  TCP ACK re-entry), the handle and port lifetime work (H5, H6, H7, H10) and
+  the remaining Mediums.
+- docs: [security.md](security.md) is new; README, boot, build, network and
+  traps gained the S1 tokens, gates, markers and limits.
+- `make test-host` reports 8552 checks, 0 failure(s); `make size` reports a
+  357592 B (349 KiB) kernel file and a 1010298 B (986 KiB) load image
+  (`.text` 254310 B, `.rodata` 39072 B, `.data` 116 B, `.bss` 716800 B).
+- All 68 gates pass at `v0.48.0`.
+
 ## Bootable media - hybrid UEFI ISO (done, `v0.23.1`)
 
 - `kernel/fs/storage.c` gained the `storage=none` command-line token: every
@@ -2089,6 +2142,30 @@ reachable until then.
   with the ISO 9660 volume descriptors in the first 32 KiB. See
   [iso.md](iso.md).
 - All 36 gates pass at `v0.23.1`.
+
+## Security programme
+
+Security work runs as its own sequence of fix phases rather than as features
+folded into the bring-up phases. Each phase starts from a written review of a
+tree, ends with a gate per fix, and never deletes a finding: a fixed item is
+marked done with the phase that closed it, and a deferred one stays listed with
+the reason it was deferred.
+
+- S1 (`v0.48.0`, done): the Critical DNS decompression recursion, the DNS reply
+  source/id checks, TCP table exhaustion and RST validation, the ring-3 trap
+  vector hole and package-id validation, plus the UDP checksum/address verdict,
+  the virtio-net length clamp and the message-port copied-length repair.
+  Gates 66, 67 and 68. See [security.md](security.md).
+- S2 (planned): the deferrals from `specs/fix-p2/`. The network lock comes
+  first, because ARP slot eviction and TCP ACK re-entry cannot be fixed on a
+  re-entrant receive path; then the handle/port lifetime work as one redesign
+  (`SYS_HANDLE_CLOSE` never destroys a port, no handle teardown at thread exit,
+  one global 256-entry table with no rights checks, and the lost-wakeup /
+  use-after-free pair on a closed port); then the remaining Mediums (unwaited
+  zombies pinning memory, no per-process quota, the trusting `kfree()` large
+  path and deterministic ephemeral ports).
+- A next review (`specs/fix-p3/`) is expected after S2 and follows the same
+  shape: report, findings, fix, marker, gate, document.
 
 ## Phase 3B - remaining storage work
 
@@ -2148,8 +2225,10 @@ reachable until then.
    adopt/drop/borrow/slice/chan/select` and rejects ownership in kernel mode.
    Phases 0-3 therefore use plain C-style Crug. Compiler work is tracked as a
    prerequisite for the capability/ownership-heavy phases (G0.5).
-2. The spec targets x86_64 -> aarch64 -> riscv64, but only a native x86_64
-   `crugc` exists. aarch64/riscv64 bring-up requires a cross backend.
+2. The spec once targeted x86_64 -> aarch64 -> riscv64, but only a native
+   x86_64 `crugc` exists and the project owner dropped the AArch64 and RISC-V
+   64 phases on 2026-10-30. The native x86_64 target is the only one; the spec
+   marks Phase 13 and Phase 14 as dropped.
 3. Boot performance targets (<250 ms) now have calibrated stage timings in the
    boot report, but the gate is not enforced yet; unencrypted boot currently
    spends most of its time in PIT-based TSC calibration, and an encrypted boot

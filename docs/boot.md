@@ -78,11 +78,17 @@ its own pages without the parent seeing the write, and phase U6's
 `user.test=6` adds `/bin/forkbig`, which forks 300 shared pages and proves the
 child's writes never reach the parent's copy, and phase 7A's `user.test=7` adds
 `app_list()`, which runs `/bin/sh /etc/app.rc` so the shell lists, inspects and
-launches a bundle and exits 9. `pkg.test=1` is independent of the user level:
+launches a bundle and exits 9, and phase S1's `user.test=8` adds `/bin/trap4`,
+which executes `int $4` from CPL3 so the kernel has to charge the fault to the
+thread and keep running. `pkg.test=1` is independent of the user level:
 it probes and installs a signed package and refuses one signed by an untrusted
 key, and `pkg.test=2` launches the installed bundle and proves its capability
 mask, both parsed by `pkg_test_cmdline()` right after `user_test_cmdline()`.
-Without the token the user level is 0 and the self-test is silent. A boot
+Phase S1 adds two independent tokens: `dns.test=hostile` and `net.synflood=1`.
+`dns_cmdline()` and `tcp_cmdline()` read them, and `net_init` runs the matching
+self-test immediately, panicking on `dns hostile selftest failed` or `tcp syn
+flood selftest failed` rather than booting a kernel that failed its own attack
+case. Without the token the user level is 0 and the self-test is silent. A boot
 medium that ships no block device (the hybrid ISO) passes `storage=none`, which
 is the one token that changes the storage contract instead of adding work to
 it. The loader caps the command line at 511 bytes and the kernel wipes the
@@ -236,8 +242,11 @@ post-snapshot allocations cannot push it over capacity.
    PCI functions (up to four `eth0`..`eth3`) and register them, bind the DHCP
    client to UDP port 68 and read the `net.tcp=<port>` / `net.serve=<seconds>`
    command-line tokens through `tcp_cmdline`; `dns_init` empties the resolver
-   cache and binds UDP port 53000, and `dns_cmdline` reads `net.dns=<ip>[:port]`,
-   `net.dns-tcp=1` and `net.name=<host>`. The boot prints
+   cache and binds two local UDP ports (`NET_DNS_LOCAL_PORTS`), and
+   `dns_cmdline` reads `net.dns=<ip>[:port]`, `net.dns-tcp=1` and
+   `net.name=<host>`. `dns.test=hostile` runs the hostile-chain and forged-reply
+   self-test here, and `net.synflood=1` fills the TCP table and runs the reaper.
+   The boot prints
    `CRUGOS: net ready (N device(s))`. The network self-test runs later, with the
    other self-tests.
 10. `storage_init`: `block_init`, the legacy virtio-blk devices, then the
@@ -363,7 +372,10 @@ post-snapshot allocations cannot push it over capacity.
     checks that its own sentinel and trailing byte survived. `user.test=7` runs
     level 6 and then `user_app()`, which runs `/bin/sh /etc/app.rc`; the script
     performs `app list`, `app info orbit` and `app run orbit` and then exits 9,
-    and the kernel requires that code. A mismatch exits 35
+    and the kernel requires that code. `user.test=8` runs level 7 and then
+    `user_trap4()`, which runs `/bin/trap4`; the program executes `int $4` from
+    ring 3, the kernel reaps the thread with code -4 and the boot continues. A
+    mismatch exits 35
     before the report. Without the token the user level is 0 and nothing is
     printed. `pkg.test=1` then runs `pkg_selftest()`: it probes the signed and
     the untrusted package, installs the first, updates it to 2.0.0, refuses the
@@ -377,7 +389,7 @@ post-snapshot allocations cannot push it over capacity.
     capability check exits 35 before the report.
 14. The user self-test of step 13, when it ran, has already joined its threads;
     then `report_boot`, `storage_lock` (wipes the passphrase, the volume keys
-    and the bounce buffer), `CRUGOS: phase 8b boot ok`, then
+    and the bounce buffer), `CRUGOS: phase s1 boot ok`, then
     `wb_hold` (only when
     `wb.hold=` was given: the guest stays alive with the desktop on screen until
     the deadline), `trap_test_run()` (only when `trap.test=` was given, so the
@@ -663,7 +675,7 @@ CRUGOS: wb window 1 sent to front
 CRUGOS: wb action 6 front window 1
 CRUGOS: wb icons selftest ok (1 move(s), 1 front(s))
 CRUGOS: sh run 'ver'
-CRUGOS: sh out CrugOS 0.47.1 (phase 8b), x86_64
+CRUGOS: sh out CrugOS 0.48.0 (phase s1), x86_64
 CRUGOS: wb selftest ok (1 drag(s), 1 action(s))
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb drawer selftest ok (3 scroll(s), 1 refresh(es))
@@ -722,11 +734,11 @@ CRUGOS: sh exit 7
 CRUGOS: user shell finished (exit 7)
 CRUGOS: user selftest ok (3 program(s), 1 fault(s))
 boot   : pmm=28575 us cpu=414 us vm=617 us traps=317 us timer=65299 us heap=494 us storage=95001 us sched=5614 us syscall=90 us total=196426 us
-CRUGOS: phase 8b boot ok
+CRUGOS: phase s1 boot ok
 ```
 
 With `trap.test=<recipe>` the same boot ends differently: the injector runs after
-`CRUGOS: phase 8b boot ok`, injects exactly one fault and the guest exits 35
+`CRUGOS: phase s1 boot ok`, injects exactly one fault and the guest exits 35
 instead of 33. A `trap.test=de` boot ends:
 
 ```
@@ -799,7 +811,7 @@ CRUGOS: sh exit 7
 CRUGOS: user shell finished (exit 7)
 CRUGOS: user selftest ok (3 program(s), 1 fault(s))
 boot   : pmm=28575 us cpu=414 us vm=617 us traps=317 us timer=65299 us heap=494 us storage=95001 us sched=5614 us syscall=90 us total=196426 us
-CRUGOS: phase 8b boot ok
+CRUGOS: phase s1 boot ok
 ```
 
 A `user.test=7` boot, the second leg of `make test-app-bundles`, adds the app
@@ -1150,6 +1162,30 @@ reads the last pointer position from the serial log and counts the
 flush(es), exit 33)`, then `boot-check.py --expect-gpu=yes` and the disk check.
 See [gpu.md](gpu.md).
 
+`make test-dns-hostile` (gate 66) boots with `dns.test=hostile` and requires
+exactly three lines: `CRUGOS: dns hostile chain ok (12 link(s) decoded, 1200
+link(s) rejected)`, `CRUGOS: dns hostile source check ok (3 forged reply(ies)
+ignored)` and `CRUGOS: dns hostile selftest ok`; `boot-check.py
+--expect-dnshostile=yes` insists on all three and every other gate fails if the
+last line appears without the flag. Then the disk check. See
+[network.md](network.md) and [security.md](security.md).
+
+`make test-trap-vector` (gate 67) boots with `user.test=8`, which runs
+`/bin/trap4`: the log must show `CRUGOS: idt gates 256 present`,
+`CRUGOS: user trap4 probe (int $4 from ring 3)`, `CRUGOS: user fault
+overflow`, `CRUGOS: user fault killed tid N` and exactly
+`CRUGOS: user program /bin/trap4 finished (exit -4)` while the boot still ends
+with exit 33; `boot-check.py --expect-trapvector=yes` checks those lines and
+the `user yes isolated yes ushell yes spawn yes fork yes forkbig yes` tags, and
+any gate that prints `CRUGOS: user trap4 test start` without the flag fails.
+Then the disk check. See [traps.md](traps.md).
+
+`make test-net-synflood` (gate 68) boots with `net.synflood=1` and matches
+`CRUGOS: tcp syn flood selftest ok (N overflow(s), M reaped)` (measured
+`1 overflow(s), 3 reaped`) before `boot-check.py --expect-synflood=yes` and
+the disk check. All three S1 gates rebuild the disk image and share
+`S1_RUN_TIMEOUT_SEC` (240). See [network.md](network.md).
+
 The `audio` lines appear only on machines with a USB audio function: a default
 `q35` boot prints `CRUGOS: audio device absent`, while `make test-audio` adds
 `-device usb-audio` behind `qemu-xhci` on an `-audiodev none` backend, so the log
@@ -1183,14 +1219,14 @@ replaced by the skip marker, and the USB device the firmware booted from shows
 up in the USB lines as an unsupported mass-storage function:
 
 ```
-CRUGOS: version 0.47.1
+CRUGOS: version 0.48.0
 CRUGOS: usb controller ready (xhci, 8 port(s))
 CRUGOS: usb device 46f4:0001 on port 1 (speed 4)
 CRUGOS: usb device class 8 on port 1 (unsupported)
 CRUGOS: storage skipped (storage=none)
 CRUGOS: heap check ok (6 slab(s), 8 object(s), 1 large block(s))
 CRUGOS: selftest ok
-CRUGOS: phase 8b boot ok
+CRUGOS: phase s1 boot ok
 ```
 
 `kernel/core/report.c` prints the machine description between them: kernel

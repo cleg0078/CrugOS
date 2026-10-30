@@ -242,7 +242,7 @@ requires the guest to exit 33 and runs `scripts/check-disk.py`. The boot-check
 line carries `gpu yes` and every earlier flag `no`:
 
 ```
-ok: boot markers found, version 0.47.1 avx2 yes raid no nvme no rebuild no
+ok: boot markers found, version 0.48.0 avx2 yes raid no nvme no rebuild no
 ahci no crypt no aes any net no tcp no dns no usb no mouse no audio no gfx no
 wb no menu no shell no keys no desk no icons no drawer no select no screen no
 cx no app no pkg no caps no wbpkg no gpu yes ... QEMU exit status 33

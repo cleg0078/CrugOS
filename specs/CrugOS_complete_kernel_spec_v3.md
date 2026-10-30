@@ -1,11 +1,11 @@
 # CrugOS — Complete Kernel, Desktop, Virtualization, Container and HPC Development Specification
 
-**Status:** Initial engineering specification  
-**Primary implementation language:** Crug (`crugc`)  
-**Architecture order:** x86-64 → AArch64 → RISC-V 64  
-**Kernel style:** Small monolithic core with strict subsystem boundaries and large policy components in user space  
-**Desktop philosophy:** Amiga Workbench / Exec inspired, modernized for SMP, memory protection, GPU composition, security and HiDPI  
-**Primary goals:** Tiny footprint, very fast boot, native message passing, encrypted storage, GPU/audio support, native HPC clustering, virtualization, OCI/Docker workflows, and eventual self-hosting
+- **Status:** Initial engineering specification, implemented incrementally (progress lives in `docs/roadmap.md`)
+- **Primary implementation language:** Crug (`crugc`)
+- **Architecture order:** x86-64 only — the AArch64 and RISC-V 64 phases were dropped on 2026-10-30 at the project owner's request; the architecture-specific sections below (ports, virtualisation, HPC clusters) are kept as historical design notes and are explicitly out of scope
+- **Kernel style:** Small monolithic core with strict subsystem boundaries and large policy components in user space
+- **Desktop philosophy:** Amiga Workbench / Exec inspired, modernized for SMP, memory protection, GPU composition, security and HiDPI
+- **Primary goals:** Tiny footprint, very fast boot, native message passing, encrypted storage, GPU/audio support, native HPC clustering, virtualization, OCI/Docker workflows, and eventual self-hosting
 
 ---
 
@@ -3968,35 +3968,20 @@ without Linux.
 
 ---
 
-## Phase 13 — AArch64
+## Phase 13 — AArch64 (dropped)
 
-Deliver architecture backend and reach functional parity.
-
-Acceptance:
-
-- same core test suite;
-- Workbench;
-- encrypted EXT4 root;
-- networking/audio where hardware allows;
-- Linux AArch64 guest;
-- native containers;
-- homogeneous AArch64 HPC cluster.
+Removed from the plan on 2026-10-30 at the project owner's request: CrugOS ships
+one architecture backend, x86_64. Nothing in this document obliges an AArch64
+port any more; the AArch64 material elsewhere in the specification is retained
+as design history only.
 
 ---
 
-## Phase 14 — RISC-V 64
+## Phase 14 — RISC-V 64 (dropped)
 
-Deliver architecture backend and reach functional parity.
-
-Acceptance:
-
-- RV64 QEMU;
-- SMP;
-- Workbench;
-- encrypted EXT4 root;
-- Linux RV64 guest with H extension;
-- native containers;
-- homogeneous RV64 HPC cluster.
+Removed from the plan on 2026-10-30 at the project owner's request, for the same
+reason as Phase 13. RISC-V material elsewhere in the specification is retained
+as design history only.
 
 ---
 

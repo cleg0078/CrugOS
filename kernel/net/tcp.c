@@ -41,7 +41,15 @@ static struct net_tcp_socket g_sockets[NET_TCP_MAX];
 static u32 g_peer_port;
 static u32 g_serve_seconds;
 static u32 g_isn;
+/* Phase S1: half-open accounting.  The table holds four connections, so four
+   silent SYNs used to deny service to every later one; an overflow is now
+   answered with RST|ACK and stale half-open entries are reaped. */
+static u32 g_syn_overflows;
+static u32 g_syn_reaped;
+static int g_syn_test_mode;
+static int g_synflood_requested;
 
+int tcp_reap_stale(u64 now_ns);
 static u32 tcp_next_isn(void)
 {
     g_isn += 0x9E3779B9u;
@@ -74,6 +82,7 @@ struct net_tcp_socket *tcp_socket_new(void)
 {
     u32 i;
 
+    (void)tcp_reap_stale(timer_monotonic_ns());
     for (i = 0; i < NET_TCP_MAX; i++) {
         struct net_tcp_socket *s = &g_sockets[i];
 
@@ -94,6 +103,67 @@ void tcp_socket_release(struct net_tcp_socket *s)
         return;
     s->state = NET_TCP_CLOSED;
     s->used = 0;
+}
+
+/* ---- Phase S1: half-open connection policy ------------------------------ */
+
+int tcp_reap_stale(u64 now_ns)
+{
+    u32 i;
+    int reaped = 0;
+
+    for (i = 0; i < NET_TCP_MAX; i++) {
+        struct net_tcp_socket *s = &g_sockets[i];
+
+        if (!s->used)
+            continue;
+        if (s->state != NET_TCP_SYN_SENT && s->state != NET_TCP_SYN_RECEIVED)
+            continue;
+        if (now_ns <= s->state_ns + NET_TCP_SYN_TIMEOUT_NS)
+            continue;
+        s->used = 0;
+        s->state = NET_TCP_CLOSED;
+        g_syn_reaped++;
+        reaped++;
+    }
+    return reaped;
+}
+
+static void tcp_send_reset(u32 dst_ip, u16 dst_port, u16 src_port, u32 seq,
+                           u32 ack)
+{
+    u8 seg[TCP_HEADER_BYTES];
+
+    if (g_syn_test_mode)
+        return;             /* the selftest checks the decision, not the wire */
+    memset(seg, 0, sizeof(seg));
+    net_put16(seg, src_port);
+    net_put16(seg + 2, dst_port);
+    net_put32(seg + 4, seq);
+    net_put32(seg + 8, ack);
+    seg[12] = (u8)(5u << 4);
+    seg[13] = (u8)(TCP_RST | TCP_ACK);
+    net_put16(seg + 14, 0u);
+    net_put16(seg + 16, net_tcp_checksum(net_config_get()->ip, dst_ip, seg,
+                                         sizeof(seg)));
+    (void)net_ipv4_send(dst_ip, NET_IP_PROTO_TCP, seg, sizeof(seg));
+}
+
+/* A reset is only honoured when its sequence number is inside our receive
+   window (RFC 793 3.4): an off-path attacker who guesses the four-tuple but
+   not the sequence must not be able to tear a connection down. */
+static int tcp_rst_valid(const struct net_tcp_socket *s, u32 seq, u32 ack)
+{
+    u32 hi;
+
+    if (s->state == NET_TCP_SYN_SENT)
+        return ack == s->snd_nxt;
+    hi = s->rcv_nxt + (u32)s->rx_count;
+    if (hi == s->rcv_nxt)
+        hi = s->rcv_nxt + 1u;
+    if (!net_seq_le(s->rcv_nxt, seq) || !net_seq_lt(seq, hi))
+        return 0;
+    return 1;
 }
 
 static struct net_tcp_socket *tcp_lookup(u32 src_ip, u16 sport, u16 dport)
@@ -162,9 +232,16 @@ static void tcp_listen_input(struct net_tcp_socket *ls, u32 src_ip, u16 sport,
     if (!(flags & TCP_SYN) || (flags & TCP_ACK))
         return;
     s = tcp_socket_new();
-    if (!s)
+    if (!s) {
+        /* Phase S1: refuse the handshake instead of dropping it silently.  A
+           SYN that gets no answer leaves the peer retrying while our table
+           stays exhausted; RST|ACK fails the handshake fast. */
+        g_syn_overflows++;
+        tcp_send_reset(src_ip, ls->local_port, sport, 0u, seq + 1u);
         return;
+    }
     s->state = NET_TCP_SYN_RECEIVED;
+    s->state_ns = timer_monotonic_ns();
     s->remote_ip = src_ip;
     s->remote_port = sport;
     s->local_port = ls->local_port;
@@ -204,6 +281,8 @@ void tcp_receive_segment(u32 src_ip, u32 dst_ip, const u8 *seg, usize len)
     if (!s)
         return;
     if (flags & TCP_RST) {
+        if (!tcp_rst_valid(s, seq, (flags & TCP_ACK) ? ack : 0u))
+            return;
         s->state = NET_TCP_CLOSED;
         s->peer_closed = 1;
         return;
@@ -251,6 +330,81 @@ void tcp_receive_segment(u32 src_ip, u32 dst_ip, const u8 *seg, usize len)
     }
 }
 
+int tcp_synflood_requested(void)
+{
+    return g_synflood_requested;
+}
+
+/* Phase S1 gate 68: fill the table, feed one more SYN, then prove the four
+   stale half-open entries come back.  The wire path is skipped so the test
+   needs no device, no ARP and no peer. */
+int tcp_synflood_selftest(void)
+{
+    struct net_tcp_socket *ls;
+    struct net_tcp_socket *a;
+    struct net_tcp_socket *b;
+    struct net_tcp_socket *c;
+    struct net_tcp_socket *fresh;
+    u8 syn[TCP_HEADER_BYTES];
+    u64 now;
+    u32 rsts;
+    int ok = 1;
+
+    tcp_init();
+    g_syn_test_mode = 1;
+    rsts = g_syn_overflows;
+    ls = tcp_socket_new();
+    if (!ls || tcp_listen(ls, (u16)NET_TCP_DEFAULT_HTTP_PORT) != 0)
+        ok = 0;
+    a = tcp_socket_new();
+    b = tcp_socket_new();
+    c = tcp_socket_new();
+    if (!a || !b || !c)
+        ok = 0;
+    if (ok) {
+        memset(syn, 0, sizeof(syn));
+        net_put16(syn, 40000u);
+        net_put16(syn + 2, (u16)NET_TCP_DEFAULT_HTTP_PORT);
+        net_put32(syn + 4, 1000u);
+        syn[12] = (u8)(5u << 4);
+        syn[13] = TCP_SYN;
+        net_put16(syn + 16, net_tcp_checksum(0x0A000263u,
+                                             net_config_get()->ip, syn,
+                                             sizeof(syn)));
+        tcp_receive_segment(0x0A000263u, net_config_get()->ip, syn,
+                            sizeof(syn));
+        if (g_syn_overflows != rsts + 1u)
+            ok = 0;
+    }
+    if (ok) {
+        /* Absolute time is tiny this early in boot, so backdate by starting the
+           stamp at zero instead of subtracting from now. */
+        now = NET_TCP_SYN_TIMEOUT_NS + 1ull;
+        a->state = NET_TCP_SYN_RECEIVED;
+        a->state_ns = 0;
+        b->state = NET_TCP_SYN_RECEIVED;
+        b->state_ns = 0;
+        c->state = NET_TCP_SYN_SENT;
+        c->state_ns = 0;
+        if (tcp_reap_stale(now) != 3)
+            ok = 0;
+        fresh = tcp_socket_new();
+        if (!fresh)
+            ok = 0;
+        else
+            tcp_socket_release(fresh);
+    }
+    g_syn_test_mode = 0;
+    tcp_init();
+    if (!ok) {
+        kprintf("CRUGOS: tcp syn flood selftest failed\n");
+        return 0;
+    }
+    kprintf("CRUGOS: tcp syn flood selftest ok (%u overflow(s), %u reaped)\n",
+            (unsigned)g_syn_overflows, (unsigned)g_syn_reaped);
+    return 1;
+}
+
 static int tcp_wait_ack(struct net_tcp_socket *s, u32 want, u32 timeout_ms)
 {
     u64 deadline = timer_monotonic_ns() + (u64)timeout_ms * 1000000ull;
@@ -276,6 +430,7 @@ int tcp_connect(struct net_tcp_socket *s, u32 ip, u16 port, u32 timeout_ms)
     s->remote_ip = ip;
     s->remote_port = port;
     s->state = NET_TCP_SYN_SENT;
+    s->state_ns = timer_monotonic_ns();
     s->peer_closed = 0;
     s->rx_head = 0;
     s->rx_count = 0;
@@ -415,6 +570,7 @@ static void tcp_cmdline_token(const char *tok, usize len)
 {
     static const char peer_prefix[] = "net.tcp=";
     static const char serve_prefix[] = "net.serve=";
+    static const char flood_prefix[] = "net.synflood=";
     usize k;
     u32 v;
 
@@ -440,6 +596,13 @@ static void tcp_cmdline_token(const char *tok, usize len)
         }
         if (v >= 1 && v <= 3600)
             g_serve_seconds = v;
+        return;
+    }
+    if (len > sizeof(flood_prefix) - 1 &&
+        memcmp(tok, flood_prefix, sizeof(flood_prefix) - 1) == 0) {
+        if (len - (sizeof(flood_prefix) - 1) == 1 &&
+            tok[sizeof(flood_prefix) - 1] == '1')
+            g_synflood_requested = 1;
     }
 }
 

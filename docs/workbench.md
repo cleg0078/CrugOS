@@ -556,7 +556,7 @@ a body-relative (12,60,160,22) `Send to Workbench` gadget, return to screen 0 an
 print `CRUGOS: wb screens ready (%u screen(s), front %d)`. A press on the gadget
 moves the Tools window to screen 0, which is the programmatic way to show a move
 without dragging the window's title bar across a screen edge. In screens mode the
-Workbench window body reads `phase 8b` and the self-test ends with
+Workbench window body reads `phase s1` and the self-test ends with
 `CRUGOS: wb screens selftest ok (%u switch(es), %u move(s))`.
 
 ## Commodities Exchange
@@ -733,7 +733,7 @@ box with exclusive x1/y1) and `intuition_redraw()` /
 `fb_present_end()`, which clip the rectangle, transfer it with
 `TRANSFER_TO_HOST_2D` and flush it with `RESOURCE_FLUSH`. One repaint is one
 transfer and one flush; the console flushes once per line rather than once per
-glyph. Window body text paints `phase 8b`, and the boot prints
+glyph. Window body text paints `phase s1`, and the boot prints
 `CRUGOS: virtio-gpu ready (1280x800, 1000 backing page(s), resource 1, modern pci)` and
 `CRUGOS: gpu scanout ok (1280x800, 1 transfer(s), 1 flush(es))` before the desktop
 marker.
@@ -793,7 +793,7 @@ index and the new tile origin.
 
    | id | rectangle | title | body |
    | --- | --- | --- | --- |
-   | 1 | (80, 90) 360x220 | `Workbench` | `CrugOS Workbench` / `phase 8b` / `software rendered` |
+   | 1 | (80, 90) 360x220 | `Workbench` | `CrugOS Workbench` / `phase s1` / `software rendered` |
    | 2 | (480, 300) 320x200 | `Shell` | `4.OS` / `crugos>`, or the shell grid when `wb.shell=1` |
 
    Window 1 carries the `Workbench` (About/Info/Quit) and `Window`
@@ -888,7 +888,7 @@ CRUGOS: wb window 2 drag start (512, 312)
 CRUGOS: wb window 2 drag to (557, 337)
 CRUGOS: wb window 2 moved to (570, 350)
 CRUGOS: wb selftest ok (1 drag(s), 0 action(s))
-CRUGOS: phase 8b boot ok
+CRUGOS: phase s1 boot ok
 ```
 
 The menu gate is a second boot and adds the action lines:
@@ -906,7 +906,7 @@ CRUGOS: wb menu 'Workbench' open (window 1)
 CRUGOS: wb menu 'Workbench' selected ('Quit')
 CRUGOS: wb action 4 menu window 1 item 2
 CRUGOS: wb selftest ok (0 drag(s), 4 action(s))
-CRUGOS: phase 8b boot ok
+CRUGOS: phase s1 boot ok
 ```
 
 The shell gate is a third boot: it adds `CRUGOS: wb shell ready (window 2,
@@ -933,7 +933,7 @@ CRUGOS: wb menu 'Workbench' item 1 highlighted ('Info')
 CRUGOS: wb menu 'Workbench' selected ('Info')
 CRUGOS: wb action 2 menu window 1 item 1
 CRUGOS: wb selftest ok (0 drag(s), 2 action(s))
-CRUGOS: phase 8b boot ok
+CRUGOS: phase s1 boot ok
 ```
 
 The desktop gate is a fifth boot: it selects the `System:` object, opens its
@@ -951,7 +951,7 @@ CRUGOS: wb window 3 sent to back
 CRUGOS: wb action 3 depth window 3
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb selftest ok (0 drag(s), 3 action(s))
-CRUGOS: phase 8b boot ok
+CRUGOS: phase s1 boot ok
 ```
 
 The icon gate is a sixth boot: it focuses the `System:` object from the
@@ -975,7 +975,7 @@ CRUGOS: wb window 1 sent to front
 CRUGOS: wb action 5 front window 1
 CRUGOS: wb icons selftest ok (1 move(s), 1 front(s))
 CRUGOS: wb selftest ok (0 drag(s), 5 action(s))
-CRUGOS: phase 8b boot ok
+CRUGOS: phase s1 boot ok
 ```
 
 The drawer gate is a seventh boot, the only one that fills the volume first:
@@ -1001,7 +1001,7 @@ CRUGOS: wb drawer refreshed (29 entries)
 CRUGOS: wb selftest ok (0 drag(s), 0 action(s))
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb drawer selftest ok (3 scroll(s), 1 refresh(es))
-CRUGOS: phase 8b boot ok
+CRUGOS: phase s1 boot ok
 ```
 
 The select gate is an eighth boot: same filled drawer, but the pointer now
@@ -1024,7 +1024,7 @@ CRUGOS: wb drawer scrollbar to (top 18 of 29)
 CRUGOS: wb drawer selected '<name>' (index 18 of 29)
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb select selftest ok (2 select(s), 1 scrollbar drag(s))
-CRUGOS: phase 8b boot ok
+CRUGOS: phase s1 boot ok
 ```
 
 The screens gate is a ninth boot: two screens, a switch and a move between them:
@@ -1039,7 +1039,7 @@ CRUGOS: wb action 3 screen-move window 3 to 0
 CRUGOS: wb screen 0 front (3 window(s))
 CRUGOS: wb action 4 screen 0 front
 CRUGOS: wb screens selftest ok (2 switch(es), 1 move(s))
-CRUGOS: phase 8b boot ok
+CRUGOS: phase s1 boot ok
 ```
 
 The commodities gate is a tenth boot: four registered utilities, a manager
@@ -1055,7 +1055,7 @@ CRUGOS: wb action 3 commodity Mute fired (muted)
 CRUGOS: wb action 4 commodity Clock fired (uptime 1 s)
 CRUGOS: wb cx selftest ok (2 toggle(s), 2 fire(s))
 CRUGOS: wb selftest ok (0 drag(s), 4 action(s))
-CRUGOS: phase 8b boot ok
+CRUGOS: phase s1 boot ok
 ```
 
 The app-bundle gate boots the desktop with a three-bundle registry
@@ -1073,7 +1073,7 @@ CRUGOS: wb app launch hello tid 11
 CRUGOS: wb app reaped tid 11 exit 0
 CRUGOS: wb selftest ok (0 drag(s), 0 action(s))
 CRUGOS: wb app selftest ok (2 click(s), 1 launch(es))
-CRUGOS: phase 8b boot ok
+CRUGOS: phase s1 boot ok
 ```
 
 | marker | when |
@@ -1445,7 +1445,7 @@ anything else. The script then:
    `ok: workbench title-bar drag (N drag(s), window 2 at (x, y), exit 33)`.
 
 `make test-workbench` then runs `scripts/boot-check.py` with `EXPECT_WB=yes`
-(the phase 8b boot marker, the desktop marker, a `wb selftest ok`, at least one
+(the phase s1 boot marker, the desktop marker, a `wb selftest ok`, at least one
 `wb window N opened`, one `wb window N moved to`, and one `wb cursor at` with
 numeric coordinates) and `scripts/check-disk.py` for the ext4 root.
 
@@ -1480,7 +1480,7 @@ larger relative motion into several 8-bit HID reports and the guest drops some
 of them, so a single jump of 644 pixels landed 136 pixels short when the gate
 was first written.
 
-`boot-check.py` then runs with `EXPECT_MENU=yes`, which requires the phase 8b
+`boot-check.py` then runs with `EXPECT_MENU=yes`, which requires the phase s1
 marker, the desktop marker, the menu open and selected markers, the gadget
 click marker, the close marker, at least one `wb action N ...` line and a
 `wb selftest ok (N drag(s), M action(s))` with at least one action, and
@@ -1526,7 +1526,7 @@ wb.acts=$(WB_KEYS_ACTS)`:
    and Enter to select it, requiring the highlight marker, the selection marker
    and `wb action 2 menu window 1 item 1`.
 5. waits for exit status 33, then runs `scripts/boot-check.py` with
-   `EXPECT_KEYS=yes` (the phase 8b marker, the desktop and keys markers, the
+   `EXPECT_KEYS=yes` (the phase s1 marker, the desktop and keys markers, the
    resize and key-move markers, the menu markers and a two-action
    `wb selftest ok`) and `scripts/check-disk.py`, and prints
    `ok: workbench resize and keyboard navigation (exit 33)`.
@@ -1558,7 +1558,7 @@ wb.acts=$(WB_DESK_ACTS)`:
    back: the drawer title bar turns idle grey `(128,128,128)` and the Shell
    title bar behind it becomes amber at the same point.
 6. waits for exit status 33, then runs `scripts/boot-check.py` with
-   `EXPECT_DESK=yes` (the phase 8b marker, the desktop and icon markers, the
+   `EXPECT_DESK=yes` (the phase s1 marker, the desktop and icon markers, the
    drawer marker, the icon and depth action lines, the desk self-test line and
    a three-action `wb selftest ok`) and `scripts/check-disk.py`, and prints
    `ok: workbench desktop objects and depth (exit 33)`.
@@ -1585,7 +1585,7 @@ wb.ikeys=1 wb.acts=$(WB_ICONS_ACTS)`:
 5. presses the front gadget at (394,102): the same title bar turns amber
    `(255,176,0)` again and the log carries
    `CRUGOS: wb window 1 sent to front`.
-6. waits for exit status 33, then `scripts/boot-check.py` requires the phase 8b
+6. waits for exit status 33, then `scripts/boot-check.py` requires the phase s1
    marker, the icons-ready, focus, drag, drop, front and action markers, the
    icon self-test line and `EXPECT_ICONS=yes` (its ok line reads `desk no icons
    yes storage disk`), and `scripts/check-disk.py` still runs a clean `e2fsck`.

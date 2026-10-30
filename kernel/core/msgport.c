@@ -102,7 +102,9 @@ i64 msgport_recv(msgport *port, u64 *type, void *data, usize cap)
     n = m->len < cap ? (usize)m->len : cap;
     if (n && data)
         memcpy(data, m->payload, n);
-    n = (usize)m->len;
+    /* Phase S1: report what was actually copied, not what the sender wrote.
+       Returning the full length told a caller with a small buffer that its
+       tail had been filled when it never was. */
     kfree(m);
     return (i64)n;
 }
