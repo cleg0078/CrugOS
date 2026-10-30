@@ -53,6 +53,7 @@ make test-gpu    # boot on a virtio-gpu scanout and verify the GPU-backed deskto
 make test-gpu-usb  # scanout plus a hotplugged USB mouse above 4 GiB
 make test-gpu-edid  # take the scanout mode from the display's EDID
 make test-gpu-cursor  # drive the hardware cursor plane and count the updates
+make test-gpu-cursor-shape  # prove the cursor sprite's pixels arrive over VNC
 make test-hardening  # boot crafted superblock/inode/crypt images and assert the rejections
 make test-heap   # corrupt the kernel heap and prove the integrity checker catches it
 make test-trap   # inject eight crafted faults and check the report, IST and panic
@@ -211,6 +212,11 @@ options` prints the complete resolved set (including paths derived from
 | `GPU_USB_QEMU_EXTRA` | `-vga none -device virtio-gpu-pci,id=gpu0 -device qemu-xhci,id=xhci` | extra QEMU arguments for `make test-gpu-usb`, which adds the xHCI controller the 64-bit BAR fix repairs |
 | `GPU_EDID_DEVICE` | `virtio-gpu-pci,id=gpu0,xres=1152,yres=864` | the virtio-gpu function `make test-gpu-edid` pins to a non-default timing no fallback can produce |
 | `GPU_EDID_QEMU_EXTRA` | `-vga none -device $(GPU_EDID_DEVICE)` | QEMU arguments for `make test-gpu-edid`, built from `GPU_EDID_DEVICE` |
+| `GPU_SHAPE_WB_WAIT` | `30` | seconds the cursor-shape gate boots with `wb.wait=` before the VNC client starts asking for updates |
+| `GPU_SHAPE_BOOT_TIMEOUT_SEC` | `180` | wall-clock budget for the boot leg of `make test-gpu-cursor-shape` |
+| `GPU_SHAPE_TIMEOUT_SEC` | `240` | how long the VNC client waits for an alpha-cursor rect before a cursor-shape timeout |
+| `GPU_SHAPE_RUN_TIMEOUT_SEC` | `300` | wall-clock budget for the whole `make test-gpu-cursor-shape` run |
+| `GPU_SHAPE_QEMU_EXTRA` | `-vga none -device virtio-gpu-pci,id=gpu0` | QEMU arguments for `make test-gpu-cursor-shape`, the device whose cursor plane the VNC client reads |
 | `HARDEN_TIMEOUT_SEC` | `120` | wall-clock budget in seconds for each crafted image booted by `make test-hardening` |
 | `EXPECT_HEAP` | `no` | `yes` requires the heap stress, guard and check markers written by `make test-heap` |
 | `EXPECT_USER` | `no` | `yes` requires the `user hello` / `user badptr blocked (EFAULT)` / `user fault killed tid` / `user selftest ok` markers written by `make test-user`; any other gate fails if a `user selftest ok` line appears |
@@ -739,8 +745,8 @@ script takes a `screendump` and checks the Exchange body (700,250) against
 `scripts/boot-check.py --expect-cx=yes` (a flag, not an extra positional, so the
 argv layout is unchanged) then requires the ready/action/selftest markers and
 `scripts/check-disk.py` runs a clean `e2fsck`. The tree's `make test-host`
-suite reports 8521 checks, and `make size` reports a 352432 B (344 KiB) file and
-a 1002250 B (978 KiB) load image.
+suite reports 8521 checks, and `make size` reports a 352440 B (344 KiB) file and
+a 1002570 B (979 KiB) load image.
 
 `make test-hardening` is gate 44 and proves the phase H1 hardening pass against
 crafted images. [scripts/run-hardening.py](../scripts/run-hardening.py) copies
@@ -786,8 +792,8 @@ file or a 124 timeout is a hang. The driver prints
 `ok: trap policy reported 8 crafted fault(s) (control boot exit 33)`;
 `run-trap.py` accepts `--keep` to leave those disks in the serial-log
 directory, and `tests/host/test_trap.c` covers the same matrix on the host, so
-`make test-host` reports 8521 checks. `make size` reports a 352432 B (344 KiB)
-file and a 1002250 B (978 KiB) load image.
+`make test-host` reports 8521 checks. `make size` reports a 352440 B (344 KiB)
+file and a 1002570 B (979 KiB) load image.
 
 `make test-fuzz` is gate 47 and proves the phase H4 host mount-path fuzzer.
 Unlike every other gate it never boots QEMU: it deletes
@@ -839,8 +845,8 @@ Every other gate runs with `EXPECT_USER=no`, and `boot-check.py` fails any of
 them that prints `user selftest ok`, so the userspace selftest cannot leak into
 an unrelated boot. `tests/host/test_uaccess.c` and `tests/host/test_exec.c`
 cover the same window, segment and entry validators and the ELF segment policy
-on the host. `make test-host` reports 8521 checks and `make size` a 352432 B
-(344 KiB) file and a 1002250 B (978 KiB) load image. The marker set, the
+on the host. `make test-host` reports 8521 checks and `make size` a 352440 B
+(344 KiB) file and a 1002570 B (979 KiB) load image. The marker set, the
 syscall boundary, the loader pipeline and the limits are documented in
 [userspace.md](userspace.md).
 
@@ -962,7 +968,7 @@ two `user cow fault ... (copy)` lines and one `... (sole owner)` line, then
 and exit 33 while boot-check reports
 `user yes isolated yes ushell yes spawn yes fork yes forkbig yes`. The host
 suite covers the reference table and the clone: `make test-host` reports 8521
-checks and `make size` a 352432 B (344 KiB) file and a 1002250 B (978 KiB) load
+checks and `make size` a 352440 B (344 KiB) file and a 1002570 B (979 KiB) load
 image. Every other gate runs with `EXPECT_FORKBIG=no`, and `boot-check.py`
 fails any boot that prints a forkbig marker. The copy-on-write bit, the
 reference table and the fault taxonomy are documented in
@@ -989,8 +995,8 @@ s): `/etc/app.rc` makes the shell print `CRUGOS: sh app count N`,
 kernel ends the level with `CRUGOS: user app ok (exit 9)` because the script
 exits 9. Both legs finish with `scripts/check-disk.py`, and the driver prints
 `ok: app bundles and tool types (exit 33)`. The tree's `make test-host` suite
-reports 8521 checks, and `make size` reports a 352432 B (344 KiB) file and a
-1002250 B (978 KiB) load image (`.text` 251174 B, `.rodata` 38272 B, `.data`
+reports 8521 checks, and `make size` reports a 352440 B (344 KiB) file and a
+1002570 B (979 KiB) load image (`.text` 251430 B, `.rodata` 38336 B, `.data`
 100 B, `.bss` 712704 B).
 
 `make test-pkg` is gate 57 and proves the signed package lifecycle. It rebuilds
@@ -1098,8 +1104,31 @@ pixels; it takes `scripts/run-gpu.py --expect-cursor` plus the serial counters
 `CRUGOS: gpu cursor selftest ok (2 show(s), 1 move(s))` as its evidence, prints
 `ok: virtio-gpu scanout 1280x800, hardware cursor (14 transfer(s), 14 flush(es),
 exit 33)`, then runs `boot-check.py --expect-gpu=yes --expect-gpu-cursor=yes`
-and the disk check. Both legs boot the same `gpu.enable`/`gpu.test` cmdline and
-rebuild neither disk image. See [gpu.md](gpu.md). The suite is now 63 gates.
+and the disk check. Those counters are a smoke test, not a proof of drawing:
+while the cursor command layout was wrong the guest still counted every show
+and move and this gate passed with nothing on the plane. Gate 63 boots the
+same `gpu.enable`/`gpu.test` cmdline and rebuilds neither disk image.
+
+`make test-gpu-cursor-shape` is gate 64 and the pixel proof. It boots
+`make run` under `QEMU_DISPLAY=vnc=127.0.0.1:<port>` with
+`GPU_SHAPE_QEMU_EXTRA ?= -vga none -device virtio-gpu-pci,id=gpu0` and the
+same `wb.enable`/`gpu.enable`/`gpu.test` cmdline (`wb.wait=` comes from
+`GPU_SHAPE_WB_WAIT`), then `scripts/run-gpu-cursor-shape.py` speaks RFB 3.8 to
+QEMU and asks for `VNC_ALPHA_CURSOR` updates until the cursor rect arrives.
+`check_shape` requires 64x64, at least 100 opaque pixels and both the white
+border and the amber body, and the run prints
+
+```
+gpu: cursor shape 64x64 at 0,0 (120 opaque pixel(s), 2 colour(s))
+ok: hardware cursor shape 64x64 carries 120 opaque pixel(s) in 2 colour(s), exit 33
+```
+
+then `boot-check.py --expect-gpu=yes --expect-gpu-cursor=yes` and
+`check-disk.py`. No rect means a cursor-shape timeout, which is exactly what a
+dropped `UPDATE_CURSOR` produces, and `GPU_SHAPE_BOOT_TIMEOUT_SEC` (180),
+`GPU_SHAPE_TIMEOUT_SEC` (240) and `GPU_SHAPE_RUN_TIMEOUT_SEC` (300) bound the
+boot, the VNC wait and the whole run. See [gpu.md](gpu.md). The suite is now
+64 gates.
 
 ## Interactive demo
 

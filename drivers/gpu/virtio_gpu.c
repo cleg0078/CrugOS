@@ -740,26 +740,34 @@ static int gpu_cursor_submit(u32 cmd_len)
     return 0;
 }
 
+/* struct virtio_gpu_update_cursor is 56 bytes on the wire: a 24-byte header,
+   struct virtio_gpu_cursor_pos {scanout_id, x, y, padding}, then resource_id,
+   hot_x, hot_y and a final padding word.  The scanout id comes FIRST, so a
+   command that puts x there is silently dropped by the host:
+   update_cursor() returns early when pos.scanout_id >= max_outputs. */
+#define GPU_CURSOR_CMD_BYTES 56u
+
 static int gpu_cursor_update(u32 x, u32 y, u32 id)
 {
     gpu_cmd_init(g_cmd, GPU_CMD_MAX, GPU_CMD_UPDATE_CURSOR);
-    gpu_put32(g_cmd, 24u, x);
-    gpu_put32(g_cmd, 28u, y);
-    gpu_put32(g_cmd, 32u, 0u);
-    gpu_put32(g_cmd, 36u, 0u);
-    gpu_put32(g_cmd, 40u, id);
-    gpu_put32(g_cmd, 44u, 0u);
-    return gpu_cursor_submit(48u);
+    gpu_put32(g_cmd, 24u, 0u);  /* pos.scanout_id */
+    gpu_put32(g_cmd, 28u, x);   /* pos.x */
+    gpu_put32(g_cmd, 32u, y);   /* pos.y */
+    gpu_put32(g_cmd, 36u, 0u);  /* pos.padding */
+    gpu_put32(g_cmd, 40u, id);  /* resource_id */
+    gpu_put32(g_cmd, 44u, 0u);  /* hot_x */
+    gpu_put32(g_cmd, 48u, 0u);  /* hot_y */
+    gpu_put32(g_cmd, 52u, 0u);  /* padding */
+    return gpu_cursor_submit(GPU_CURSOR_CMD_BYTES);
 }
 
 static int gpu_cursor_move_cmd(u32 x, u32 y)
 {
     gpu_cmd_init(g_cmd, GPU_CMD_MAX, GPU_CMD_MOVE_CURSOR);
-    gpu_put32(g_cmd, 24u, x);
-    gpu_put32(g_cmd, 28u, y);
-    gpu_put32(g_cmd, 32u, 0u);
-    gpu_put32(g_cmd, 36u, 0u);
-    return gpu_cursor_submit(40u);
+    gpu_put32(g_cmd, 24u, 0u);  /* pos.scanout_id */
+    gpu_put32(g_cmd, 28u, x);   /* pos.x */
+    gpu_put32(g_cmd, 32u, y);   /* pos.y */
+    return gpu_cursor_submit(GPU_CURSOR_CMD_BYTES);
 }
 
 static int gpu_cursor_op_show(u32 x, u32 y)
@@ -804,6 +812,21 @@ static void gpu_cursor_op_hide(void)
     g->cursor_shown = 0;
 }
 
+/* 2D virtio-gpu keeps the resource pixels on the host side: ATTACH_BACKING
+   only registers the guest pages, it copies nothing.  The cursor plane reads
+   the host-side image, so without this TRANSFER_TO_HOST_2D the plane is
+   fully transparent and the pointer is invisible even though every
+   UPDATE_CURSOR command succeeds. */
+static int gpu_cursor_upload(u32 id)
+{
+    gpu_cmd_init(g_cmd, GPU_CMD_MAX, GPU_CMD_TRANSFER_TO_HOST_2D);
+    gpu_fill_rect_cmd(24u, 0u, 0u, GPU_CURSOR_PX, GPU_CURSOR_PX);
+    gpu_put64(g_cmd, 40u, 0u);
+    gpu_put32(g_cmd, 48u, id);
+    gpu_put32(g_cmd, 52u, 0u);
+    return gpu_submit(56u, GPU_RESP_OK_NODATA);
+}
+
 /* The hardware cursor plane keeps the pointer out of the rendered surface:
    the scanner composites a 64x64 ARGB resource over the scanout, so the
    compositor never has to save and restore the pixels underneath. */
@@ -842,6 +865,17 @@ static int gpu_cursor_init(struct gpu_state *g)
         pmm_free_pages(pa, pages);
         return -1;
     }
+    if (gpu_cursor_upload(GPU_CURSOR_RESOURCE_ID) != 0) {
+        /* The host holds the backing pages now, so they stay mapped even
+           though the plane is unusable and the software sprite takes over. */
+        g->cursor_pa = pa;
+        g->cursor_pages = pages;
+        g->cursor = img;
+        return -1;
+    }
+    kprintf("CRUGOS: gpu cursor uploaded (%ux%u, %u byte(s), resource %u)\n",
+            (unsigned)GPU_CURSOR_PX, (unsigned)GPU_CURSOR_PX, (unsigned)bytes,
+            (unsigned)GPU_CURSOR_RESOURCE_ID);
     g->cursor_pa = pa;
     g->cursor_pages = pages;
     g->cursor = img;

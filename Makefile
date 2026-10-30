@@ -52,6 +52,7 @@
 #   make test-gpu-usb  scanout plus a hotplugged USB mouse above 4 GiB
 #   make test-gpu-edid  pick the display mode from the device EDID
 #   make test-gpu-cursor  move the pointer on the virtio-gpu cursor plane
+#   make test-gpu-cursor-shape  prove the cursor plane really carries pixels over VNC
 #   make test-pkg    install, update and remove a signed package
 #   make test-caps   launch an installed bundle and prove its capability wall
 #   make crypt-disk  build the AES-256-XTS crypt test disk
@@ -225,6 +226,17 @@ GPU_USB_QEMU_EXTRA ?= $(GPU_QEMU_EXTRA) -device qemu-xhci,id=xhci
 # driver decoded the EDID instead of its 1024x768 fallback list.
 GPU_EDID_DEVICE ?= virtio-gpu-pci,id=gpu0,xres=1152,yres=864
 GPU_EDID_QEMU_EXTRA ?= -vga none -device $(GPU_EDID_DEVICE)
+
+# Cursor shape gate (make test-gpu-cursor-shape): a QMP screendump cannot see
+# the hardware cursor plane, and QEMU pushes no completion on the cursor queue,
+# so a VNC client asks the device for its alpha cursor (VNC encoding -314) and
+# checks the pixels that come back.  Without a working UPDATE_CURSOR the host
+# never defines a cursor and the client waits forever.
+GPU_SHAPE_WB_WAIT ?= 30
+GPU_SHAPE_BOOT_TIMEOUT_SEC ?= 180
+GPU_SHAPE_TIMEOUT_SEC ?= 240
+GPU_SHAPE_RUN_TIMEOUT_SEC ?= 300
+GPU_SHAPE_QEMU_EXTRA ?= -vga none -device virtio-gpu-pci,id=gpu0
 
 # Package gates (make test-pkg / make test-caps): pkg.test=1 installs the
 # signed captest bundle, updates it, refuses a downgrade and an untrusted
@@ -460,7 +472,8 @@ HOST_MKPKG_SOURCES := tools/mkpkg.c kernel/crypto/ed25519.c \
         test-workbench-desk test-workbench-icons test-workbench-drawer \
         test-workbench-select test-workbench-screens test-workbench-cx \
         test-workbench-pkg test-app-bundles test-gpu test-gpu-usb \
-        test-gpu-edid test-gpu-cursor test-pkg test-caps packages mkpkg \
+        test-gpu-edid test-gpu-cursor test-gpu-cursor-shape test-pkg \
+        test-caps packages mkpkg \
         iso check-iso test-iso usb \
         crash-disk \
         check-disk size check-efi repro test-host preflight version options clean distclean help
@@ -1039,6 +1052,23 @@ test-gpu-cursor: esp
 	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no --expect-gpu=yes --expect-gpu-cursor=yes
 	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 
+# Cursor shape gate (phase 8B): QEMU answers UPDATE_CURSOR by defining a cursor
+# on the console, which only a display client can see.  The guest cannot even
+# tell whether the host accepted the command, because the cursor queue is not
+# answered, so the proof is the alpha-cursor rect a VNC client receives.
+test-gpu-cursor-shape: esp
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(MAKE) --no-print-directory disk
+	$(Q)$(PYTHON) scripts/run-gpu-cursor-shape.py --repo $(CURDIR) \
+		--disk $(abspath $(DISK_IMG)) --serial-log $(abspath $(SERIAL_LOG)) \
+		--exit-code $(abspath $(QEMU_EXIT)) --wb-wait $(GPU_SHAPE_WB_WAIT) \
+		--boot-timeout $(GPU_SHAPE_BOOT_TIMEOUT_SEC) \
+		--shape-timeout $(GPU_SHAPE_TIMEOUT_SEC) \
+		--run-timeout $(GPU_SHAPE_RUN_TIMEOUT_SEC) \
+		--qemu-extra "$(GPU_SHAPE_QEMU_EXTRA)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no --expect-gpu=yes --expect-gpu-cursor=yes
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
 # App-bundle gate (phase 7A): wb.app=1 adds the Applications icon; a double
 # click opens the bundle list and a double click on a row launches that
 # program, which the desktop then reaps with its exit status.  A second boot
@@ -1494,6 +1524,11 @@ options:
 	@printf '  %-16s %s\n' GPU_USB_QEMU_EXTRA "$(GPU_USB_QEMU_EXTRA)"
 	@printf '  %-16s %s\n' GPU_EDID_DEVICE "$(GPU_EDID_DEVICE)"
 	@printf '  %-16s %s\n' GPU_EDID_QEMU_EXTRA "$(GPU_EDID_QEMU_EXTRA)"
+	@printf '  %-16s %s\n' GPU_SHAPE_WB_WAIT "$(GPU_SHAPE_WB_WAIT) (seconds)"
+	@printf '  %-16s %s\n' GPU_SHAPE_BOOT_TIMEOUT_SEC "$(GPU_SHAPE_BOOT_TIMEOUT_SEC) (seconds)"
+	@printf '  %-16s %s\n' GPU_SHAPE_TIMEOUT_SEC "$(GPU_SHAPE_TIMEOUT_SEC) (seconds)"
+	@printf '  %-16s %s\n' GPU_SHAPE_RUN_TIMEOUT_SEC "$(GPU_SHAPE_RUN_TIMEOUT_SEC) (seconds)"
+	@printf '  %-16s %s\n' GPU_SHAPE_QEMU_EXTRA "$(GPU_SHAPE_QEMU_EXTRA)"
 	@printf '  %-16s %s\n' EXPECT_PKG "$(EXPECT_PKG)"
 	@printf '  %-16s %s\n' PKG_RUN_TIMEOUT_SEC "$(PKG_RUN_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' EXPECT_CAPS "$(EXPECT_CAPS)"

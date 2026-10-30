@@ -1111,7 +1111,22 @@ screendump never contains the cursor plane, so the gate takes the serial
 counters `gpu cursor show`, `gpu cursor move` and
 `CRUGOS: gpu cursor selftest ok (2 show(s), 1 move(s))` as its evidence, with
 `boot-check.py --expect-gpu=yes --expect-gpu-cursor=yes`. See [gpu.md](gpu.md)
-for both.
+for the cursor plane.
+
+`make test-gpu-cursor-shape` (gate 64) is the pixel proof behind that smoke
+test: the runner boots `make run` under `QEMU_DISPLAY=vnc=127.0.0.1:<port>`
+with `GPU_SHAPE_QEMU_EXTRA ?= -vga none -device virtio-gpu-pci,id=gpu0`, and
+`scripts/run-gpu-cursor-shape.py` speaks RFB 3.8, requests
+`VNC_ALPHA_CURSOR` updates and waits for the alpha-cursor rect, which must be
+64x64 with at least 100 opaque pixels in the white border (`0xFFFFFF`) and
+the amber body (`0xFFD040`). Without a working `UPDATE_CURSOR` no rect ever
+arrives and the script fails with a cursor-shape timeout, which is how the
+48-byte/40-byte wire-layout bug was caught; `GPU_SHAPE_WB_WAIT` (30),
+`GPU_SHAPE_BOOT_TIMEOUT_SEC` (180), `GPU_SHAPE_TIMEOUT_SEC` (240) and
+`GPU_SHAPE_RUN_TIMEOUT_SEC` (300) bound it, and `--cmdline=` swaps the gate's
+`wb.enable=1 wb.wait=30 gpu.enable=1 gpu.test=1` line (the demo command line
+returns the same 64x64 shape). Then `boot-check.py --expect-gpu=yes
+--expect-gpu-cursor=yes` and the disk check. See [gpu.md](gpu.md).
 
 The `audio` lines appear only on machines with a USB audio function: a default
 `q35` boot prints `CRUGOS: audio device absent`, while `make test-audio` adds

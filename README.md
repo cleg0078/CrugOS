@@ -98,7 +98,10 @@ remains the fallback; `make test-gpu` is gate 60 and `make test-gpu-usb` is
 gate 61, which repeats the scanout with a hotplugged USB mouse above 4 GiB.
 Phase 8B parses the display's EDID and prefers the monitor's own timing when
 `gpu.size=` is absent, and moves the pointer onto the device's hardware cursor
-plane; `make test-gpu-edid` is gate 62 and `make test-gpu-cursor` is gate 63.
+plane; `make test-gpu-edid` is gate 62, `make test-gpu-cursor` is gate 63 and
+`make test-gpu-cursor-shape` is gate 64, which reads the sprite's pixels over
+VNC after the first cut of the cursor commands turned out to be mislaid on the
+wire.
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -1618,28 +1621,46 @@ display info and the built-in 1024x768/800x600/640x480 list, printing
 `CRUGOS: gpu edid WxH (vendor ..., product ..., N mode(s))` and
 `CRUGOS: gpu mode WxH (<source>)`;
 - the pointer moves to the device's hardware cursor plane: queue 1 carries its
-own 64x64 resource 2, a 48-byte `UPDATE_CURSOR` and a 40-byte `MOVE_CURSOR`
-travel as one non-write descriptor plus a single 16-bit notify and the driver
-only waits for the used index, because the cursor queue writes no used-ring
+own 64x64 resource 2, and `UPDATE_CURSOR`/`MOVE_CURSOR` are 56-byte commands
+whose `virtio_gpu_cursor_pos` comes first (`scanout_id` at 24, x at 28, y at
+32, padding at 36, then the resource id at 40 and hotspot 0,0); each travels
+as one non-write descriptor plus a single 16-bit notify and the driver only
+waits for the used index, because the cursor queue writes no used-ring
 response; `struct fb_cursor_ops` lets `fb.c` delegate show/move/hide and fall
 back to the phase 5D software sprite when no plane exists or an op fails; the
 self-test requires both a show and a move counter;
+- the 8B cursor first shipped a 48-byte `UPDATE_CURSOR` and a 40-byte
+`MOVE_CURSOR`; QEMU's `update_cursor()` reads `scanout_id` at offset 24 first,
+saw 640, returned at once and dropped every command, so no cursor was ever
+defined while the guest counted its own shows and moves -- the reason the
+`make demo` pointer was invisible, and the reason gate 63, which only reads
+those counters, passed anyway; `GPU_CURSOR_CMD_BYTES` is now 56;
 - the cursor commands do not ride the control queue: its 2D command switch has
 no cursor case and answers 0x1200 (`err-unspec`), which used to make the
 kernel silently fall back to the sprite;
 - `make test-gpu-edid` is gate 62 and pins the device to a 1152x864 timing
 that is neither the fallback nor a QEMU default, so the scanout size can only
 come from the decoded EDID (`--expect-edid`, `--expect-gpu-edid=yes`);
-- `make test-gpu-cursor` is gate 63 and takes the serial show and move
-counters as its evidence, because a screendump of `gpu0` never contains the
-cursor plane (`--expect-cursor`, `--expect-gpu-cursor=yes`);
+- `make test-gpu-cursor` is gate 63 and keeps the serial show and move
+counters as a cheap smoke test, because a screendump of `gpu0` never contains
+the cursor plane (`--expect-cursor`, `--expect-gpu-cursor=yes`); on its own
+that proved nothing while the wire layout was wrong;
+- `make test-gpu-cursor-shape` is gate 64: it boots `make run` under
+`QEMU_DISPLAY=vnc=...` so `scripts/run-gpu-cursor-shape.py` can speak RFB 3.8,
+request `VNC_ALPHA_CURSOR` updates and require a 64x64 rect with at least 100
+opaque pixels carrying both the white border (`0xFFFFFF`) and the amber body
+(`0xFFD040`), then runs `boot-check.py` with `--expect-gpu=yes` and
+`--expect-gpu-cursor=yes` and the disk check; no rect means a cursor-shape
+timeout, so a dropped `UPDATE_CURSOR` fails the gate, and the same probe on
+the demo command line returned the shape, which is the proof that the `make
+demo` pointer is back;
 - `tests/host/test_gpu.c` gained a synthetic 128-byte EDID (vendor `RHT`,
 product `0x1234`, 1024x768@60 and 800x600@60) plus rejection cases for a bad
 checksum, a bad header, 127-byte input, no detailed timing and null pointers,
 a four-timing cap and the unknown-vendor path, so `make test-host` reports
-8521 checks; `make size` reports a 352432 B (344 KiB) kernel file and a
-1002250 B (978 KiB) load image (`.text` 251174 B, `.rodata` 38272 B, `.data`
-100 B, `.bss` 712704 B), and all 63 gates pass;
+8521 checks; `make size` reports a 352440 B (344 KiB) kernel file and a
+1002570 B (979 KiB) load image (`.text` 251430 B, `.rodata` 38336 B, `.data`
+100 B, `.bss` 712704 B), and all 64 gates pass;
 - 3D is still deferred: this host has no `/dev/dri` render node, so QEMU
 refuses virgl (`The display backend does not have OpenGL support enabled`,
 `egl: no drm render node available`) and blob resources stay off; the 3D half
@@ -1952,6 +1973,7 @@ make test-gpu    # boot on a virtio-gpu scanout and verify the GPU-backed deskto
 make test-gpu-usb  # scanout plus a hotplugged USB mouse above 4 GiB
 make test-gpu-edid    # take the scanout mode from the display's EDID
 make test-gpu-cursor  # drive the hardware cursor plane and count its updates
+make test-gpu-cursor-shape  # prove the hardware cursor's pixels over VNC
 make test-hardening  # craft hostile superblock/inode/crypt images and boot them
 make test-heap   # corrupt the kernel heap and prove the integrity checker catches it
 make test-trap   # inject eight crafted faults and check the report, IST and panic
@@ -2011,7 +2033,9 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `WB_CX_RUN_TIMEOUT_SEC`, `WB_APP_WAIT`, `WB_APP_ACTS`,
 `WB_APP_RUN_TIMEOUT_SEC`, `WB_PKG_WAIT`, `WB_PKG_RUN_TIMEOUT_SEC`,
 `GPU_WB_WAIT`, `GPU_RUN_TIMEOUT_SEC`, `GPU_QEMU_EXTRA`, `GPU_USB_QEMU_EXTRA`,
-`GPU_EDID_DEVICE`, `GPU_EDID_QEMU_EXTRA`,
+`GPU_EDID_DEVICE`, `GPU_EDID_QEMU_EXTRA`, `GPU_SHAPE_WB_WAIT`,
+`GPU_SHAPE_BOOT_TIMEOUT_SEC`, `GPU_SHAPE_TIMEOUT_SEC`,
+`GPU_SHAPE_RUN_TIMEOUT_SEC`, `GPU_SHAPE_QEMU_EXTRA`,
 `MKPKG`, `PKG_DATA_DIR`, `PKG_SEED`, `PKG_BAD_SEED`, `PKG_RUN_TIMEOUT_SEC`,
 `CAPS_RUN_TIMEOUT_SEC`, `HARDEN_TIMEOUT_SEC`,
 `HEAP_STRESS_OPS`, `HEAP_RUN_TIMEOUT_SEC`, `TRAP_TIMEOUT_SEC`, `FUZZ_CASES`,

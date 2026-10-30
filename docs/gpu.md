@@ -18,16 +18,19 @@ scanout, and a present path that tells the host what changed.
 Phase 8B adds the two pieces the 2D path was missing: the display's EDID is
 fetched and parsed so the scanout follows the monitor's preferred timing, and
 the pointer gets the device's own hardware cursor plane instead of being
-painted into the same pixels. There is still no virgl context and no 3D
-resource; the specification's accelerated triangle stays deferred.
+painted into the same pixels. The first cut of the cursor support was wrong on
+the wire and drew nothing; the layout is fixed and gate 64 proves the sprite's
+pixels over VNC. There is still no virgl context and no 3D resource; the
+specification's accelerated triangle stays deferred.
 
 The software path is not replaced, it is fronted. With no virtio-gpu device,
 with `gpu.enable=0`, or after any driver failure, the kernel keeps booting on
 the GOP framebuffer exactly as it did in phase 7C. All 59 earlier gates still
 boot that way and are unchanged. `make test-gpu` is gate 60,
-`make test-gpu-usb` gate 61, `make test-gpu-edid` gate 62 and
-`make test-gpu-cursor` gate 63; those four are the only gates that boot a
-GPU. The last two are the phase 8B pair.
+`make test-gpu-usb` gate 61, `make test-gpu-edid` gate 62,
+`make test-gpu-cursor` gate 63 and `make test-gpu-cursor-shape` gate 64;
+those five are the only gates that boot a GPU. The last three are the phase
+8B trio.
 
 ## Why a GPU path
 
@@ -207,7 +210,7 @@ EDID, so every earlier gate and the demo keep their size.
 
 ## The gate
 
-`make test-gpu` is gate 60 of 63. It is the only gate that boots without any
+`make test-gpu` is gate 60 of 64. It is the only gate that boots without any
 firmware framebuffer: the QEMU command line is
 `-vga none -device virtio-gpu-pci,id=gpu0`, so the GOP has no adapter to bind
 and the virtio-gpu resource is the machine's only display. A screendump of the
@@ -462,17 +465,42 @@ phase 8B moves the pointer onto it when the device offers one.
 The cursor plane is queue 1, configured alongside control queue 0 and enabled
 before `DRIVER_OK`. It has its own 64x64 `B8G8R8X8_UNORM` resource (resource
 id 2, `GPU_CURSOR_PX` pixels a side) attached the same way as the scanout.
-`UPDATE_CURSOR` is a 48-byte command that uploads the sprite, and
-`MOVE_CURSOR` is a 40-byte command that places it; each is submitted with one
-non-write descriptor and a single 16-bit queue notify, and the driver only
-waits for the used index to advance. A cursor move must never block the
-compositor on a response structure, so the driver does not require a used-ring
-response for these commands at all.
+`UPDATE_CURSOR` and `MOVE_CURSOR` are 56-byte commands, and their wire layout
+is the lesson of this release. `struct virtio_gpu_update_cursor` is a 24-byte
+`virtio_gpu_ctrl_hdr`, then `struct virtio_gpu_cursor_pos` (`scanout_id`, `x`,
+`y`, `padding`), then `resource_id`, `hot_x`, `hot_y` and a final padding
+word: the scanout id comes FIRST, at offset 24. The driver writes
+`GPU_CURSOR_CMD_BYTES` (56) bytes with scanout 0 at 24, x at 28, y at 32,
+`pos.padding` 0 at 36, the resource id at 40, `hot_x` 0 at 44, `hot_y` 0 at 48
+and a zero word at 52, so the hotspot stays 0,0 and matches the software
+sprite's top-left anchor. Each command is submitted with one non-write
+descriptor and a single 16-bit queue notify, and the driver only waits for the
+used index to advance. A cursor move must never block the compositor on a
+response structure, so the driver does not require a used-ring response for
+these commands at all.
+
+QEMU's `update_cursor()` begins with `if (cursor->pos.scanout_id >=
+max_outputs) return;`, and that is what the 48/40-byte layout this release
+first shipped walked into: with x at offset 24, QEMU read `scanout_id = 640`,
+returned immediately and dropped every cursor command. No cursor was defined,
+no plane appeared and no pixel was drawn, while the guest happily printed its
+own show and move counters and looked healthy. That is why the pointer was
+invisible in `make demo`, and why gate 63 could not see the bug: a counter in
+the guest is not a pixel on the host.
 
 The commands deliberately do not travel on the control queue: its 2D command
 switch has no cursor case and answers 0x1200 (`err-unspec`), which an earlier
 implementation read as a device failure and silently fell back to the sprite.
 The cursor queue is the only path now.
+
+### The sprite upload
+
+A 2D virtio-gpu keeps a resource's pixels on the host side, and
+`RESOURCE_ATTACH_BACKING` copies nothing, so the first `UPDATE_CURSOR` needs
+the sprite already in the host resource. `gpu_cursor_upload()` therefore sends
+a `TRANSFER_TO_HOST_2D` first (the 56-byte command form) and only then shows
+the pointer; later shows reuse the uploaded image. Without that transfer the
+plane can be defined and still show nothing, with no error anywhere.
 
 ### The sprite and the fallback
 
@@ -516,10 +544,47 @@ exit 33)
 ```
 
 The boot-check line reports `gpu yes gpuedid no gpucursor yes`, the QEMU exit
-status is 33 and `e2fsck` is clean, as in every boot gate. The only proof of
-cursor drawing is therefore the guest's own counters plus the fact that the
-desktop pixels and the scanout counters are unchanged; the gate never claims a
-pixel assertion it cannot make.
+status is 33 and `e2fsck` is clean, as in every boot gate. For most of this
+release that counter check felt like enough, and it was not: while the command
+layout was wrong the guest still counted its own shows and moves, so gate 63
+passed while no cursor ever reached the host. A screendump cannot settle it
+either, because the host scans the cursor out separately, so gate 63 stays as a
+cheap smoke test and gate 64 is the real proof.
+
+### Gate 64: make test-gpu-cursor-shape
+
+`make test-gpu-cursor-shape` is gate 64 and the pixel-level proof. It boots
+`make run` under `QEMU_DISPLAY=vnc=127.0.0.1:<port>` with
+`QEMU_EXTRA='-vga none -device virtio-gpu-pci,id=gpu0'` and
+`CMDLINE_EXTRA='wb.enable=1 wb.wait=30 gpu.enable=1 gpu.test=1'` (a new
+`--cmdline` option overrides that line), then
+`scripts/run-gpu-cursor-shape.py` speaks RFB 3.8 to QEMU: security type 1, a
+shared `ClientInit`, encodings -223 (`VNC_DESKTOP_SIZE`) and -314
+(`VNC_ALPHA_CURSOR`), and a 2x2 incremental `FramebufferUpdateRequest` every
+0.2 s, because a VNC server sends nothing without a request.
+
+The alpha-cursor rectangle is the evidence. `check_shape` demands 64x64, at
+least 100 opaque pixels, and both the white border (`0xFFFFFF`) and the amber
+body (`0xFFD040`):
+
+```
+gpu: cursor shape 64x64 at 0,0 (120 opaque pixel(s), 2 colour(s))
+ok: hardware cursor shape 64x64 carries 120 opaque pixel(s) in 2 colour(s), exit 33
+```
+
+Then `boot-check.py --expect-gpu=yes --expect-gpu-cursor=yes` and
+`check-disk.py` finish it. The gate is hermetic in the useful way: without a
+working `UPDATE_CURSOR` no cursor rect ever arrives, so the script times out
+with a cursor-shape timeout instead of asserting something vague, and the
+layout bug has nowhere to hide. The same probe with the demo command line
+(`wb.enable=1 wb.wait=0 wb.desk=1 wb.dr=1 wb.dsel=1 wb.screens=1 wb.cx=1
+wb.shell=1 wb.fill=12 wb.hold=20 gpu.enable=1 gpu.test=1`) also returned the
+64x64 shape, which is the proof that the `make demo` pointer is back.
+
+The knobs are `GPU_SHAPE_WB_WAIT` (30), `GPU_SHAPE_BOOT_TIMEOUT_SEC` (180),
+`GPU_SHAPE_TIMEOUT_SEC` (240), `GPU_SHAPE_RUN_TIMEOUT_SEC` (300) and
+`GPU_SHAPE_QEMU_EXTRA` (`-vga none -device virtio-gpu-pci,id=gpu0`), all
+overridable.
 
 ## Failure modes
 
@@ -544,6 +609,7 @@ up cannot be debugged over serial.
 | `CRUGOS: virtio-gpu ignored (framebuffer attach failed)` | `fb_attach_linear()` refused |
 | `CRUGOS: virtio-gpu command 0x<type> answered 0x<code> (<name>)` | a late command returned an error |
 | `CRUGOS: gpu cursor queue unavailable (no cursor plane)` | queue 1 could not be configured; the pointer stays on the sprite |
+| no cursor rect over VNC, gate 64 times out | a dropped or rejected cursor command: the device read a bad `scanout_id` and returned early |
 | `CRUGOS: gpu selftest failed (present)` | the self-test could not present |
 
 The same "ignore and continue" rule applies to a device that answers slowly:
@@ -592,8 +658,10 @@ line with a timeout name rather than by spinning forever.
   userspace. `gpu.size=` still overrides the preferred timing by design.
 - The hardware cursor is a 64x64 plane with one sprite; there is no
   per-window cursor, no alpha blending beyond the device's own scanout and no
-  cursor pixels in a screendump. A gate can therefore assert the show and move
-  counters but never the pointer's colour.
+  cursor pixels in a screendump. Gate 63 therefore asserts only the show and
+  move counters; gate 64 goes around the screendump and reads the alpha-cursor
+  rectangle from a VNC client, so it does assert the pointer's colours (white
+  border, amber body) even though a `gpu0` dump still shows none.
 - No 3D on this host in any case: there is no `/dev/dri` render node, so QEMU
   refuses virgl with `The display backend does not have OpenGL support
   enabled` and `egl: no drm render node available`, and blob resources stay

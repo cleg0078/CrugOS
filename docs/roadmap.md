@@ -1,6 +1,6 @@
 # Roadmap
 
-The specification defines 63 phases/gates. Phase 0 established the smallest
+The specification defines 64 phases/gates. Phase 0 established the smallest
 end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
 phase 1 makes the kernel own physical memory, page tables, exceptions and
 timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
@@ -1959,13 +1959,23 @@ reachable until then.
   `CRUGOS: gpu edid 1152x864 (vendor RHT, product 0x1234, 1 mode(s))` and
   `CRUGOS: gpu mode 1152x864 (edid preferred)`.
 - The pointer moved onto the device's hardware cursor plane: a second
-  virtqueue (queue 1) with its own 64x64 resource (id 2), a 48-byte
-  `UPDATE_CURSOR` and a 40-byte `MOVE_CURSOR`, each submitted with one
-  non-write descriptor and a single 16-bit notify store, waiting only for the
-  used index because the cursor queue returns no response. Queue 1 is enabled
-  before `DRIVER_OK`; without it the boot prints
+  virtqueue (queue 1) with its own 64x64 resource (id 2) and 56-byte
+  `UPDATE_CURSOR`/`MOVE_CURSOR` commands, each submitted with one non-write
+  descriptor and a single 16-bit notify store, waiting only for the used index
+  because the cursor queue returns no response. Queue 1 is enabled before
+  `DRIVER_OK`; without it the boot prints
   `CRUGOS: gpu cursor queue unavailable (no cursor plane)` and stays on the
   software sprite.
+- The wire layout was the release's real bug: `struct
+  virtio_gpu_update_cursor` puts `struct virtio_gpu_cursor_pos` (scanout_id,
+  x, y, padding) first, so `scanout_id` lives at offset 24. The first cut of
+  8B put x at 24 in a 48-byte command, QEMU's `update_cursor()` read
+  `scanout_id = 640`, returned at once and dropped every cursor command: no
+  define, no plane, no pixels, while the guest printed healthy show and move
+  counters. `GPU_CURSOR_CMD_BYTES` is now 56 and the driver writes scanout 0,
+  x, y, padding, the resource id and hotspot 0,0 there; `gpu_cursor_upload()`
+  also sends `TRANSFER_TO_HOST_2D` before the first show because 2D keeps the
+  resource's pixels host-side.
 - The cursor commands used to go through the control queue, which has no cursor
   case and answers `0x1200` err-unspec, so the kernel silently fell back to
   the sprite even when the device had a plane. `include/crug/fb.h` now carries
@@ -1988,29 +1998,45 @@ reachable until then.
   14 flush(es), exit 33)` with `boot-check.py --expect-gpu-edid=yes`.
 - Gate 63 `make test-gpu-cursor` uses the default device from
   `GPU_QEMU_EXTRA`, where QEMU manufactures a 1280x800 EDID. A screendump of
-  `gpu0` never contains the hardware cursor plane, so the gate cannot check
-  pixels: `run-gpu.py --expect-cursor` and the serial counters are the evidence
-  and the gate prints
+  `gpu0` never contains the hardware cursor plane, so `run-gpu.py
+  --expect-cursor` and the serial counters are its evidence and the gate prints
   `ok: virtio-gpu scanout 1280x800, hardware cursor (14 transfer(s),
-  14 flush(es), exit 33)`.
+  14 flush(es), exit 33)`. Those counters proved nothing on their own while
+  the layout was wrong.
+- Gate 64 `make test-gpu-cursor-shape` is the pixel proof: it boots under
+  `QEMU_DISPLAY=vnc=127.0.0.1:<port>` with `GPU_SHAPE_QEMU_EXTRA ?= -vga none
+  -device virtio-gpu-pci,id=gpu0`, and `scripts/run-gpu-cursor-shape.py` speaks
+  RFB 3.8, requests `VNC_ALPHA_CURSOR` updates and waits for an alpha-cursor
+  rect. `check_shape` demands 64x64, at least 100 opaque pixels and both the
+  white border (`0xFFFFFF`) and the amber body (`0xFFD040`):
+  `gpu: cursor shape 64x64 at 0,0 (120 opaque pixel(s), 2 colour(s))` and
+  `ok: hardware cursor shape 64x64 carries 120 opaque pixel(s) in 2 colour(s),
+  exit 33`, then `boot-check.py --expect-gpu=yes --expect-gpu-cursor=yes` and
+  `check-disk.py`. `GPU_SHAPE_WB_WAIT` (30),
+  `GPU_SHAPE_BOOT_TIMEOUT_SEC` (180), `GPU_SHAPE_TIMEOUT_SEC` (240),
+  `GPU_SHAPE_RUN_TIMEOUT_SEC` (300) and `GPU_SHAPE_QEMU_EXTRA` are overridable;
+  a dropped `UPDATE_CURSOR` produces no rect and a cursor-shape timeout. The
+  same probe on the demo command line returned the shape, which is the proof
+  that the `make demo` pointer is back.
 - Host tests add a synthetic 128-byte EDID to `tests/host/test_gpu.c` (vendor
   `RHT` = id 0x4914, product 0x1234, a 1024x768@60 timing at 6500x10 kHz and an
   800x600@60 timing at 4000) plus bad-checksum, bad-header, 127-byte,
   no-timing, null-pointer, four-timing-cap and unknown-vendor cases: `make
-  test-host` reports 8521 checks and `make size` a 352432 B (344 KiB) file and
-  a 1002250 B (978 KiB) load image (`.text` 251174 B, `.rodata` 38272 B,
+  test-host` reports 8521 checks and `make size` a 352440 B (344 KiB) file and
+  a 1002570 B (979 KiB) load image (`.text` 251430 B, `.rodata` 38336 B,
   `.data` 100 B, `.bss` 712704 B).
 - Limits: 3D still needs virgl, which this host cannot exercise (no `/dev/dri`
   render node, so QEMU prints `The display backend does not have OpenGL
   support enabled`); blob resources need `blob=on` and are unused; one scanout
   and one display, no multi-head (`max_outputs=2` is not gated); `gpu.size=`
   still wins over the EDID by design; the cursor is one 64x64 sprite whose
-  pixels no screendump can assert, only its counters; the software sprite
-  remains the fallback. See [gpu.md](gpu.md).
+  pixels no screendump can assert, which is why gate 64 reads them from the VNC
+  alpha cursor instead; the software sprite remains the fallback. See
+  [gpu.md](gpu.md).
 - docs: `docs/gpu.md` gains the EDID mode-selection and hardware-cursor
-  sections and the gate 62/63 paragraphs, alongside README, boot, build,
-  workbench and versioning.
-- All 63 gates pass at `v0.47.0`.
+  sections, the sprite-upload note and the gate 62/63/64 paragraphs, alongside
+  README, boot, build, workbench and versioning.
+- All 64 gates pass at `v0.47.0`.
 
 ## Bootable media - hybrid UEFI ISO (done, `v0.23.1`)
 
