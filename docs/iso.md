@@ -15,8 +15,11 @@ make usb        # write it to a real device (USB_DEV=/dev/sdX USB_CONFIRM=yes)
 
 The image is a hybrid because the two ways of booting look at different
 structures: an El Torito *no-emulation* entry boots the CD path, and an MBR
-with a single EFI System Partition entry covers the same FAT image so firmware
-that treats the stick as a partitioned disk finds `EFI/BOOT/BOOTX64.EFI`.
+with a single *active* EFI System Partition entry covers exactly the El Torito
+FAT16 image so firmware that treats the stick as a partitioned disk mounts the
+ESP and finds `EFI/BOOT/BOOTX64.EFI`. That firmware never reads the El Torito
+catalog, so `make check-iso` asserts that the MBR entry starts at the byte the
+boot catalog names and covers the whole FAT image.
 
 ## What the image contains
 
@@ -35,7 +38,7 @@ ISO 9660 volume CRUGOS (level 3)
 | El Torito | no emulation, platform EFI, boot image `/boot/efi.img` |
 | FAT image | FAT16, 512-byte sectors, 8 sectors per cluster, 2 FATs, 512 root entries, label `CRUGOS` |
 | FAT image size | `ISO_SIZE_MB`, default 24 MiB (6133 clusters, 83 used) |
-| Partition table | protective MBR with one type-`0xEF` partition that starts at the El Torito image |
+| Partition table | MBR with one active type-`0xEF` entry covering exactly the El Torito FAT image (default build: LBA 136, 49152 sectors) |
 | Guest command line | `ISO_CMDLINE`, default `storage=none` |
 
 `ISO_CMDLINE` exists because `make iso` reads the *built* ESP tree, whose
@@ -75,7 +78,10 @@ and `crugos/cmdline.txt` are current before the image is assembled.
 3. builds the FAT16 boot image with [scripts/mkfat.py](../scripts/mkfat.py);
 4. refuses to continue unless `fsck.vfat -n` reports it clean;
 5. copies the same files to the ISO root as well, and
-6. runs `xorriso -as mkisofs` with the El Torito entry and the hybrid MBR.
+6. runs `xorriso -as mkisofs` with the El Torito entry and a hybrid MBR;
+7. rewrites the MBR partition table from the El Torito catalog
+   (`scripts/check-iso.py --patch-mbr`), so the single active ESP entry covers
+   the FAT image instead of the ISO 9660 image.
 
 ```
 xorriso -as mkisofs -iso-level 3 \
@@ -86,6 +92,13 @@ xorriso -as mkisofs -iso-level 3 \
     --protective-msdos-label \
     -o build/x86_64/crugos.iso build/x86_64/iso/tree
 ```
+
+`-part_like_isohybrid` writes a type-`0xEF` entry, but it points at the ISO 9660
+image (LBA 1), not at the FAT16 image the firmware has to mount. `mkiso.sh`
+therefore rewrites the four-entry table after `xorriso` returns: entry 0 becomes
+active, type `0xEF`, `start = load_rba x 4`, `sectors = fat_bytes / 512` (the
+other entries are cleared), and the patcher prints
+`ok: MBR ESP entry covers the El Torito FAT image (LBA 136, 49152 sectors, active)`.
 
 ### Why not mtools, and why our own FAT writer
 
@@ -119,7 +132,10 @@ parses the artifact instead of trusting the recipe:
 * the default entry is `0x88` (bootable), media byte 0 (no emulation), and its
   load address points at a FAT16 BPB (jump instruction, `0x55AA`, 512-byte
   sectors, 8 sectors per cluster, `FAT16`, label `CRUGOS`);
-* the protective MBR at LBA 0 holds a type-`0xEF` partition entry;
+* the MBR at LBA 0 carries exactly one type-`0xEF` entry, it is marked active,
+  it starts at the El Torito load address (LBA 34 in 2048-byte units is LBA 136
+  in 512-byte units) and covers exactly `fat_bytes / 512` sectors, and the bytes
+  at that offset are a FAT boot sector (jump, `0x55AA`);
 * `xorriso -osirrox` extracts `/boot/efi.img`, its bytes equal the byte range
   the El Torito catalog points at, and `fsck.vfat -n` accepts it;
 * `mkfat.py --list` finds `EFI/BOOT/BOOTX64.EFI`, `CRUGOS/KERNEL.ELF`,
@@ -130,7 +146,7 @@ It prints the geometry it found, so a layout change cannot pass unnoticed:
 
 ```
 ok: iso hybrid UEFI boot (volume CRUGOS, ESP image at LBA 34, 25165824 bytes,
-    4 file(s), catalog sector 33, MBR ESP entry at LBA 1, fsck clean)
+    4 file(s), catalog sector 33, MBR ESP entry at LBA 136, fsck clean)
 ```
 
 ## Booting the image: `make test-iso`
@@ -152,12 +168,13 @@ marker, exit status 33) still has to hold. The gate prints
 `ok: iso boots from a USB stick (exit 33)` and `ok: iso boots from a CD-ROM (exit 33)`.
 
 ```
-  FAT   build/x86_64/iso/tree/boot/efi.img (24 MiB, 6133 clusters, 83 used)
-  ISO   build/x86_64/crugos.iso (25862144 bytes, FAT16 ESP 24 MiB)
+  FAT   build/x86_64/iso/tree/boot/efi.img (24 MiB, 6133 clusters, 101 used)
+  ISO   build/x86_64/crugos.iso (25937920 bytes, FAT16 ESP 24 MiB)
+ok: MBR ESP entry covers the El Torito FAT image (LBA 136, 49152 sectors, active)
 ok: iso hybrid UEFI boot (volume CRUGOS, ... fsck clean)
 run-qemu: booting build/x86_64/usb-stick.img ... usb build/x86_64/usb-stick.img, net none
 run-qemu: guest exited successfully (isa-debug-exit 0x10 -> status 33)
-ok: boot markers found, version 0.43.0 ... heap no user no isolated no ushell no spawn no fork no forkbig no storage none QEMU exit status 33
+ok: boot markers found, version 0.49.0 ... heap no user no isolated no ushell no spawn no fork no forkbig no storage none QEMU exit status 33
   boot   : pmm=28458 us cpu=438 us vm=714 us traps=355 us timer=65403 us heap=393 us storage=113885 us sched=842 us syscall=167 us total=210659 us
   OK    iso boots from a USB stick (exit 33)
   OK    iso boots from a CD-ROM (exit 33)
@@ -194,21 +211,44 @@ currently mounted according to `/proc/mounts`, and only then runs
 Nothing is unmounted for you, and no partition table is created -- the image
 carries its own.
 
+## Booting real hardware
+
+The stick boots in **UEFI mode only**. There is no legacy/CSM code, and the
+loader is unsigned, so firmware with Secure Boot enabled refuses it until the
+key is enrolled or Secure Boot is switched off. If a stick that QEMU boots is
+reported as not bootable on a real machine, check the partition table first:
+
+```
+fdisk -l build/x86_64/crugos.iso
+# Device                    Boot  Start   End Sectors  Size Id Type
+# build/x86_64/crugos.iso1  *       136 49287   49152   24M ef EFI (FAT-12/16/32)
+```
+
+The boot flag, the `0xEF` type and the start sector are the contract: firmware
+mounts the entry the MBR names and then looks for `EFI/BOOT/BOOTX64.EFI`
+inside that FAT image, so an entry pointing anywhere else makes the stick look
+empty. Images built before this repair pointed at LBA 1 (the ISO 9660 volume,
+whose first `0x55AA` is not a FAT boot sector) and carried no boot flag;
+rebuild with `make iso` and write the stick again.
+
 ## Limits
 
 * **No GPT.** The plan for this feature asked for a GPT with an ESP entry,
   and the image does not have one: `xorriso` cannot synthesize a GPT without
   the Syslinux `isohybrid` MBR, which is not installed here, and a hand-
   written GPT would collide with the ISO 9660 volume descriptors in the first
-  32 KiB of the file. What ships instead is a protective MBR with one
-  type-`0xEF` partition (`-part_like_isohybrid`,
-  `-iso_mbr_part_type C12A7328-F81F-11D2-BA4B-00A0C93EC93B`), which is what
-  both OVMF boots and `check-iso` verify.
+  32 KiB of the file. What ships instead is a classic MBR whose single active
+  type-`0xEF` entry covers exactly the El Torito FAT image. That entry is not
+  taken on trust from `xorriso`: `-part_like_isohybrid` points it at the
+  ISO 9660 volume, so `mkiso.sh` rewrites the table from the boot catalog and
+  `check-iso` re-derives the expected start and size from the catalog and the
+  FAT BPB. OVMF alone proves nothing here -- it booted the broken table from
+  v0.23.1 through v0.49.0 as a whole-disk image.
 * **Unsigned loader.** Secure Boot is out of scope; the stick needs firmware
   with Secure Boot disabled or with the loader's key enrolled.
 * **8.3 names only.** See above; the ESP tree is four files.
 * **24 MiB by default.** The FAT16 cluster count must stay below 65524, so
-  `ISO_SIZE_MB` is capped by `mkfat.py`; 24 MiB uses 83 clusters, and the
+  `ISO_SIZE_MB` is capped by `mkfat.py`; 24 MiB uses 101 clusters, and the
   kernel is 339 KiB.
 * **Software framebuffer only.** Phase 8A puts the desktop on a virtio-gpu 2D
   device when the firmware exposes one, but the ISO path is unchanged:

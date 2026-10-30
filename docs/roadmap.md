@@ -2142,6 +2142,14 @@ is `CRUGOS: phase s1 boot ok`.
   with the ISO 9660 volume descriptors in the first 32 KiB. See
   [iso.md](iso.md).
 - All 36 gates pass at `v0.23.1`.
+- Repair after `v0.49.0`: every image from `v0.23.1` through `v0.49.0` wrote
+  an MBR entry that covered the ISO 9660 volume (start LBA 1) instead of the El
+  Torito FAT16 image, so firmware that mounted the MBR ESP found no FAT and a
+  real UEFI machine refused the stick; OVMF booted the file as a whole-disk
+  image, so `make test-iso` never noticed. `scripts/mkiso.sh` now rewrites the
+  table from the boot catalog (`check-iso.py --patch-mbr`: active type-`0xEF`,
+  start 136, 49152 sectors) and `check-iso` re-derives and asserts those
+  numbers.
 
 ## Phase UI - better user interface (in progress)
 

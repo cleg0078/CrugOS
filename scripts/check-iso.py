@@ -2,10 +2,17 @@
 """Check a CrugOS hybrid UEFI ISO without booting it.
 
 Validates the ISO 9660 primary volume descriptor, the El Torito UEFI boot
-catalog, the protective MBR, the embedded FAT16 EFI system partition and the
-cmdline that partition ships.
+catalog, the embedded FAT16 EFI system partition, the cmdline that partition
+ships and the MBR entry that lets a firmware find the partition without El
+Torito.  The MBR entry must point at the exact FAT image the boot catalog
+names, because real firmware mounts that partition and does not read the CD
+boot catalog when it boots a dd-ed USB stick.
 
-usage: check-iso.py [--iso PATH] [--mkfat PATH]
+usage: check-iso.py [--iso PATH] [--mkfat PATH] [--patch-mbr]
+
+--patch-mbr rewrites the MBR ESP entry from the El Torito catalog and exits;
+mkiso.sh runs it once after xorriso, whose -part_like_isohybrid marks the ISO
+image instead of the FAT image.
 """
 
 import argparse
@@ -40,6 +47,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--iso", default="build/x86_64/crugos.iso")
     parser.add_argument("--mkfat", default=None)
+    parser.add_argument("--patch-mbr", action="store_true",
+                        help="rewrite the MBR ESP entry from the El Torito "
+                             "boot image and exit")
     args = parser.parse_args()
 
     iso = Path(args.iso)
@@ -135,17 +145,63 @@ def main():
     if label != "CRUGOS":
         return fail("unexpected FAT volume label " + repr(label))
 
+    # The MBR must describe the same FAT16 image as the El Torito catalog.  A
+    # firmware that boots a dd-ed stick scans partitions for an ESP and does
+    # not read the CD boot catalog, so an entry that covers the ISO9660 image
+    # (what xorriso -part_like_isohybrid writes) leaves the stick unbootable:
+    # byte 512 is zeros, not a FAT boot sector.
+    esp_start = load_rba * (SECTOR // FAT_SECTOR)
+    esp_sectors = fat_bytes // FAT_SECTOR
     mbr = data[0:512]
     if mbr[510:512] != BOOT_SIGNATURE:
         return fail("the iso has no MBR signature")
-    esp_partition = None
-    for index in range(4):
-        entry_part = mbr[446 + index * 16:462 + index * 16]
-        if entry_part[4] == ESP_PARTITION_TYPE:
-            esp_partition = (le32(entry_part, 8), le32(entry_part, 12))
-            break
-    if esp_partition is None:
-        return fail("the protective MBR has no EFI system partition entry")
+
+    def mbr_entry(index):
+        return mbr[446 + index * 16:462 + index * 16]
+
+    esp_index = [i for i in range(4) if mbr_entry(i)[4] == ESP_PARTITION_TYPE]
+    if args.patch_mbr:
+        if len(esp_index) != 1:
+            return fail("cannot patch the MBR: expected exactly one ESP entry")
+        index = esp_index[0]
+        entry = bytearray(mbr_entry(index))
+        entry[0] = 0x80
+        entry[1:4] = b"\xfe\xff\xff"
+        entry[4] = ESP_PARTITION_TYPE
+        entry[5:8] = b"\xfe\xff\xff"
+        entry[8:12] = esp_start.to_bytes(4, "little")
+        entry[12:16] = esp_sectors.to_bytes(4, "little")
+        patched = bytearray(data)
+        patched[446 + index * 16:462 + index * 16] = entry
+        for other in range(4):
+            if other != index:
+                patched[446 + other * 16:462 + other * 16] = bytes(16)
+        iso.write_bytes(patched)
+        print("ok: MBR ESP entry covers the El Torito FAT image (LBA " +
+              str(esp_start) + ", " + str(esp_sectors) + " sectors, active)")
+        return 0
+    if not esp_index:
+        return fail("the MBR has no EFI system partition entry")
+    if len(esp_index) > 1:
+        return fail("the MBR carries more than one EFI system partition entry")
+    esp_entry = mbr_entry(esp_index[0])
+    esp_status = esp_entry[0]
+    esp_partition = (le32(esp_entry, 8), le32(esp_entry, 12))
+    if esp_partition[0] != esp_start:
+        return fail("the MBR ESP entry starts at LBA " + str(esp_partition[0]) +
+                    " but the El Torito FAT image starts at LBA " +
+                    str(esp_start) + "; a USB-booting firmware mounts the MBR "
+                    "ESP, so the stick would not boot")
+    if esp_partition[1] != esp_sectors:
+        return fail("the MBR ESP entry covers " + str(esp_partition[1]) +
+                    " sectors but the FAT image is " + str(esp_sectors) +
+                    " sectors")
+    if esp_status != 0x80:
+        return fail("the MBR ESP entry is not marked active")
+    part_offset = esp_start * FAT_SECTOR
+    if data[part_offset:part_offset + 3] != FAT_JUMP or \
+            data[part_offset + 510:part_offset + 512] != BOOT_SIGNATURE:
+        return fail("the MBR ESP entry does not point at a FAT boot sector")
 
     work = Path(tempfile.mkdtemp(prefix="crugos-check-iso."))
     try:

@@ -1283,11 +1283,14 @@ Passing `DEMO_DISPLAY=none` turns the same target into a headless demo, and
 
 `make iso` assembles `build/<arch>/crugos.iso`, a hybrid image that boots as
 a CD-ROM (El Torito, no emulation) and after a plain `dd` onto a USB stick (an
-MBR with one type-`0xEF` ESP partition covering the same FAT image). The ESP
-travels as a FAT16 image built by `scripts/mkfat.py` -- this host has no
-mtools, so the file system is written directly and deterministically -- and
-`scripts/mkiso.sh` drives `xorriso -as mkisofs` with the El Torito entry,
-`-part_like_isohybrid` and `--protective-msdos-label`.
+MBR whose single *active* type-`0xEF` entry covers exactly the El Torito FAT16
+image). The ESP travels as a FAT16 image built by `scripts/mkfat.py` -- this
+host has no mtools, so the file system is written directly and
+deterministically -- and `scripts/mkiso.sh` drives `xorriso -as mkisofs` with
+the El Torito entry and `--protective-msdos-label`, then rewrites the MBR
+partition table from the boot catalog (`scripts/check-iso.py --patch-mbr`),
+because `-part_like_isohybrid` would point entry 0 at the ISO 9660 volume
+instead of the FAT image a firmware mounts.
 
 The image ships its own command line: `mkiso.sh` always rewrites
 `crugos/cmdline.txt` from `ISO_CMDLINE` (default `storage=none`), so a stick
@@ -1298,7 +1301,9 @@ filesystem.
 
 `make check-iso` re-parses the artifact offline: ISO 9660 primary volume
 descriptor, El Torito boot record and catalog checksum, the FAT16 BPB at the
-catalog's load address, the protective MBR's ESP entry, an `xorriso -osirrox`
+catalog's load address, the MBR ESP entry (exactly one, active, type `0xEF`,
+starting at the catalog's load address in 512-byte sectors, covering the whole
+FAT image, with a FAT boot sector at that offset), an `xorriso -osirrox`
 extraction of `/boot/efi.img` byte-compared against the catalog range,
 `fsck.vfat -n`, and the four files with their command line. `make test-iso` is
 the gate: it `dd`s the ISO onto `USB_IMG`, boots that file through
@@ -1306,7 +1311,9 @@ the gate: it `dd`s the ISO onto `USB_IMG`, boots that file through
 `scripts/boot-check.py --storage=none` on both serial logs, which swaps the
 storage/GPT/ext4/journal markers for the single skip marker. `make usb` writes
 the image to a real device and needs `USB_DEV=/dev/sdX USB_CONFIRM=yes`; it
-refuses a device that is mounted.
+refuses a device that is mounted. The stick boots in UEFI mode only and the
+loader is unsigned, so the firmware needs Secure Boot off; [iso.md](iso.md)
+shows the `fdisk -l` check that proves the MBR entry covers the FAT image.
 
 See [iso.md](iso.md) for the on-disk layout, why the image ends up with an MBR
 instead of a GPT, and the reproducibility rules.

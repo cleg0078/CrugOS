@@ -2,10 +2,13 @@
 # mkiso.sh - assemble a bootable UEFI ISO image from an ESP tree.
 #
 # The image is a hybrid: an El Torito no-emulation CD whose boot image is a
-# FAT16 ESP, plus an MBR whose single EFI System Partition entry covers the
-# same bytes, so the file boots as a CD-ROM and after a plain dd onto a USB
-# stick. The ESP tree is also grafted into the ISO9660 file system so the
-# stick stays readable on systems that look for /EFI/BOOT.
+# FAT16 ESP, plus an MBR whose single active EFI System Partition entry covers
+# the same bytes, so the file boots as a CD-ROM and after a plain dd onto a USB
+# stick.  xorriso -part_like_isohybrid points that MBR entry at the ISO9660
+# image instead (byte 512 is zeros, not a FAT boot sector), so the table is
+# rewritten from the El Torito catalog below.  The ESP tree is also grafted
+# into the ISO9660 file system so the stick stays readable on systems that look
+# for /EFI/BOOT.
 set -euo pipefail
 
 : "${ESP_DIR:?ESP_DIR is required}"
@@ -67,6 +70,12 @@ if ! xorriso -as mkisofs -iso-level 3 \
     cat "$ISO_STAGE/xorriso.log" >&2
     exit 1
 fi
+
+# Rewrite the MBR so its ESP entry covers the El Torito FAT16 image and not the
+# ISO9660 image.  A strictly UEFI firmware that boots a dd-ed stick enumerates
+# MBR partitions and mounts the ESP; it never reads the CD boot catalog, so the
+# entry xorriso writes leaves the stick reported as not bootable.
+"$PYTHON" "$SCRIPT_DIR/check-iso.py" --iso "$ISO_IMG" --patch-mbr
 
 SIZE="$(stat -c %s "$ISO_IMG")"
 printf '  ISO   %s (%s bytes, FAT16 ESP %s MiB)\n' "$ISO_IMG" "$SIZE" "$ISO_SIZE_MB"
