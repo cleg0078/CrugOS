@@ -984,9 +984,12 @@ screendump, so a window that logs a move without repainting fails.
 clicks menus, the `Run` gadget, the close gadget and a second menu, so the log
 carries the `wb menu ...` and `wb action N ...` lines on top of the desktop and
 window lines. `make demo` boots the whole Workbench
-interactively instead of headlessly: it passes every desktop token
-(`wb.enable=1 wb.wait=0 wb.desk=1 wb.dr=1 wb.dsel=1 wb.screens=1
-wb.cx=1 wb.shell=1 wb.fill=<files> wb.hold=<seconds>`), so the log shows the
+interactively instead of headlessly: it passes `gpu.enable=1
+gpu.size=<DEMO_GPU_SIZE>` and every desktop token (`wb.enable=1 wb.wait=0
+wb.desk=1 wb.dr=1 wb.dsel=1 wb.screens=1 wb.cx=1 wb.shell=1 wb.fill=<files>
+wb.hold=<seconds>`), and the QEMU line carries `-vga none -device
+virtio-gpu-pci,id=gpu0`, so the guest boots on its own scanout. The log shows
+`CRUGOS: virtio-gpu ready` and `CRUGOS: gpu scanout ok`, then the
 desktop, the four windows, `wb icon ready`, `wb drawer mode`,
 `wb select mode`, `wb screens ready`, `wb cx ready (4 commodity(ies))`,
 `wb shell ready`, `CRUGOS: wb holding desktop for <seconds> s` and

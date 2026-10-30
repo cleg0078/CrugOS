@@ -3,7 +3,7 @@
 #   make            show this help (same as 'make help')
 #   make all        build kernel, UEFI loader and ESP tree
 #   make run        boot the ESP image under QEMU + OVMF
-#   make demo       boot the full Workbench desktop demo in a real QEMU window
+#   make demo       boot the Workbench desktop demo on the virtio-gpu scanout
 #   make iso        build a bootable hybrid UEFI ISO image
 #   make check-iso  validate the ISO image without booting it
 #   make test-iso   boot the ISO from a USB stick and from a CD-ROM
@@ -267,14 +267,20 @@ FORKBIG_RUN_TIMEOUT_SEC ?= 300
 # Shell) and a hold so the window stays open.  wb.wait=0 keeps every boot
 # gate disarmed, so the demo boots straight to the desktop; the drawer fill
 # only runs the first time the drawer is opened, and 0 leaves the volume
-# untouched.
+# untouched.  The demo boots on the virtio-gpu 2D scanout: gpu.enable=1 in
+# the command line and a virtio-gpu-pci device with no VGA adapter, so the
+# window shows the guest's own scanout rather than firmware memory.  Set
+# DEMO_GPU=0 to boot the software framebuffer instead.
 DEMO_DISPLAY ?= gtk
 DEMO_HOLD_SEC ?= 600
 DEMO_TIMEOUT_SEC ?= 900
 DEMO_FILL_FILES ?= 12
-DEMO_CMDLINE ?= wb.enable=1 wb.wait=0 wb.desk=1 wb.dr=1 wb.dsel=1 wb.screens=1 wb.cx=1 wb.shell=1 wb.fill=$(DEMO_FILL_FILES) wb.hold=$(DEMO_HOLD_SEC)
+DEMO_GPU ?= 1
+DEMO_GPU_SIZE ?= 1024x768
+DEMO_GPU_QEMU_EXTRA ?= -vga none -device virtio-gpu-pci,id=gpu0
+DEMO_CMDLINE ?= gpu.enable=$(DEMO_GPU) gpu.size=$(DEMO_GPU_SIZE) wb.enable=1 wb.wait=0 wb.desk=1 wb.dr=1 wb.dsel=1 wb.screens=1 wb.cx=1 wb.shell=1 wb.fill=$(DEMO_FILL_FILES) wb.hold=$(DEMO_HOLD_SEC)
 DEMO_MACHINE_EXTRA ?= usb=off,i8042=off
-DEMO_QEMU_EXTRA ?= -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-mouse,bus=xhci.0
+DEMO_QEMU_EXTRA ?= $(if $(filter-out 0,$(DEMO_GPU)),$(DEMO_GPU_QEMU_EXTRA)) -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-mouse,bus=xhci.0
 
 # Bootable hybrid UEFI ISO (make iso). The ESP travels as a FAT16 image behind
 # an El Torito boot entry, the tree also carries the plain ESP files, and
@@ -703,6 +709,7 @@ demo: esp
 		MACHINE_EXTRA="$(DEMO_MACHINE_EXTRA)" \
 		QEMU_EXTRA="$(DEMO_QEMU_EXTRA)" \
 		CMDLINE_EXTRA="$(DEMO_CMDLINE)"
+	@echo "  NOTE  the window is the virtio-gpu 2D scanout (DEMO_GPU=0 uses the software framebuffer)"
 	@echo "  NOTE  the full Workbench is on screen; drag any title bar to move a window"
 	@echo "  NOTE  double-click the 'System:' icon to open its drawer (rows select, scrollbar drags)"
 	@echo "  NOTE  click the Workbench/Tools boxes at the top right to switch screens"
@@ -1459,6 +1466,9 @@ options:
 	@printf '  %-16s %s\n' DEMO_DISPLAY "$(DEMO_DISPLAY)"
 	@printf '  %-16s %s\n' DEMO_HOLD_SEC "$(DEMO_HOLD_SEC) (seconds)"
 	@printf '  %-16s %s\n' DEMO_FILL_FILES "$(DEMO_FILL_FILES) (files)"
+	@printf '  %-16s %s\n' DEMO_GPU "$(DEMO_GPU) (1 = virtio-gpu scanout, 0 = software framebuffer)"
+	@printf '  %-16s %s\n' DEMO_GPU_SIZE "$(DEMO_GPU_SIZE) (scanout the demo asks for)"
+	@printf '  %-16s %s\n' DEMO_GPU_QEMU_EXTRA "$(DEMO_GPU_QEMU_EXTRA)"
 	@printf '  %-16s %s\n' DEMO_TIMEOUT_SEC "$(DEMO_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' DEMO_CMDLINE "$(DEMO_CMDLINE)"
 	@printf '  %-16s %s\n' DEMO_MACHINE_EXTRA "$(DEMO_MACHINE_EXTRA)"

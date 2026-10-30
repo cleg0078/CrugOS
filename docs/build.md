@@ -26,7 +26,7 @@ Run `make preflight` to check all of the above.
 make             # show this target list (same as `make help`)
 make all         # kernel.elf, BOOTX64.EFI and the ESP tree
 make run         # boot the ESP tree under QEMU + OVMF
-make demo        # boot the full Workbench demo in a real QEMU window
+make demo        # boot the full Workbench demo on the virtio-gpu scanout
 make test        # boot, verify markers/version/AVX2, then e2fsck the disk
 make test-net    # boot with a slirp virtio-net NIC and verify DHCP/ARP/ICMP
 make test-tcp    # TCP client/server and an HTTP exchange, both directions
@@ -237,9 +237,12 @@ options` prints the complete resolved set (including paths derived from
 | `DEMO_HOLD_SEC` | `600` | seconds `make demo` keeps the full Workbench on screen before the guest exits by itself |
 | `DEMO_FILL_FILES` | `12` | files the demo drawer creates the first time it opens; `0` leaves the volume untouched |
 | `DEMO_TIMEOUT_SEC` | `900` | wall-clock budget for the whole `make demo` boot |
-| `DEMO_CMDLINE` | `wb.enable=1 wb.wait=0 wb.desk=1 wb.dr=1 wb.dsel=1 wb.screens=1 wb.cx=1 wb.shell=1 wb.fill=$(DEMO_FILL_FILES) wb.hold=$(DEMO_HOLD_SEC)` | `CMDLINE_EXTRA` the demo boot passes to the kernel |
+| `DEMO_GPU` | `1` | `1` boots the demo on the virtio-gpu 2D scanout, `0` on the software framebuffer |
+| `DEMO_GPU_SIZE` | `1024x768` | scanout size the demo requests through `gpu.size=` |
+| `DEMO_GPU_QEMU_EXTRA` | `-vga none -device virtio-gpu-pci,id=gpu0` | QEMU arguments that add the virtio-gpu function and remove the VGA adapter |
+| `DEMO_CMDLINE` | `gpu.enable=1 gpu.size=$(DEMO_GPU_SIZE) wb.enable=1 wb.wait=0 wb.desk=1 wb.dr=1 wb.dsel=1 wb.screens=1 wb.cx=1 wb.shell=1 wb.fill=$(DEMO_FILL_FILES) wb.hold=$(DEMO_HOLD_SEC)` | `CMDLINE_EXTRA` the demo boot passes to the kernel |
 | `DEMO_MACHINE_EXTRA` | `usb=off,i8042=off` | machine properties, so the demo keyboard and mouse are the only ones |
-| `DEMO_QEMU_EXTRA` | `-device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-mouse,bus=xhci.0` | QEMU arguments that attach an xHCI with a keyboard and a mouse |
+| `DEMO_QEMU_EXTRA` | `-vga none -device virtio-gpu-pci,id=gpu0 -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-mouse,bus=xhci.0` (the GPU part drops out when `DEMO_GPU=0`) | QEMU arguments that add the GPU and attach an xHCI with a keyboard and a mouse |
 | `ISO_IMAGE` | `build/<arch>/crugos.iso` | hybrid UEFI ISO written by `make iso` |
 | `ISO_STAGE` | `build/<arch>/iso` | scratch tree for the ISO build (wiped on every run) |
 | `ISO_FAT_IMG` | `$(ISO_STAGE)/tree/boot/efi.img` | FAT16 ESP image used as the El Torito boot image |
@@ -1057,14 +1060,25 @@ measured here. The wait is `GPU_WB_WAIT` (30 s) and the budget is
 
 `make demo` is not a gate but a way to watch the system: it boots
 `DEMO_QEMU_EXTRA` (an xHCI controller with a `usb-kbd` and a `usb-mouse`
-already plugged in) into a real `DEMO_DISPLAY` window (GTK by default) instead
-of the headless gates. `DEMO_CMDLINE` carries the whole feature set:
+already plugged in, plus the virtio-gpu function from `DEMO_GPU_QEMU_EXTRA`) into
+a real `DEMO_DISPLAY` window (GTK by default) instead of the headless gates.
+`DEMO_GPU=1` (the default) adds `-vga none -device virtio-gpu-pci,id=gpu0`, so
+no firmware framebuffer exists and the window shows the guest's own GPU
+resource; `DEMO_GPU=0` removes both the device and the `gpu.enable=`/`gpu.size=`
+tokens (see [gpu.md](gpu.md)). `DEMO_CMDLINE` carries the whole feature set:
 
 ```
+gpu.enable=1 gpu.size=$(DEMO_GPU_SIZE)
 wb.enable=1 wb.wait=0 wb.desk=1 wb.dr=1 wb.dsel=1 wb.screens=1 wb.cx=1
 wb.shell=1 wb.fill=$(DEMO_FILL_FILES) wb.hold=$(DEMO_HOLD_SEC)
 ```
 
+- `gpu.enable=1` (with `gpu.size=$(DEMO_GPU_SIZE)`) hands the display to the
+  virtio-gpu driver, which creates one 2D resource at 1024x768, attaches it as
+  the framebuffer and sets it as the scanout. The log then starts with
+  `CRUGOS: virtio-gpu ready (1024x768, 768 backing page(s), resource 1, modern
+  pci)` and `CRUGOS: gpu scanout ok (1024x768, 1 transfer(s), 1 flush(es))`,
+  and every desktop repaint becomes one transfer and one flush.
 - `wb.enable=1` hands the framebuffer to the desktop and opens the Workbench,
   Shell and Exchange windows.
 - `wb.desk=1` draws the `System:` object; `wb.dr=1` and `wb.dsel=1` enable its

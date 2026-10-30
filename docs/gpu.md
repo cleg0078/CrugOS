@@ -236,6 +236,14 @@ settle), `GPU_RUN_TIMEOUT_SEC` (300, the wall-clock budget) and
 argument order of every earlier gate is unchanged; without the flag a boot that
 prints a scanout line fails on purpose.
 
+`make demo` boots the Workbench on the same scanout instead of on firmware
+memory: `DEMO_GPU=1` (the default) adds `-vga none -device
+virtio-gpu-pci,id=gpu0` and `DEMO_GPU_SIZE=1024x768` becomes `gpu.size=`, so
+the demo log starts with `CRUGOS: virtio-gpu ready (1024x768, 768 backing
+page(s), resource 1, modern pci)` and `CRUGOS: gpu scanout ok (1024x768, 1
+transfer(s), 1 flush(es))`. `DEMO_GPU=0` drops the device and both tokens and
+boots the software framebuffer.
+
 This gate does not assert a boot-time budget. In this configuration the serial
 boot report reads:
 

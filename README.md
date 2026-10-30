@@ -536,11 +536,16 @@ Phase 6A starts the Workbench: a small software window manager in the kernel.
 - `make demo` boots the whole Workbench in a real QEMU window instead of a
   headless gate: `DEMO_QEMU_EXTRA` plugs a `usb-kbd` and a `usb-mouse` into the
   xHCI controller, `DEMO_DISPLAY` (GTK) opens the window, and the command line
-  carries every desktop feature at once -- `wb.enable=1 wb.wait=0 wb.desk=1
-  wb.dr=1 wb.dsel=1 wb.screens=1 wb.cx=1 wb.shell=1
-  wb.fill=$(DEMO_FILL_FILES) wb.hold=<seconds>` -- so the desktop object and its
-  drawer, both screens, the Commodities Exchange and a live Shell are on screen
-  together until the hold expires (Ctrl+Alt+G releases the pointer). See
+  carries every desktop feature at once -- `gpu.enable=1 gpu.size=1024x768
+  wb.enable=1 wb.wait=0 wb.desk=1 wb.dr=1 wb.dsel=1 wb.screens=1 wb.cx=1
+  wb.shell=1 wb.fill=$(DEMO_FILL_FILES) wb.hold=<seconds>` -- so the desktop
+  object and its drawer, both screens, the Commodities Exchange and a live Shell
+  are on screen together until the hold expires (Ctrl+Alt+G releases the
+  pointer). The window is the virtio-gpu 2D scanout, not firmware memory:
+  `DEMO_GPU_QEMU_EXTRA` adds `-vga none -device virtio-gpu-pci,id=gpu0`, so the
+  boot log starts with `CRUGOS: virtio-gpu ready (1024x768, 768 backing
+  page(s), resource 1, modern pci)` and `CRUGOS: gpu scanout ok`; `DEMO_GPU=0`
+  drops both and boots the software framebuffer instead. See
   [build.md](docs/build.md).
 
 Phase 6D makes the windows resizable and gives the keyboard work of its own.
@@ -1781,7 +1786,15 @@ point inside the title bar), so the window moves less than the pointer.
 
 `make demo` shows the whole Workbench interactively: it boots with a
 pre-attached USB keyboard and mouse into a GTK window and holds the framebuffer
-with `wb.hold=`. The default `DEMO_CMDLINE` switches every feature on at once --
+with `wb.hold=`. The window is the virtio-gpu 2D scanout: `DEMO_GPU=1` (the
+default) selects `DEMO_GPU_QEMU_EXTRA` (`-vga none -device
+virtio-gpu-pci,id=gpu0`), which leaves no firmware framebuffer at all, and
+`DEMO_GPU_SIZE=1024x768` becomes `gpu.size=` on the command line, so the log
+starts with `CRUGOS: virtio-gpu ready (1024x768, 768 backing page(s), resource
+1, modern pci)` and `CRUGOS: gpu scanout ok (1024x768, 1 transfer(s), 1
+flush(es))`. Set `DEMO_GPU=0` to drop the device and the `gpu.enable=`/`gpu.size=`
+tokens and boot the firmware framebuffer. The default `DEMO_CMDLINE` switches
+every desktop feature on at once --
 `wb.desk=1` for the `System:` object, `wb.dr=1 wb.dsel=1` for its drawer (filled
 with `DEMO_FILL_FILES` files the first time it opens), `wb.screens=1` for the
 `Workbench`/`Tools` screen strip, `wb.cx=1` for the Commodities Exchange and
@@ -1935,6 +1948,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `FORK_RUN_TIMEOUT_SEC`, `FORKBIG_RUN_TIMEOUT_SEC`, `APP_RUN_TIMEOUT_SEC`,
 `DEMO_DISPLAY`, `DEMO_HOLD_SEC`, `DEMO_FILL_FILES`,
 `DEMO_TIMEOUT_SEC`, `DEMO_CMDLINE`, `DEMO_MACHINE_EXTRA`, `DEMO_QEMU_EXTRA`,
+`DEMO_GPU`, `DEMO_GPU_SIZE`, `DEMO_GPU_QEMU_EXTRA`,
 `ISO_IMAGE`, `ISO_STAGE`, `ISO_FAT_IMG`, `ISO_SIZE_MB`, `ISO_VOLID`,
 `ISO_CMDLINE`, `ISO_DATE`, `ISO_RUN_TIMEOUT_SEC`, `EXPECT_ISO`, `ISO_IMG`,
 `USB_IMG`, `USB_STICK`, `USB_DEV`, `USB_CONFIRM`,

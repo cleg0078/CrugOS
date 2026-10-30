@@ -1806,9 +1806,15 @@ shared `WB_QEMU_EXTRA`. See [packages.md](packages.md) for the format and
 `make demo` boots the whole Workbench in a real QEMU window instead of a
 headless gate: `DEMO_QEMU_EXTRA` plugs a keyboard and a mouse into the xHCI
 controller before boot, `DEMO_DISPLAY` (GTK) opens the window, and
-`DEMO_CMDLINE` carries `wb.enable=1 wb.wait=0 wb.desk=1 wb.dr=1 wb.dsel=1
-wb.screens=1 wb.cx=1 wb.shell=1 wb.fill=$(DEMO_FILL_FILES)
-wb.hold=$(DEMO_HOLD_SEC)`, i.e. every desktop feature at once. The desktop
+`DEMO_CMDLINE` carries `gpu.enable=1 gpu.size=$(DEMO_GPU_SIZE) wb.enable=1
+wb.wait=0 wb.desk=1 wb.dr=1 wb.dsel=1 wb.screens=1 wb.cx=1 wb.shell=1
+wb.fill=$(DEMO_FILL_FILES) wb.hold=$(DEMO_HOLD_SEC)`, i.e. every desktop
+feature at once. The window is the virtio-gpu 2D scanout, not firmware
+memory: `DEMO_GPU_QEMU_EXTRA` adds `-vga none -device
+virtio-gpu-pci,id=gpu0`, so there is no GOP framebuffer and the log starts with
+`CRUGOS: virtio-gpu ready (1024x768, 768 backing page(s), resource 1, modern
+pci)` and `CRUGOS: gpu scanout ok`; `DEMO_GPU=0` boots the software
+framebuffer instead. The desktop
 appears once `CRUGOS: wb desktop ready` is printed, the ready markers for the
 object, the drawer modes, the screens, the Exchange and the Shell follow, and
 `wb_hold()` then polls input once per timer tick until the deadline, so all
