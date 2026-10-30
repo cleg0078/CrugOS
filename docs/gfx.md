@@ -1,7 +1,9 @@
 # Graphics: the framebuffer console and the pointer cursor
 
-CrugOS has no GPU driver yet. The console writes glyphs straight into the GOP
-framebuffer that the loader hands over in `boot_info`, and phase 5D adds a
+The console path is software. The console writes glyphs straight into the GOP
+framebuffer that the loader hands over in `boot_info` (since phase 8A the same
+pixels can also be presented on a virtio-gpu scanout; see [gpu.md](gpu.md)), and
+phase 5D adds a
 small pointer sprite on top of it: `gfx.device` turns the relative motion that
 the phase 5B USB HID boot mouse reports into cursor movement, and the console
 composites the sprite around its text so neither overwrites the other.
@@ -44,6 +46,38 @@ swap. Phase 5D found the polarity inverted (the console had only ever used
 greys, so nothing noticed); the amber sprite is what exposed it, and the gate
 compares the framebuffer colour, not just the coordinates, so the encoding stays
 honest.
+
+## The canvas
+
+Phase UI stage A turns the framebuffer into a small compositing canvas.
+`include/crug/fb.h` keeps the original fill, text and cursor calls and adds:
+
+| primitive | purpose |
+| --- | --- |
+| `fb_clip_push(x, y, w, h)` / `fb_clip_pop()` / `fb_clip_reset()` | a four-deep clip stack (`FB_CLIP_MAX` 4); every primitive intersects with the top rectangle and `fb_clip_depth()` reports the depth |
+| `fb_blend_rect(x, y, w, h, rgb, alpha)` | alpha-blended fill, alpha 0 to `CRUG_COLOR_ALPHA_MAX` (255) |
+| `fb_round_rect(x, y, w, h, radius, fill, border)` | rounded rectangle; a zero `fill` or `border` skips that part |
+| `fb_vgradient_rect(x, y, w, h, top, bottom)` | vertical gradient, one colour per row |
+| `fb_shadow_box(x, y, w, h, depth)` | the soft drop shadow under a window |
+| `fb_blit(x, y, w, h, src, stride_px)` / `fb_blit_keyed(..., key_rgb)` | copy a pixel block, with a colour key for transparent pixels |
+| `fb_draw_text_clipped(x, y, text, fg, bg, max_w)` | text that ends in `...` when it does not fit |
+| `fb_draw_text_transparent(x, y, text, fg)` | glyph bits only, no opaque background |
+| `fb_text_width(text)` | the pixel width of a string |
+| `fb_sample(x, y, &rgb)` | read one pixel back, -1 outside the screen |
+
+Everything is software. A primitive writes through `fb_store()`, whose pixels
+fold into the single damage rectangle phase 8A transfers to the GPU, so a batch
+of primitives in one repaint is still one transfer and one flush. Each call also
+saves and restores the software cursor around its own work, so a primitive can
+never leave a hole where the pointer was. Colours are `0x00RRGGBB` and are
+translated to the device format inside `fb_store()`; the two pure helpers,
+`kernel/gfx/color.c` (pack, unpack, blend, lerp) and `kernel/gfx/paint.c`
+(rounded-corner inset, gradient colour, shadow alpha), do the arithmetic that
+the primitives share and are host-tested on their own.
+
+The palette itself is not in `fb.c`: `kernel/gfx/theme.c` owns the theme
+tables and `kernel/gfx/intuition.c` reads them through macros, so the canvas
+draws whatever the current theme asks for. See [ui.md](ui.md) for the tables.
 
 ## gfx.device
 
@@ -138,9 +172,12 @@ both self-test outcomes.
 - Polled only: the console asks for a character, `usb_poll()` runs, and the
   cursor moves at human typing rates. There is no idle loop and no interrupt
   driven refresh, so motion only advances while the console is polled.
-- One 12x19 sprite, software composited. No hardware cursor, no double
-  buffering, no damage tracking: a move costs one restore plus one composite.
-- No GPU driver and no 2D acceleration: the framebuffer has one text console,
+- One 12x19 sprite, software composited and drawn into the scanout by default
+  (`gpu.cursor=sw`); `gpu.cursor=hw` hands the pointer to the device's cursor
+  plane instead, which a remote viewer may not composite. No double buffering:
+  a move costs one restore plus one composite, and the damage rectangle folds
+  the result into the next GPU transfer.
+- No 2D acceleration: the framebuffer has one text console,
   one sprite and, from phase 6A, the software desktop described in
   [workbench.md](workbench.md) (menus, gadgets and the event queue since
   phase 6B, the shell window since phase 6C, resize grips and keyboard

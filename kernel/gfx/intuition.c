@@ -17,6 +17,8 @@
 #include <crug/fb.h>
 #include <crug/input.h>
 #include <crug/intuition.h>
+#include <crug/icons.h>
+#include <crug/wallpaper.h>
 
 struct gadget {
     const char *label;
@@ -56,6 +58,12 @@ struct window {
        the button is held and the release, in body-relative coordinates. */
     void (*body_input)(int id, u32 kind, i32 x, i32 y, void *ctx);
     void *body_input_ctx;
+    /* Phase UI: the geometry the zoom gadget restores. */
+    i32 zoom_x;
+    i32 zoom_y;
+    u32 zoom_w;
+    u32 zoom_h;
+    int zoomed;
 };
 
 static struct icon g_icons[INTUITION_MAX_ICONS];
@@ -383,47 +391,74 @@ static u32 menu_strip_x(const struct window *w, u32 index)
     return x;
 }
 
+static i32 title_gadget_y(const struct window *w)
+{
+    return w->y + (i32)INTUITION_BORDER +
+           ((i32)INTUITION_TITLE_HEIGHT - (i32)INTUITION_GADGET_SIZE) / 2;
+}
+
 static i32 close_box_x(const struct window *w)
 {
-    return w->x + (i32)w->w - (i32)INTUITION_BORDER - 18;
+    return w->x + (i32)w->w - (i32)INTUITION_BORDER -
+           (i32)INTUITION_GADGET_SIZE - 6;
 }
 
 static int close_hit(const struct window *w, i32 px, i32 py)
 {
     i32 cx = close_box_x(w);
-    i32 cy = w->y + (i32)INTUITION_BORDER + 4;
+    i32 cy = title_gadget_y(w);
 
-    return px >= cx && px < cx + 12 && py >= cy && py < cy + 12;
+    return px >= cx && px < cx + (i32)INTUITION_GADGET_SIZE && py >= cy &&
+           py < cy + (i32)INTUITION_GADGET_SIZE;
 }
 
 /* The depth gadget (phase 6E): a 12x12 box four pixels left of the close
    gadget.  Clicking it sends the window to the back of the stacking order. */
 static i32 depth_box_x(const struct window *w)
 {
-    return close_box_x(w) - 16;
+    return close_box_x(w) - (i32)INTUITION_GADGET_SIZE - 4;
 }
 
 static int depth_hit(const struct window *w, i32 px, i32 py)
 {
     i32 cx = depth_box_x(w);
-    i32 cy = w->y + (i32)INTUITION_BORDER + 4;
+    i32 cy = title_gadget_y(w);
 
     return px >= cx && px < cx + (i32)INTUITION_DEPTH_SIZE && py >= cy &&
            py < cy + (i32)INTUITION_DEPTH_SIZE;
 }
 
-/* The front gadget (phase 6F): a 12x12 box another sixteen pixels to the left.
-   Pressing it raises the window above every other window; pressing it on the
-   frontmost window changes nothing. */
+static i32 front_box_x(const struct window *w);
+
+/* Phase UI: the zoom gadget, immediately left of the front gadget.  It is
+   drawn and active in the glass theme only; pressing it toggles the window
+   between its saved geometry and the whole screen. */
+static i32 zoom_box_x(const struct window *w)
+{
+    return front_box_x(w) - (i32)INTUITION_GADGET_SIZE - 4;
+}
+
+static int zoom_hit(const struct window *w, i32 px, i32 py)
+{
+    i32 cx = zoom_box_x(w);
+    i32 cy = title_gadget_y(w);
+
+    return px >= cx && px < cx + (i32)INTUITION_GADGET_SIZE && py >= cy &&
+           py < cy + (i32)INTUITION_GADGET_SIZE;
+}
+
+/* The front gadget (phase 6F): a box left of the zoom gadget.  Pressing it
+   raises the window above every other window; pressing it on the frontmost
+   window changes nothing. */
 static i32 front_box_x(const struct window *w)
 {
-    return close_box_x(w) - 32;
+    return depth_box_x(w) - (i32)INTUITION_GADGET_SIZE - 4;
 }
 
 static int front_hit(const struct window *w, i32 px, i32 py)
 {
     i32 cx = front_box_x(w);
-    i32 cy = w->y + (i32)INTUITION_BORDER + 4;
+    i32 cy = title_gadget_y(w);
 
     return px >= cx && px < cx + (i32)INTUITION_FRONT_SIZE && py >= cy &&
            py < cy + (i32)INTUITION_FRONT_SIZE;
@@ -531,6 +566,32 @@ static void icon_rect_of(int index, i32 *x, i32 *y, u32 *w, u32 *h)
     *h = INTUITION_ICON_HEIGHT;
 }
 
+/* The glass desktop object: the procedural icon on the wallpaper with a
+   translucent plate behind a white label, and an accent ring when selected. */
+static void draw_icon_glass(u32 index)
+{
+    const struct icon *ic = &g_icons[index];
+    int selected = ((int)index == g_icon_sel);
+    u32 x = (u32)ic->x;
+    u32 y = (u32)ic->y;
+    u32 label_y = y + INTUITION_ICON_HEIGHT + INTUITION_ICON_LABEL_GAP;
+    u32 tw;
+
+    icons_draw(ic->kind, x, y, INTUITION_ICON_HEIGHT);
+    if (selected) {
+        fb_frame_rect(x - 2u, y - 2u, INTUITION_ICON_WIDTH + 4u,
+                      INTUITION_ICON_HEIGHT + 4u,
+                      INTUITION_ICON_SELECTED_BORDER_RGB);
+    }
+    if (ic->label) {
+        tw = fb_text_width(ic->label);
+        fb_blend_rect(x - 2u, label_y - 1u, tw + 4u, 18u, 0x00000000u, 96u);
+        fb_draw_text_transparent(x, label_y, ic->label,
+                                 selected ? INTUITION_ICON_SELECTED_BORDER_RGB
+                                          : 0x00FFFFFFu);
+    }
+}
+
 static void draw_icon(u32 index)
 {
     const struct icon *ic = &g_icons[index];
@@ -540,6 +601,11 @@ static void draw_icon(u32 index)
     u32 label_rgb = selected ? INTUITION_ICON_SELECTED_BORDER_RGB
                              : INTUITION_ICON_TEXT_RGB;
     u32 bg = g_screens[g_screen_front].bg;
+
+    if (theme_get()->id == THEME_ID_GLASS) {
+        draw_icon_glass(index);
+        return;
+    }
 
     fb_fill_rect((u32)ic->x, (u32)ic->y, INTUITION_ICON_WIDTH,
                  INTUITION_ICON_HEIGHT, INTUITION_ICON_RGB);
@@ -704,8 +770,81 @@ static void win_draw_body(struct window *w)
     win_draw_gadgets(w);
 }
 
+/* Phase UI: the glass title bar.  A vertical gradient, a one pixel highlight
+   along the top, a small accent square standing in for the window icon, and
+   four flat gadgets (close, zoom, front, depth) without boxes around them. */
+static void win_draw_title_glass(struct window *w)
+{
+    int active = (w->id == g_active);
+    u32 top = active ? INTUITION_TITLE_ACTIVE_TOP_RGB
+                     : INTUITION_TITLE_IDLE_TOP_RGB;
+    u32 bottom = active ? INTUITION_TITLE_ACTIVE_BOTTOM_RGB
+                        : INTUITION_TITLE_IDLE_BOTTOM_RGB;
+    u32 text = active ? INTUITION_TITLE_TEXT_RGB
+                      : INTUITION_TITLE_TEXT_IDLE_RGB;
+    u32 bar_x = (u32)w->x + INTUITION_BORDER;
+    u32 bar_y = (u32)w->y + INTUITION_BORDER;
+    u32 bar_w = w->w - 2u * INTUITION_BORDER;
+    u32 size = INTUITION_GADGET_SIZE;
+    u32 gy = (u32)title_gadget_y(w);
+    u32 icon_y = bar_y + (INTUITION_TITLE_HEIGHT - 10u) / 2u;
+    u32 label_y = bar_y + (INTUITION_TITLE_HEIGHT - 16u) / 2u;
+    u32 zoom = (u32)zoom_box_x(w);
+    u32 front = (u32)front_box_x(w);
+    u32 depth = (u32)depth_box_x(w);
+    u32 close = (u32)close_box_x(w);
+    u32 i;
+
+    fb_vgradient_rect(bar_x, bar_y, bar_w, INTUITION_TITLE_HEIGHT, top,
+                      bottom);
+    fb_fill_rect(bar_x, bar_y, bar_w, 1u, INTUITION_FRAME_HIGHLIGHT_RGB);
+    fb_round_rect(bar_x + 6u, icon_y, 10u, 10u, 2u, INTUITION_ACCENT_RGB,
+                  0u);
+    if (w->title) {
+        fb_draw_text_transparent(bar_x + 22u, label_y, w->title, text);
+    }
+    /* Close: a diagonal cross. */
+    for (i = 4u; i + 4u < size; i += 2u) {
+        fb_fill_rect(close + i, gy + i, 2u, 2u, INTUITION_GADGET_TEXT_RGB);
+        fb_fill_rect(close + size - i - 2u, gy + i, 2u, 2u,
+                     INTUITION_GADGET_TEXT_RGB);
+    }
+    /* Zoom: a small square. */
+    fb_frame_rect(zoom + 4u, gy + 4u, size - 8u, size - 8u,
+                  INTUITION_GADGET_TEXT_RGB);
+    /* Front: an upward triangle. */
+    for (i = 0u; i < 5u; i++) {
+        fb_fill_rect(front + size / 2u - 1u - i, gy + 5u + i, 2u + 2u * i,
+                     1u, INTUITION_GADGET_TEXT_RGB);
+    }
+    /* Depth: a horizontal bar. */
+    fb_fill_rect(depth + 4u, gy + size / 2u - 1u, size - 8u, 2u,
+                 INTUITION_GADGET_TEXT_RGB);
+}
+
+/* Phase UI: the glass window.  A soft shadow underneath, the gradient title
+   bar, the body, and a rounded one pixel border on top of everything. */
+static void win_draw_glass(struct window *w)
+{
+    fb_shadow_box((u32)w->x, (u32)w->y, w->w, w->h,
+                  theme_get()->metrics.shadow_depth);
+    /* fb_round_rect() insets its border by one pixel on the straight rows,
+       so fill the rounded silhouette with the frame colour first: otherwise
+       a ring of wallpaper shows through around every window. */
+    fb_round_rect((u32)w->x, (u32)w->y, w->w, w->h,
+                  theme_get()->metrics.radius, INTUITION_FRAME_RGB, 0u);
+    win_draw_title_glass(w);
+    win_draw_body(w);
+    win_draw_resize(w);
+    fb_round_rect((u32)w->x, (u32)w->y, w->w, w->h,
+                  theme_get()->metrics.radius, 0u, INTUITION_FRAME_RGB);
+}
 static void win_draw(struct window *w)
 {
+    if (theme_get()->id == THEME_ID_GLASS) {
+        win_draw_glass(w);
+        return;
+    }
     fb_frame_rect((u32)w->x, (u32)w->y, w->w, w->h, INTUITION_FRAME_RGB);
     win_draw_title(w);
     win_draw_body(w);
@@ -725,6 +864,9 @@ static void menu_draw_bar(void)
     }
     fb_fill_rect(0, 0, g_screen_w, INTUITION_MENU_BAR_HEIGHT,
                  INTUITION_MENUBAR_RGB);
+    if (theme_get()->id == THEME_ID_GLASS) {
+        fb_fill_rect(0, 0, g_screen_w, 1u, INTUITION_FRAME_HIGHLIGHT_RGB);
+    }
     if (w && w->screen == g_screen_front) {
         for (i = 0; i < w->menu_count; i++) {
             u32 bw = menu_strip_width(&w->menus[i]);
@@ -733,8 +875,9 @@ static void menu_draw_bar(void)
                           : INTUITION_MENUBAR_RGB;
 
             fb_fill_rect(x, 0, bw, INTUITION_MENU_BAR_HEIGHT, rgb);
-            fb_draw_text(x + 8u, 1u, w->menus[i].title,
-                         INTUITION_MENU_TEXT_RGB, rgb);
+            fb_draw_text(x + 8u,
+                         theme_get()->id == THEME_ID_GLASS ? 4u : 1u,
+                         w->menus[i].title, INTUITION_MENU_TEXT_RGB, rgb);
             x += bw;
         }
     }
@@ -758,8 +901,16 @@ static void menu_draw_popup(void)
     m = &w->menus[g_menu_index];
     x = menu_strip_x(w, (u32)g_menu_index);
     h = 4u + m->item_count * INTUITION_MENU_ITEM_HEIGHT;
-    fb_fill_rect(x, y, INTUITION_MENU_ITEM_WIDTH, h, INTUITION_MENU_BG_RGB);
-    fb_frame_rect(x, y, INTUITION_MENU_ITEM_WIDTH, h, INTUITION_FRAME_RGB);
+    if (theme_get()->id == THEME_ID_GLASS) {
+        fb_round_rect(x, y, INTUITION_MENU_ITEM_WIDTH, h,
+                      theme_get()->metrics.radius, INTUITION_MENU_BG_RGB,
+                      INTUITION_FRAME_RGB);
+    } else {
+        fb_fill_rect(x, y, INTUITION_MENU_ITEM_WIDTH, h,
+                     INTUITION_MENU_BG_RGB);
+        fb_frame_rect(x, y, INTUITION_MENU_ITEM_WIDTH, h,
+                      INTUITION_FRAME_RGB);
+    }
     for (i = 0; i < m->item_count; i++) {
         u32 iy = y + 2u + i * INTUITION_MENU_ITEM_HEIGHT;
         u32 rgb = (g_menu_hover == (int)i) ? INTUITION_MENU_HIGHLIGHT_RGB
@@ -1254,7 +1405,11 @@ void intuition_redraw(void)
     fb_present_begin();
     /* Phase 6I: only the front screen is on the glass; the other screens keep
        their windows and objects but are not drawn. */
-    fb_fill_rect(0, 0, g_screen_w, g_screen_h, g_screens[g_screen_front].bg);
+    /* Phase UI: the wallpaper is baked into an off-screen buffer at boot, so
+       a desktop repaint is one blit; without one the screen colour shows. */
+    if (!wallpaper_draw(g_screen_w, g_screen_h)) {
+        fb_fill_rect(0, 0, g_screen_w, g_screen_h, g_screens[g_screen_front].bg);
+    }
     for (i = 0; i < g_icon_count; i++) {
         if (g_icons[i].screen != g_screen_front) {
             continue;
@@ -1363,6 +1518,36 @@ static void press(i32 px, i32 py)
                        tw ? tw->y : 0);
         }
         g_depths++;
+        g_actions++;
+        intuition_redraw();
+        return;
+    }
+    /* Phase UI: the zoom gadget toggles a window between its saved geometry
+       and the whole screen, exactly like the Amiga zoom gadget. */
+    if (theme_get()->id == THEME_ID_GLASS && zoom_hit(w, px, py)) {
+        if (!w->zoomed) {
+            w->zoom_x = w->x;
+            w->zoom_y = w->y;
+            w->zoom_w = w->w;
+            w->zoom_h = w->h;
+            w->x = 8;
+            w->y = (i32)INTUITION_MENU_BAR_HEIGHT + 8;
+            w->w = g_screen_w > 16u ? g_screen_w - 16u : w->w;
+            w->h = g_screen_h > INTUITION_MENU_BAR_HEIGHT + 16u
+                       ? g_screen_h - INTUITION_MENU_BAR_HEIGHT - 16u
+                       : w->h;
+            w->zoomed = 1;
+        } else {
+            w->x = w->zoom_x;
+            w->y = w->zoom_y;
+            w->w = w->zoom_w;
+            w->h = w->zoom_h;
+            w->zoomed = 0;
+        }
+        if (g_reporting) {
+            kprintf("CRUGOS: wb window %d zoomed\n", id);
+        }
+        event_push_resize(id, w->x, w->y, w->w, w->h);
         g_actions++;
         intuition_redraw();
         return;

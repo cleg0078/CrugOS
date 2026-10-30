@@ -1,6 +1,6 @@
 # Roadmap
 
-The specification defines 68 phases/gates. Phase 0 established the smallest
+The specification defines 71 phases/gates. Phase 0 established the smallest
 end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
 phase 1 makes the kernel own physical memory, page tables, exceptions and
 timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
@@ -2142,6 +2142,61 @@ is `CRUGOS: phase s1 boot ok`.
   with the ISO 9660 volume descriptors in the first 32 KiB. See
   [iso.md](iso.md).
 - All 36 gates pass at `v0.23.1`.
+
+## Phase UI - better user interface (in progress)
+
+The UI programme re-skins the phase 6 desktop instead of replacing it: the old
+look becomes a theme, the new one is drawn by a software compositing canvas, and
+both go through the same window manager. Stage A landed in `v0.49.0`:
+
+- `include/crug/color.h` and `kernel/gfx/color.c`: `color_pack()`,
+  `color_unpack()`, `color_blend()`, `color_blend_device()` and
+  `color_lerp()` over the two framebuffer format orders (`CRUG_COLOR_RGBX`,
+  `CRUG_COLOR_BGRX`).
+- `include/crug/paint.h` and `kernel/gfx/paint.c`: the pure corner, gradient
+  and shadow helpers (`paint_round_inset()`, `paint_gradient_rgb()`,
+  `paint_shadow_alpha()`), unit tested on the host without a framebuffer.
+- `include/crug/theme.h` and `kernel/gfx/theme.c`: `struct theme_palette`
+  and `struct theme_metrics` with two tables, `THEME_ID_CLASSIC` (the phase 6
+  palette and metrics exactly) and `THEME_ID_GLASS` (24 px titles, 1 px
+  rounded frame, 14 px gadgets, 24 px menu bar, 48x48 icons, 2 px shadow), read
+  through `theme_get()` and selected with `theme_set()` / `theme_parse()`.
+- `include/crug/fb.h` and `kernel/arch/x86_64/fb.c`: `fb_blend_rect()`,
+  `fb_round_rect()`, `fb_vgradient_rect()`, `fb_shadow_box()`,
+  `fb_blit()`, `fb_blit_keyed()`, clipped and transparent text and
+  `fb_sample()`, all behind a four-deep clip stack; every primitive saves the
+  software cursor, draws and flushes its damage rectangle.
+- `kernel/gfx/intuition.c` reads the theme through macros with the old names,
+  so the phase 6 call sites did not change: glass gets a gradient title bar with
+  a top highlight, a rounded accent window icon, 8x16 transparent title text,
+  flat 14x14 gadgets with dividers, a 1 px rounded frame, a 2 px drop shadow, a
+  24 px menu bar and rounded menus, and a fourth title gadget.
+- The zoom gadget fills the screen and toggles back to the saved geometry,
+  printing `CRUGOS: wb window N zoomed` and pushing
+  `INTUITION_EVENT_RESIZE`.
+- `include/crug/wallpaper.h` and `kernel/gfx/wallpaper.c`: `WALLPAPER_SUNSET`
+  paints a sky ramp, sea gradient, sun disc with a halo, a ringed planet and a
+  reflection column into a full-screen buffer from `pmm_alloc_pages()` (a
+  1280x800 screen is 4 MiB, above the 1 MiB heap block), blitted in rows and
+  re-blitted by `wallpaper_draw()`; `WALLPAPER_OFF` keeps the desktop colour.
+- `include/crug/icons.h` and `kernel/gfx/icons.c`: a volume, a drawer and a
+  file drawn from a 48 px master at any size, used for the glass desktop icons.
+- Boot tokens `wb.theme=glass|classic` and `wb.wallpaper=off|sunset` with
+  `CRUGOS: theme <name>` and `CRUGOS: wallpaper <name> WxH` markers; the
+  default is glass plus sunset, classic defaults to no wallpaper, and an
+  unparsable value is ignored with a warning marker.
+- Gates 69, 70 and 71 are `make test-theme-classic`, `make test-theme-glass`
+  and `make test-wallpaper`, sharing `THEME_RUN_TIMEOUT_SEC` (300) and
+  `THEME_WB_HOLD` (20); they read pixels out of a QMP screendump, and the
+  classic gate compares the phase 6 colours to prove the old look is intact.
+- `make test-host` reports 8833 checks, 0 failure(s); `make size` reports a
+  372000 B (363 KiB) kernel file and a 1025378 B (1001 KiB) load image
+  (`.text` 268518 B, `.rodata` 39936 B, `.data` 124 B, `.bss` 716800 B),
+  about 23 KiB under the 1 MiB stretch goal.
+- Not started: stage B (screens bar, clock, dock) and stage C (widgets, file
+  browser, ImageView/Music showcases). Text is still the baked 8x16 monospace
+  glyph set, and the wallpaper is procedural rather than a bitmap.
+- All 71 gates pass at `v0.49.0`.
 
 ## Security programme
 

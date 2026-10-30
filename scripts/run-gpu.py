@@ -319,7 +319,7 @@ def main():
         "QEMU_EXIT=" + str(exit_code_path),
         "QEMU_EXTRA=-qmp unix:%s,server=on,wait=off %s"
         % (sock_path, qemu_extra),
-        "CMDLINE_EXTRA=" + cmdline,
+        "CMDLINE_EXTRA=" + cmdline + " wb.theme=classic",
         "TIMEOUT_SEC=" + str(int(args.run_timeout)),
     ]
     if args.usb:

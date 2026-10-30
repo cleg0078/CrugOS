@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase S1 security pass 1 (`v0.48.0`)
+## Status: phase UI stage A, the glass theme (`v0.49.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -106,7 +106,12 @@ painted into the scanout, which gate 65 (`make test-gpu-cursor-sw`) proves is
 real scanout content. Phase S1 is the first security pass: it closes one
 Critical and four High findings from a review of the ring-3 and network
 surface, adds the three gates that prove them (66, 67 and 68) and writes down
-the rest of the list it deliberately leaves for S2.
+the rest of the list it deliberately leaves for S2. Phase UI stage A gives the
+desktop a theme system: a compositing canvas of blend, rounded-rect, gradient,
+shadow and text primitives, a light `glass` theme that re-skins every window and
+its gadgets, procedural wallpaper and icons, and a `wb.theme=classic` switch
+that restores the phase 6 look pixel for pixel; `make test-theme-classic`,
+`make test-theme-glass` and `make test-wallpaper` are gates 69 to 71.
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -1747,6 +1752,56 @@ fixes, each with its own opt-in self-test and boot marker:
 See [docs/security.md](docs/security.md) for the programme, the per-fix
 evidence, the rejected finding and the deferred list.
 
+Phase UI stage A re-skins the desktop without moving it. The old look stays one
+token away, and the new one is a light theme drawn by a software canvas:
+
+- **A theme is a table.** `struct theme_palette` holds every colour and
+  `struct theme_metrics` every size, from the title bar to the dock; the
+  `glass` theme is 24 px titles, a 1 px rounded frame, 14 px gadgets, a 24 px
+  menu bar, 48x48 icons and a 2 px shadow, while `classic` is the phase 6
+  palette and metrics exactly (20 px title, 2 px border, radius 0, 12 px
+  gadgets, 18 px menu bar, 64x48 icons, no shadow).
+- **The window manager reads the table.** `intuition.c` takes every colour and
+  metric through macros with the old names, so no call site changed when the
+  theme arrived; `theme_get()`, `theme_set()` and
+  `theme_parse(text, len)` are the only API a caller needs.
+- **A compositing canvas.** `fb_blend_rect()`, `fb_round_rect()`,
+  `fb_vgradient_rect()`, `fb_shadow_box()`, `fb_blit()` and
+  `fb_blit_keyed()`, clipped text and `fb_sample()` join the framebuffer
+  API, and a four-deep clip stack bounds every primitive. Each one saves the
+  software cursor first and flushes its damage rectangle through the present
+  callback, so a blended widget cannot leave the pointer smeared.
+- **A procedural wallpaper.** `wallpaper_sunset_rgb()` paints a sky ramp, a
+  sea gradient, a sun disc with a halo, a ringed planet and a soft reflection
+  column; the full-screen buffer comes from `pmm_alloc_pages()` because
+  1280x800 is 4 MiB and the heap caps a block at 1 MiB. `make test-wallpaper`
+  proves the same scene lands on a 1152x864 scanout.
+- **Procedural icons.** `icons_draw()` draws a volume, a drawer or a file
+  from a 48 px master at any size; the glass desktop uses 48x48 with an accent
+  selection ring and a translucent label plate.
+- **A fourth title gadget: zoom.** The new square left of the send-to-front
+  gadget fills the screen and toggles back to the saved geometry, printing
+  `CRUGOS: wb window N zoomed` and pushing `INTUITION_EVENT_RESIZE`.
+- **Tokens and gates.** `wb.theme=glass|classic` defaults to glass and prints
+  `CRUGOS: theme glass active`; `wb.wallpaper=off|sunset` follows the theme
+  (sunset with glass, off with classic) and prints `CRUGOS: wallpaper
+  sunset WxH`. `make test-theme-classic` (69), `make test-theme-glass`
+  (70) and `make test-wallpaper` (71) read pixels from a QMP screendump, and
+  the classic gate compares against the phase 6 colours to prove the old look
+  is intact. They share `THEME_RUN_TIMEOUT_SEC` (300).
+- `tests/host/test_color.c`, `test_paint.c`, `test_theme.c` and
+  `test_wallpaper.c` join `make test-host`, which now reports 8833 checks,
+  0 failure(s). `make size` reports a 372000 B (363 KiB) kernel file and a
+  1025378 B (1001 KiB) load image (`.text` 268518 B, `.rodata` 39936 B,
+  `.data` 124 B, `.bss` 716800 B), about 23 KiB under the 1 MiB stretch
+  goal; all 71 gates pass.
+- Text is still the baked 8x16 monospace glyph set and the wallpaper is
+  procedural, not a bitmap; stage B adds the screens bar, a clock and a dock,
+  and stage C the widget set, a file browser and the media showcases.
+
+See [docs/ui.md](docs/ui.md) for the theme tables, the canvas primitives, the
+chrome and the gates.
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -1755,9 +1810,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.48.0 (phase s1) -- Amiga-inspired microkernel bring-up
+CrugOS 0.49.0 (phase ui1) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.48.0
+CRUGOS: version 0.49.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -1806,7 +1861,7 @@ CRUGOS: tcp http served (72 bytes)
 CRUGOS: net selftest ok
 CRUGOS: gfx ready (1024x768, cursor at 512,384)
 CRUGOS: selftest ok
-kernel : 0x0000000000100000 size=349 KiB
+kernel : 0x0000000000100000 size=363 KiB
 boot   : cpu=0 acpi_rsdp=0x1f77e000 fdt=0x0 initrd=0x0
 memory : 36 regions, usable 474080 KiB (462 MiB)
 pmm    : total=118520 free=118462 bitmap=131072 B
@@ -1818,7 +1873,7 @@ heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
 boot   : pmm=27601 us cpu=408 us vm=624 us traps=333 us timer=65376 us heap=507 us storage=95213 us sched=5952 us syscall=107 us total=196126 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase s1 boot ok
+CRUGOS: phase ui1 boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -2059,6 +2114,9 @@ make test-gpu-cursor-sw  # prove the guest's software sprite is in the scanout
 make test-dns-hostile   # decode a hostile DNS compression chain and refuse forged replies
 make test-trap-vector   # execute int $4 from ring 3 and kill only the thread
 make test-net-synflood  # fill the TCP table and prove the reaper frees it
+make test-theme-classic  # prove wb.theme=classic is the phase 6 look, pixel for pixel
+make test-theme-glass    # read the glass palette out of a QMP screendump
+make test-wallpaper      # prove the sunset wallpaper follows the screen size
 make test-hardening  # craft hostile superblock/inode/crypt images and boot them
 make test-heap   # corrupt the kernel heap and prove the integrity checker catches it
 make test-trap   # inject eight crafted faults and check the report, IST and panic
@@ -2074,7 +2132,7 @@ make check-iso   # validate the ISO's El Torito, FAT ESP, MBR and file set
 make test-iso    # boot that ISO from a USB stick and from a CD-ROM
 make usb         # write the ISO to a USB block device (USB_DEV=/dev/sdX)
 make test-compat # boot a non-AVX2 build on a non-AVX2 CPU model
-make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows/menus/gadgets, resize grips, keyboard focus and keys, icon dragging, the send-to-front gadget and keyboard icon focus, the body input handler, the text grid and the shell, the user-window and uaccess validators, the per-space page-table tests, the ELF exec mapper, the argv predicates, the fork clone, the copy-on-write table, the screen model, the commodity registry, the app manifest parser, the capability mask and permission policy, the package container with its Ed25519 signatures, and the version comparison an update and a removal depend on)
+make test-host   # host unit tests (string, printf, ELF, bitmap, VM math, handles, CRC32C, AES/XTS/Argon2id/BLAKE2b, crypt slots, line editor, scancodes, USB HID keyboard and mouse, pointer state, IPv4 checksums, DHCP parsing, DNS, audio mixer/tone/ring, framebuffer cursor, intuition windows/menus/gadgets, resize grips, keyboard focus and keys, icon dragging, the send-to-front gadget and keyboard icon focus, the body input handler, the text grid and the shell, the user-window and uaccess validators, the per-space page-table tests, the ELF exec mapper, the argv predicates, the fork clone, the copy-on-write table, the screen model, the commodity registry, the app manifest parser, the capability mask and permission policy, the colour and paint helpers, the theme tables, the wallpaper generator, the package container with its Ed25519 signatures, and the version comparison an update and a removal depend on)
 make check-disk  # e2fsck + persisted-file checks on the latest test disk
 make user        # build the ring-3 programs and .app payloads the disk image carries
 make packages    # sign the test bundles the installer gates install
@@ -2124,7 +2182,8 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `MKPKG`, `PKG_DATA_DIR`, `PKG_SEED`, `PKG_BAD_SEED`, `PKG_RUN_TIMEOUT_SEC`,
 `CAPS_RUN_TIMEOUT_SEC`, `HARDEN_TIMEOUT_SEC`,
 `HEAP_STRESS_OPS`, `HEAP_RUN_TIMEOUT_SEC`, `TRAP_TIMEOUT_SEC`, `FUZZ_CASES`,
-`S1_RUN_TIMEOUT_SEC`,
+`S1_RUN_TIMEOUT_SEC`, `THEME_WB_HOLD`, `THEME_RUN_TIMEOUT_SEC`,
+`THEME_WALLPAPER_QEMU_EXTRA`,
 `FUZZ_CRYPT_CASES`, `FUZZ_SEED`, `FUZZ_TIMEOUT_SEC`, `USER_RUN_TIMEOUT_SEC`,
 `USER2_RUN_TIMEOUT_SEC`, `SHELL_RUN_TIMEOUT_SEC`, `SPAWN_RUN_TIMEOUT_SEC`,
 `FORK_RUN_TIMEOUT_SEC`, `FORKBIG_RUN_TIMEOUT_SEC`, `APP_RUN_TIMEOUT_SEC`,
@@ -2159,7 +2218,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/input/` | `input.device`: set-1 scancode decoder, the console byte queue and the pointer state |
 | `kernel/audio/` | `audio.device` PCM ring, the per-channel mixer and the tone generator |
 | `kernel/net/` | `net.device`, Ethernet/ARP/IPv4/ICMP/UDP, TCP, the DHCP client and the DNS resolver |
-| `kernel/gfx/` | `gfx.device` (the pointer-driven framebuffer cursor) and `intuition.device` with the phase 6A desktop, its phase 6B menus, gadgets and event queue, and the phase 6C body painter the shell window uses, the phase 6D resize grips and keyboard navigation, the phase 6E desktop objects, depth gadget and drawer, the phase 6F icon dragging, send-to-front gadget and keyboard icon focus, the phase 6G scrolling drawer with its scrollbar, refresh and reflow, and the phase 6H drawer row selection with its draggable scrollbar and body-input hook |
+| `kernel/gfx/` | `gfx.device` (the pointer-driven framebuffer cursor) and `intuition.device` with the phase 6A desktop, its phase 6B menus, gadgets and event queue, and the phase 6C body painter the shell window uses, the phase 6D resize grips and keyboard navigation, the phase 6E desktop objects, depth gadget and drawer, the phase 6F icon dragging, send-to-front gadget and keyboard icon focus, the phase 6G scrolling drawer with its scrollbar, refresh and reflow, and the phase 6H drawer row selection with its draggable scrollbar and body-input hook, and the UI stage A theme tables, compositing canvas, chrome, wallpaper and icons |
 | `kernel/app/` | the application registry, the bounded manifest parser for `.app` bundles and the signed `.crpkg` container |
 | `kernel/shell/` | the Workbench shell: line editor, history, the command table and the `shell_io` binding to the mounted ext4 root |
 | `kernel/mm/` | physical allocator, W^X page tables, the user-window mapper and uaccess copy boundary, copy-on-write frame references, kernel heap |
@@ -2172,7 +2231,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `tools/` | host-side development tools (`gen-font.py`, `mkcrypt.c`, `gen-crc32c.py`) |
 | `user/` | ring-3 programs and their freestanding runtime (`user.ld`, `start.S`, `lib.h`) |
 | `docs/` | [build](docs/build.md), [boot](docs/boot.md), [storage](docs/storage.md), [checksums](docs/checksums.md), [crypto](docs/crypto.md), [input](docs/input.md), [network](docs/network.md),
-[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [USB/xHCI](docs/usb.md), [audio](docs/audio.md), [graphics](docs/gfx.md), [virtio-gpu](docs/gpu.md), [Workbench](docs/workbench.md), [application bundles](docs/apps.md), [signed packages](docs/packages.md), [bootable ISO](docs/iso.md), [kernel heap](docs/heap.md), [trap policy](docs/traps.md), [mount-path fuzzing](docs/fuzzing.md), [ring 3](docs/userspace.md), [security](docs/security.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
+[NVMe](docs/nvme.md), [AHCI/SATA](docs/ahci.md), [RAID1/RAID10](docs/raid.md), [USB/xHCI](docs/usb.md), [audio](docs/audio.md), [graphics](docs/gfx.md), [UI theme](docs/ui.md), [virtio-gpu](docs/gpu.md), [Workbench](docs/workbench.md), [application bundles](docs/apps.md), [signed packages](docs/packages.md), [bootable ISO](docs/iso.md), [kernel heap](docs/heap.md), [trap policy](docs/traps.md), [mount-path fuzzing](docs/fuzzing.md), [ring 3](docs/userspace.md), [security](docs/security.md), [cpu/AVX2](docs/cpu.md), [versioning](docs/versioning.md), [roadmap](docs/roadmap.md) |
 
 ## Versioning
 

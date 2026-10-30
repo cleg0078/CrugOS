@@ -46,6 +46,10 @@ void test_vm_space_cow(void);
 void test_app_functions(void);
 void test_pkg_functions(void);
 void test_gpu_functions(void);
+void test_color_functions(void);
+void test_paint_functions(void);
+void test_theme_functions(void);
+void test_wallpaper_functions(void);
 
 int main(void)
 {
@@ -86,6 +90,10 @@ int main(void)
     RUN(test_app_functions);
     RUN(test_pkg_functions);
     RUN(test_gpu_functions);
+    RUN(test_color_functions);
+    RUN(test_paint_functions);
+    RUN(test_theme_functions);
+    RUN(test_wallpaper_functions);
     printf("%d checks, %d failure(s)\n", tests_run, tests_failed);
     return tests_failed == 0 ? 0 : 1;
 }

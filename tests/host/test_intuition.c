@@ -7,6 +7,7 @@
 #include <crug/fb.h>
 #include <crug/input.h>
 #include <crug/intuition.h>
+#include <crug/theme.h>
 #include <string.h>
 #include "test.h"
 
@@ -40,6 +41,45 @@ void fb_draw_text(u32 x, u32 y, const char *text, u32 fg, u32 bg)
     g_text_calls++;
 }
 
+/* Phase UI: the glass chrome calls the compositing primitives.  They are
+ * no-ops here; the tests count the classic ones above and only require the
+ * glass pass to finish without touching out-of-range geometry. */
+void fb_blend_rect(u32 x, u32 y, u32 w, u32 h, u32 rgb, u32 alpha)
+{
+    (void)x; (void)y; (void)w; (void)h; (void)rgb; (void)alpha;
+}
+
+void fb_round_rect(u32 x, u32 y, u32 w, u32 h, u32 radius, u32 fill, u32 border)
+{
+    (void)x; (void)y; (void)w; (void)h; (void)radius; (void)fill; (void)border;
+}
+
+void fb_vgradient_rect(u32 x, u32 y, u32 w, u32 h, u32 top, u32 bottom)
+{
+    (void)x; (void)y; (void)w; (void)h; (void)top; (void)bottom;
+}
+
+void fb_shadow_box(u32 x, u32 y, u32 w, u32 h, u32 depth)
+{
+    (void)x; (void)y; (void)w; (void)h; (void)depth;
+}
+
+u32 fb_text_width(const char *text)
+{
+    u32 len = 0;
+
+    while (text && text[len]) {
+        len++;
+    }
+    return len * 8u;
+}
+
+void fb_draw_text_transparent(u32 x, u32 y, const char *text, u32 fg)
+{
+    (void)x; (void)y; (void)text; (void)fg;
+    g_text_calls++;
+}
+
 /* Phase 8A: the compositor brackets each repaint with begin/end so a GPU
  * backend can transfer one damage rectangle. */
 void fb_present_begin(void)
@@ -54,6 +94,9 @@ void fb_present_end(void)
 
 static void test_reset(u32 width, u32 height)
 {
+    /* The window-manager tests describe the phase 6 look; the glass theme
+       has its own checks and gates. */
+    theme_set(THEME_ID_CLASSIC);
     test_fb_fake_reset(width && height, width, height);
     g_fill_calls = 0;
     g_frame_calls = 0;

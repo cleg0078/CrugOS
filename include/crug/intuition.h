@@ -10,18 +10,21 @@
 
 #include <crug/types.h>
 #include <crug/input.h>
+#include <crug/theme.h>
 
 #define INTUITION_MAX_WINDOWS 4
 #define INTUITION_MAX_MENUS 2
 #define INTUITION_MAX_ITEMS 6
 #define INTUITION_MAX_GADGETS 4
 #define INTUITION_EVENT_QUEUE 16
-#define INTUITION_TITLE_HEIGHT 20u
-#define INTUITION_BORDER 2u
+/* Phase UI: the chrome metrics come from the active theme, so the same code
+   paints the classic 20 px title bar and the glass 24 px one. */
+#define INTUITION_TITLE_HEIGHT (theme_get()->metrics.title_height)
+#define INTUITION_BORDER (theme_get()->metrics.border)
 #define INTUITION_MIN_WIDTH 120u
 #define INTUITION_MIN_HEIGHT 80u
-#define INTUITION_MENU_BAR_HEIGHT 18u
-#define INTUITION_MENU_ITEM_HEIGHT 18u
+#define INTUITION_MENU_BAR_HEIGHT (theme_get()->metrics.menubar_height)
+#define INTUITION_MENU_ITEM_HEIGHT (theme_get()->metrics.menu_item_height)
 #define INTUITION_MENU_ITEM_WIDTH 150u
 /* Phase 6D: the resize grip in the inner bottom-right corner of a window,
    and how far one arrow key moves the active window. */
@@ -31,15 +34,18 @@
 /* Phase 6E: desktop objects (disks, drawers and files as icons) and the depth
    gadget that sends a window to the back of the stacking order. */
 #define INTUITION_MAX_ICONS 8
-#define INTUITION_ICON_WIDTH 64u
-#define INTUITION_ICON_HEIGHT 48u
-#define INTUITION_ICON_LABEL_GAP 4u
-#define INTUITION_ICON_SELECTED_BORDER_RGB 0x00FFB000u
+#define INTUITION_ICON_WIDTH (theme_get()->metrics.icon_width)
+#define INTUITION_ICON_HEIGHT (theme_get()->metrics.icon_height)
+#define INTUITION_ICON_LABEL_GAP (theme_get()->metrics.icon_label_gap)
+#define INTUITION_ICON_SELECTED_BORDER_RGB (theme_get()->palette.icon_selected)
 /* The depth gadget in a title bar, four pixels left of the close gadget. */
-#define INTUITION_DEPTH_SIZE 12u
+#define INTUITION_DEPTH_SIZE (theme_get()->metrics.depth_size)
+/* Phase UI: the title bar gadgets are theme sized (12 px classic, 14 px
+   glass) and the glass chrome rounds its corners by this radius. */
+#define INTUITION_GADGET_SIZE (theme_get()->metrics.gadget_size)
 /* Phase 6F: the send-to-front gadget, sixteen pixels left of the depth box,
    and how far a pointer must move before an icon press becomes a drag. */
-#define INTUITION_FRONT_SIZE 12u
+#define INTUITION_FRONT_SIZE (theme_get()->metrics.front_size)
 #define INTUITION_ICON_DRAG_MIN 4u
 
 /* Phase 6I: full screens.  Every screen owns its background colour, its own
@@ -48,8 +54,8 @@
    (the front one highlighted) and swaps the front screen on a click, exactly
    like the Amiga screen depth arrangement. */
 #define INTUITION_MAX_SCREENS 3
-#define INTUITION_SCREEN_GLYPH_W 8u
-#define INTUITION_SCREEN_PAD 6u
+#define INTUITION_SCREEN_GLYPH_W (theme_get()->metrics.screen_glyph_w)
+#define INTUITION_SCREEN_PAD (theme_get()->metrics.screen_pad)
 
 /* Phase 6H: a body painter can also own its window's pointer input.  The
    callback receives body-relative coordinates and one of these kinds, so a
@@ -65,24 +71,34 @@
 #define INTUITION_ICON_DRAWER 1u
 #define INTUITION_ICON_FILE 2u
 
-/* Workbench palette, 0x00RRGGBB. */
-#define INTUITION_DESKTOP_RGB 0x00102030u
-#define INTUITION_WINDOW_RGB 0x00081018u
-#define INTUITION_FRAME_RGB 0x00FFFFFFu
-#define INTUITION_TITLE_ACTIVE_RGB 0x00FFB000u
-#define INTUITION_TITLE_IDLE_RGB 0x00808080u
-#define INTUITION_TITLE_TEXT_RGB 0x00000000u
-#define INTUITION_BODY_TEXT_RGB 0x00E0E0E0u
-#define INTUITION_MENUBAR_RGB 0x00C0C0C0u
-#define INTUITION_MENU_BG_RGB 0x00C0C0C0u
-#define INTUITION_MENU_TEXT_RGB 0x00000000u
-#define INTUITION_MENU_HIGHLIGHT_RGB 0x00FFB000u
-#define INTUITION_GADGET_RGB 0x00A0A0A0u
-#define INTUITION_GADGET_PRESSED_RGB 0x00606060u
-#define INTUITION_GADGET_TEXT_RGB 0x00000000u
-#define INTUITION_ICON_RGB 0x00C0C0C0u
-#define INTUITION_ICON_INNER_RGB 0x00081018u
-#define INTUITION_ICON_TEXT_RGB 0x00E0E0E0u
+/* Workbench palette, 0x00RRGGBB, kept as macros so the chrome code reads the
+   same and the active theme decides the values (phase UI).  TITLE_ACTIVE_RGB
+   is the flat colour a classic title bar fills with; the glass title bar
+   ramps from TITLE_ACTIVE_TOP_RGB to TITLE_ACTIVE_BOTTOM_RGB. */
+#define INTUITION_DESKTOP_RGB (theme_get()->palette.desktop)
+#define INTUITION_WINDOW_RGB (theme_get()->palette.window)
+#define INTUITION_FRAME_RGB (theme_get()->palette.frame)
+#define INTUITION_FRAME_HIGHLIGHT_RGB (theme_get()->palette.frame_highlight)
+#define INTUITION_TITLE_ACTIVE_RGB (theme_get()->palette.title_active_top)
+#define INTUITION_TITLE_ACTIVE_TOP_RGB (theme_get()->palette.title_active_top)
+#define INTUITION_TITLE_ACTIVE_BOTTOM_RGB (theme_get()->palette.title_active_bottom)
+#define INTUITION_TITLE_IDLE_RGB (theme_get()->palette.title_idle_top)
+#define INTUITION_TITLE_IDLE_TOP_RGB (theme_get()->palette.title_idle_top)
+#define INTUITION_TITLE_IDLE_BOTTOM_RGB (theme_get()->palette.title_idle_bottom)
+#define INTUITION_TITLE_TEXT_RGB (theme_get()->palette.title_active_text)
+#define INTUITION_TITLE_TEXT_IDLE_RGB (theme_get()->palette.title_idle_text)
+#define INTUITION_BODY_TEXT_RGB (theme_get()->palette.body_text)
+#define INTUITION_ACCENT_RGB (theme_get()->palette.accent)
+#define INTUITION_MENUBAR_RGB (theme_get()->palette.menubar)
+#define INTUITION_MENU_BG_RGB (theme_get()->palette.menu_bg)
+#define INTUITION_MENU_TEXT_RGB (theme_get()->palette.menu_text)
+#define INTUITION_MENU_HIGHLIGHT_RGB (theme_get()->palette.menu_highlight)
+#define INTUITION_GADGET_RGB (theme_get()->palette.gadget)
+#define INTUITION_GADGET_PRESSED_RGB (theme_get()->palette.gadget_pressed)
+#define INTUITION_GADGET_TEXT_RGB (theme_get()->palette.gadget_text)
+#define INTUITION_ICON_RGB (theme_get()->palette.icon)
+#define INTUITION_ICON_INNER_RGB (theme_get()->palette.icon_inner)
+#define INTUITION_ICON_TEXT_RGB (theme_get()->palette.icon_text)
 
 /* One screen-top menu: a title and its items.  The strings are owned by the
    caller and must stay valid while the window is open (intuition.device

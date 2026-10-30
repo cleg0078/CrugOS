@@ -40,6 +40,49 @@ int fb_text_enabled(void);
 void fb_fill_rect(u32 x, u32 y, u32 w, u32 h, u32 rgb);
 void fb_frame_rect(u32 x, u32 y, u32 w, u32 h, u32 rgb);
 void fb_draw_text(u32 x, u32 y, const char *text, u32 fg, u32 bg);
+/* Phase UI (v0.49.0): the richer primitives the desktop theme needs.  All
+   colours here are 0x00RRGGBB and are translated to the display format
+   internally.  Every primitive honours the clip stack and brackets its work
+   with the software cursor save/composite like the primitives above. */
+#define FB_CLIP_MAX 4
+
+/* Intersect a rectangle with the screen and with the rectangle on top of the
+   clip stack.  Returns 0 when the rectangle was pushed and -1 when the stack
+   is full (nothing changes).  A pushed rectangle may be empty; drawing into
+   it is skipped. */
+int fb_clip_push(u32 x, u32 y, u32 w, u32 h);
+void fb_clip_pop(void);
+void fb_clip_reset(void);
+int fb_clip_depth(void);
+
+/* Fill a rectangle with a source colour at the given alpha (0..255). */
+void fb_blend_rect(u32 x, u32 y, u32 w, u32 h, u32 rgb, u32 alpha);
+
+/* A rounded rectangle: fill the interior with fill (0 skips it) and draw a
+   one-pixel border in border (0 skips it). */
+void fb_round_rect(u32 x, u32 y, u32 w, u32 h, u32 radius, u32 fill, u32 border);
+
+/* Vertical ramp from top_rgb on row y to bottom_rgb on row y+h-1. */
+void fb_vgradient_rect(u32 x, u32 y, u32 w, u32 h, u32 top_rgb, u32 bottom_rgb);
+
+/* A soft black shadow extending depth pixels to the right and below a box. */
+void fb_shadow_box(u32 x, u32 y, u32 w, u32 h, u32 depth);
+
+/* Copy w x h RGB pixels from src (stride is in pixels) with the top-left at
+   (x, y); fb_blit_keyed() skips pixels equal to key_rgb. */
+void fb_blit(u32 x, u32 y, u32 w, u32 h, const u32 *src, u32 stride_px);
+void fb_blit_keyed(u32 x, u32 y, u32 w, u32 h, const u32 *src, u32 stride_px,
+                   u32 key_rgb);
+
+/* fb_draw_text() limited to max_w pixels: the tail becomes '...' when it
+   does not fit.  fb_text_width() is the width the full text would need. */
+void fb_draw_text_transparent(u32 x, u32 y, const char *text, u32 fg);
+void fb_draw_text_clipped(u32 x, u32 y, const char *text, u32 fg, u32 bg,
+                          u32 max_w);
+u32 fb_text_width(const char *text);
+
+/* Read back one pixel as 0x00RRGGBB.  Returns -1 outside the display. */
+int fb_sample(u32 x, u32 y, u32 *rgb);
 
 
 /* Phase 8A: a present callback receives the damaged rectangle in pixels; the

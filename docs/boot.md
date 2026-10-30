@@ -80,7 +80,9 @@ child's writes never reach the parent's copy, and phase 7A's `user.test=7` adds
 `app_list()`, which runs `/bin/sh /etc/app.rc` so the shell lists, inspects and
 launches a bundle and exits 9, and phase S1's `user.test=8` adds `/bin/trap4`,
 which executes `int $4` from CPL3 so the kernel has to charge the fault to the
-thread and keep running. `pkg.test=1` is independent of the user level:
+thread and keep running, and phase UI stage A adds `wb.theme=glass|classic` and
+`wb.wallpaper=off|sunset`, read where the other desktop tokens are, with glass
+and the sunset wallpaper as the defaults. `pkg.test=1` is independent of the user level:
 it probes and installs a signed package and refuses one signed by an untrusted
 key, and `pkg.test=2` launches the installed bundle and proves its capability
 mask, both parsed by `pkg_test_cmdline()` right after `user_test_cmdline()`.
@@ -214,7 +216,9 @@ post-snapshot allocations cannot push it over capacity.
    `wb.enable=1`), `wb.app=<0|1>` (the Applications icon and its bundle
    window, which the app self-test drives; it also needs `wb.enable=1`) and
    `wb.pkg=<0|1>` (the Packages window, which the package self-test presses;
-   it also needs `wb.enable=1`), and
+   it also needs `wb.enable=1`), `wb.theme=glass|classic` (the palette and
+   metrics table, default glass) and `wb.wallpaper=off|sunset` (a procedural
+   full-screen background, sunset with glass and off with classic), and
    `wb_init` builds the desktop only when
    the token was supplied: it takes
    the framebuffer away from the text console and prints `CRUGOS: wb desktop
@@ -237,7 +241,14 @@ post-snapshot allocations cannot push it over capacity.
    the toggle took one away; a screen switch prints `CRUGOS: wb screen N
    front (K window(s))` and a move between screens `CRUGOS: wb window N moved
    to screen M`. Without the token the framebuffer console keeps
-   its text mode and no Workbench line appears.
+   its text mode and no Workbench line appears. The theme token is echoed by
+   `CRUGOS: theme <name>` while the command line is parsed; `wb_init` then
+   prints `CRUGOS: theme glass active` after the desktop is up and, when a
+   wallpaper is wanted, `CRUGOS: wallpaper sunset 1280x800`. A failed
+   allocation prints `CRUGOS: wallpaper unavailable, desktop colour kept`
+   instead, and bad values are refused with `CRUGOS: theme ignored (use
+   wb.theme=classic|glass)` or `CRUGOS: wallpaper ignored (use
+   wb.wallpaper=off|sunset)`.
 9. `net_init`: reset `net.device` and `tcp_init`, then probe legacy virtio-net
    PCI functions (up to four `eth0`..`eth3`) and register them, bind the DHCP
    client to UDP port 68 and read the `net.tcp=<port>` / `net.serve=<seconds>`
@@ -389,7 +400,7 @@ post-snapshot allocations cannot push it over capacity.
     capability check exits 35 before the report.
 14. The user self-test of step 13, when it ran, has already joined its threads;
     then `report_boot`, `storage_lock` (wipes the passphrase, the volume keys
-    and the bounce buffer), `CRUGOS: phase s1 boot ok`, then
+    and the bounce buffer), `CRUGOS: phase ui1 boot ok`, then
     `wb_hold` (only when
     `wb.hold=` was given: the guest stays alive with the desktop on screen until
     the deadline), `trap_test_run()` (only when `trap.test=` was given, so the
@@ -675,7 +686,7 @@ CRUGOS: wb window 1 sent to front
 CRUGOS: wb action 6 front window 1
 CRUGOS: wb icons selftest ok (1 move(s), 1 front(s))
 CRUGOS: sh run 'ver'
-CRUGOS: sh out CrugOS 0.48.0 (phase s1), x86_64
+CRUGOS: sh out CrugOS 0.49.0 (phase ui1), x86_64
 CRUGOS: wb selftest ok (1 drag(s), 1 action(s))
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb drawer selftest ok (3 scroll(s), 1 refresh(es))
@@ -734,11 +745,11 @@ CRUGOS: sh exit 7
 CRUGOS: user shell finished (exit 7)
 CRUGOS: user selftest ok (3 program(s), 1 fault(s))
 boot   : pmm=28575 us cpu=414 us vm=617 us traps=317 us timer=65299 us heap=494 us storage=95001 us sched=5614 us syscall=90 us total=196426 us
-CRUGOS: phase s1 boot ok
+CRUGOS: phase ui1 boot ok
 ```
 
 With `trap.test=<recipe>` the same boot ends differently: the injector runs after
-`CRUGOS: phase s1 boot ok`, injects exactly one fault and the guest exits 35
+`CRUGOS: phase ui1 boot ok`, injects exactly one fault and the guest exits 35
 instead of 33. A `trap.test=de` boot ends:
 
 ```
@@ -811,7 +822,7 @@ CRUGOS: sh exit 7
 CRUGOS: user shell finished (exit 7)
 CRUGOS: user selftest ok (3 program(s), 1 fault(s))
 boot   : pmm=28575 us cpu=414 us vm=617 us traps=317 us timer=65299 us heap=494 us storage=95001 us sched=5614 us syscall=90 us total=196426 us
-CRUGOS: phase s1 boot ok
+CRUGOS: phase ui1 boot ok
 ```
 
 A `user.test=7` boot, the second leg of `make test-app-bundles`, adds the app
@@ -1186,6 +1197,22 @@ Then the disk check. See [traps.md](traps.md).
 the disk check. All three S1 gates rebuild the disk image and share
 `S1_RUN_TIMEOUT_SEC` (240). See [network.md](network.md).
 
+`make test-theme-classic` (gate 69), `make test-theme-glass` (gate 70)
+and `make test-wallpaper` (gate 71) boot the desktop with
+`wb.enable=1 wb.wait=0 wb.hold=<n> wb.theme=... wb.wallpaper=...` and drive
+`scripts/run-theme.py`, which waits for the theme marker, takes a QMP
+screendump of `gpu0` and checks pixels: classic must find the phase 6 title
+bar `(128, 128, 128)`, frame `(255, 255, 255)` and desktop
+`(16, 32, 48)` with no wallpaper, glass must find the body
+`(244, 244, 245)`, the border `(138, 138, 143)`, the title gradient
+`(247, 247, 247)` to `(236, 236, 236)` and the menu bar
+`(217, 217, 217)` over the sunset wallpaper, and `make test-wallpaper`
+repeats the sunset on a 1152x864 scanout (`THEME_WALLPAPER_QEMU_EXTRA`) to
+prove it follows the screen size. `boot-check.py --expect-theme=classic|glass|yes`
+and `--expect-wallpaper=sunset|off|yes` read the markers, and
+`THEME_WB_HOLD` (20) and `THEME_RUN_TIMEOUT_SEC` (300) bound the run.
+See [ui.md](ui.md).
+
 The `audio` lines appear only on machines with a USB audio function: a default
 `q35` boot prints `CRUGOS: audio device absent`, while `make test-audio` adds
 `-device usb-audio` behind `qemu-xhci` on an `-audiodev none` backend, so the log
@@ -1219,14 +1246,14 @@ replaced by the skip marker, and the USB device the firmware booted from shows
 up in the USB lines as an unsupported mass-storage function:
 
 ```
-CRUGOS: version 0.48.0
+CRUGOS: version 0.49.0
 CRUGOS: usb controller ready (xhci, 8 port(s))
 CRUGOS: usb device 46f4:0001 on port 1 (speed 4)
 CRUGOS: usb device class 8 on port 1 (unsupported)
 CRUGOS: storage skipped (storage=none)
 CRUGOS: heap check ok (6 slab(s), 8 object(s), 1 large block(s))
 CRUGOS: selftest ok
-CRUGOS: phase s1 boot ok
+CRUGOS: phase ui1 boot ok
 ```
 
 `kernel/core/report.c` prints the machine description between them: kernel

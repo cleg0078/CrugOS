@@ -59,6 +59,9 @@
 #   make test-dns-hostile  reject forged DNS replies and deep compression chains
 #   make test-trap-vector  kill only the program that issues a DPL-3 vector 4
 #   make test-net-synflood  reap half-open SYNs and answer RST on overflow
+#   make test-theme-classic  boot the phase 6 look beside the new theme system
+#   make test-theme-glass    check the glass chrome pixel by pixel on the GPU scanout
+#   make test-wallpaper      render the procedural sunset at a second resolution
 #   make crypt-disk  build the AES-256-XTS crypt test disk
 #   make test-crypt  boot from an encrypted root and verify the disk
 #   make test-crypt-recovery  unlock the encrypted root with the recovery keyslot
@@ -272,6 +275,14 @@ TRAP_TIMEOUT_SEC ?= 60
 # Security gates (phase S1): each one boots the unmodified kernel with a
 # selftest token, so the only knob is how long that boot may take.
 S1_RUN_TIMEOUT_SEC ?= 240
+
+# Theme gates (make test-theme-classic / test-theme-glass / test-wallpaper):
+# the glass theme is the default, so the older Workbench gates pin
+# wb.theme=classic.  These boot the theme system itself and check the chrome
+# and the wallpaper pixel by pixel on the GPU scanout.
+THEME_WB_HOLD ?= 20
+THEME_RUN_TIMEOUT_SEC ?= 300
+THEME_WALLPAPER_QEMU_EXTRA ?= -vga none -device virtio-gpu-pci,id=gpu0,xres=1152,yres=864
 
 # Userspace gate (make test-user): how long the ring-3 selftest may take.
 USER_RUN_TIMEOUT_SEC ?= 240
@@ -487,6 +498,7 @@ HOST_MKPKG_SOURCES := tools/mkpkg.c kernel/crypto/ed25519.c \
         test-gpu-edid test-gpu-cursor test-gpu-cursor-shape \
         test-gpu-cursor-sw test-pkg \
         test-dns-hostile test-trap-vector test-net-synflood \
+        test-theme-classic test-theme-glass test-wallpaper \
         test-caps packages mkpkg \
         iso check-iso test-iso usb \
         crash-disk \
@@ -1329,6 +1341,50 @@ test-net-synflood: esp
 		CMDLINE_EXTRA="net.synflood=1"
 	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no --expect-synflood=yes
 	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
+# Theme gates (phase UI).  run-theme.py boots the Workbench on the virtio-gpu
+# scanout, takes a QMP screendump and checks the chrome and the wallpaper; the
+# boot markers are asserted flag-style so the positional list stays at 22.
+test-theme-classic: esp
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(MAKE) --no-print-directory disk
+	$(Q)$(PYTHON) scripts/run-theme.py --repo $(CURDIR) \
+		--disk $(abspath $(DISK_IMG)) \
+		--serial-log $(abspath $(SERIAL_LOG)) \
+		--exit-code $(abspath $(QEMU_EXIT)) \
+		--wb-hold $(THEME_WB_HOLD) \
+		--run-timeout $(THEME_RUN_TIMEOUT_SEC) \
+		--theme classic --wallpaper off
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no no --expect-gpu=yes --expect-theme=classic --expect-wallpaper=off
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
+test-theme-glass: esp
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(MAKE) --no-print-directory disk
+	$(Q)$(PYTHON) scripts/run-theme.py --repo $(CURDIR) \
+		--disk $(abspath $(DISK_IMG)) \
+		--serial-log $(abspath $(SERIAL_LOG)) \
+		--exit-code $(abspath $(QEMU_EXIT)) \
+		--wb-hold $(THEME_WB_HOLD) \
+		--run-timeout $(THEME_RUN_TIMEOUT_SEC) \
+		--theme glass --wallpaper sunset
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no no --expect-gpu=yes --expect-theme=glass --expect-wallpaper=sunset
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
+test-wallpaper: esp
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(MAKE) --no-print-directory disk
+	$(Q)$(PYTHON) scripts/run-theme.py --repo $(CURDIR) \
+		--disk $(abspath $(DISK_IMG)) \
+		--serial-log $(abspath $(SERIAL_LOG)) \
+		--exit-code $(abspath $(QEMU_EXIT)) \
+		--wb-hold $(THEME_WB_HOLD) \
+		--run-timeout $(THEME_RUN_TIMEOUT_SEC) \
+		--qemu-extra "$(THEME_WALLPAPER_QEMU_EXTRA)" \
+		--theme glass --wallpaper sunset
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no no --expect-gpu=yes --expect-theme=glass --expect-wallpaper=sunset
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
 # Heap gate: boot with heap.stress= and heap.guard=1 so the kernel churns the
 # allocator and then plants three corruptions (a forged free-list link, a zeroed
 # slab cookie and a zeroed large-block cookie) that heap_check() must catch.
@@ -1606,6 +1662,9 @@ options:
 	@printf '  %-16s %s\n' HEAP_RUN_TIMEOUT_SEC "$(HEAP_RUN_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' TRAP_TIMEOUT_SEC "$(TRAP_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' S1_RUN_TIMEOUT_SEC "$(S1_RUN_TIMEOUT_SEC) (seconds)"
+	@printf '  %-16s %s\n' THEME_WB_HOLD "$(THEME_WB_HOLD) (seconds)"
+	@printf '  %-16s %s\n' THEME_RUN_TIMEOUT_SEC "$(THEME_RUN_TIMEOUT_SEC) (seconds)"
+	@printf '  %-16s %s\n' THEME_WALLPAPER_QEMU_EXTRA "$(THEME_WALLPAPER_QEMU_EXTRA)"
 	@printf '  %-16s %s\n' EXPECT_USER "$(EXPECT_USER)"
 	@printf '  %-16s %s\n' USER_RUN_TIMEOUT_SEC "$(USER_RUN_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' EXPECT_USERS "$(EXPECT_USERS)"

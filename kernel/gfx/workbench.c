@@ -27,6 +27,7 @@
 #include <crug/gfx.h>
 #include <crug/input.h>
 #include <crug/intuition.h>
+#include <crug/version.h>
 #include <crug/timer.h>
 #include <crug/cpu.h>
 #include <crug/usb.h>
@@ -38,6 +39,8 @@
 #include <crug/audio.h>
 #include <crug/app.h>
 #include <crug/pkg.h>
+#include <crug/theme.h>
+#include <crug/wallpaper.h>
 #include <crug/thread.h>
 
 static int g_enabled;
@@ -48,6 +51,8 @@ static int g_wait_given;
 static u32 g_want_drags;
 static u32 g_hold_seconds;
 static int g_menu_mode;
+static int g_wallpaper_kind = WALLPAPER_SUNSET;
+static int g_wallpaper_given;
 static u32 g_want_actions;
 static u32 g_actions_seen;
 
@@ -193,6 +198,28 @@ static void wb_cmdline_token(const char *tok, usize len)
     if (used >= 0) {
         if (wb_parse_u32(tok + used, len - (usize)used, &value) == 0) {
             g_enabled = value ? 1 : 0;
+        }
+        return;
+    }
+    used = wb_prefix(tok, len, "wb.theme=");
+    if (used >= 0) {
+        if (theme_parse(tok + used, (u32)(len - (usize)used)) == 0) {
+            kprintf("CRUGOS: theme %s\n", theme_name());
+        } else {
+            kprintf("CRUGOS: theme ignored (use wb.theme=classic|glass)\n");
+        }
+        return;
+    }
+    used = wb_prefix(tok, len, "wb.wallpaper=");
+    if (used >= 0) {
+        int kind = wallpaper_parse(tok + used, (u32)(len - (usize)used));
+
+        if (kind >= 0) {
+            g_wallpaper_kind = kind;
+            g_wallpaper_given = 1;
+            kprintf("CRUGOS: wallpaper %s\n", wallpaper_name(kind));
+        } else {
+            kprintf("CRUGOS: wallpaper ignored (use wb.wallpaper=off|sunset)\n");
         }
         return;
     }
@@ -1472,9 +1499,20 @@ int wb_init(void)
                       : 0;
     fb_set_text_enabled(0);
     intuition_init();
+    kprintf("CRUGOS: theme %s active\n", theme_name());
+    /* The wallpaper belongs to the glass theme; classic keeps its flat
+       desktop colour unless wb.wallpaper=sunset is asked for explicitly. */
+    if (!g_wallpaper_given) {
+        g_wallpaper_kind = theme_get()->id == THEME_ID_GLASS ? WALLPAPER_SUNSET
+                                                            : WALLPAPER_OFF;
+    }
+    if (g_wallpaper_kind != WALLPAPER_OFF &&
+        wallpaper_render(g_wallpaper_kind, width, height) != 0) {
+        kprintf("CRUGOS: wallpaper unavailable, desktop colour kept\n");
+    }
     intuition_set_reporting(g_reporting);
     top = intuition_open(80, 90, 360, 220, "Workbench",
-                         "CrugOS Workbench\nphase 8b\nsoftware rendered");
+                         "CrugOS Workbench\nphase " CRUG_PHASE_STR "\nsoftware rendered");
     shell_id = intuition_open(480, 300, 320, 200, "Shell", "4.OS\ncrugos>");
     intuition_set_menus(top, wb_menus_top, 2u);
     intuition_add_gadget(top, 12, 60, 96, 22, "Run");

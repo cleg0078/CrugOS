@@ -309,7 +309,7 @@ def main():
         "QEMU_EXTRA=-qmp unix:%s,server=on,wait=off %s"
         % (sock_path, args.qemu_extra),
         "MACHINE_EXTRA=usb=off,i8042=off",
-        "CMDLINE_EXTRA=" + cmdline,
+        "CMDLINE_EXTRA=" + cmdline + " wb.theme=classic",
         "TIMEOUT_SEC=" + str(int(args.run_timeout)),
     ]
     print("wbsel: starting " + " ".join(cmd))

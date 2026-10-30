@@ -44,7 +44,7 @@ REQUIRED_MARKERS = (
     "CRUGOS: selftest ok",
     "CRUGOS: nvme ready",
     "CRUGOS: ahci ready",
-    "CRUGOS: phase s1 boot ok",
+    "CRUGOS: phase ui1 boot ok",
 )
 # A rejected unlock stops before scheduling, storage mounting and self-tests.
 WRONG_CRYPT_MARKERS = (
@@ -117,6 +117,8 @@ def main() -> int:
     dnshostile_mode = "no"
     trapvector_mode = "no"
     synflood_mode = "no"
+    theme_mode = "no"
+    wallpaper_mode = "no"
     argv = []
     for arg in sys.argv[1:]:
         if arg == "--storage=none":
@@ -184,6 +186,10 @@ def main() -> int:
         elif arg.startswith("--expect-synflood="):
             print(f"FAIL: invalid syn flood expectation {arg!r}", file=sys.stderr)
             return 2
+        elif arg.startswith("--expect-theme="):
+            theme_mode = arg.split("=", 1)[1]
+        elif arg.startswith("--expect-wallpaper="):
+            wallpaper_mode = arg.split("=", 1)[1]
         else:
             argv.append(arg)
     sys.argv = [sys.argv[0]] + argv
@@ -203,7 +209,8 @@ def main() -> int:
               "[--expect-wbpkg=yes] [--expect-gpu=yes] "
               "[--expect-gpu-edid=yes] [--expect-gpu-cursor=yes] "
               "[--expect-dnshostile=yes] [--expect-trapvector=yes] "
-              "[--expect-synflood=yes]",
+              "[--expect-synflood=yes] [--expect-theme=glass] "
+              "[--expect-wallpaper=sunset]",
               file=sys.stderr)
         return 2
 
@@ -324,6 +331,10 @@ def main() -> int:
             return fail(f"invalid {name} mode {value!r}", text)
     if gpu_cursor_mode == "yes" and gpu_mode != "yes":
         return fail("--expect-gpu-cursor=yes also needs --expect-gpu=yes", text)
+    if theme_mode not in ("no", "yes", "glass", "classic"):
+        return fail(f"invalid theme mode {theme_mode!r}", text)
+    if wallpaper_mode not in ("no", "yes", "sunset", "off"):
+        return fail(f"invalid wallpaper mode {wallpaper_mode!r}", text)
 
     required = list(REQUIRED_MARKERS)
     if storage_mode == "none":
@@ -522,7 +533,6 @@ def main() -> int:
             "CRUGOS: gpu scanout ok",
             "CRUGOS: wb desktop ready",
             "CRUGOS: gpu selftest ok",
-            "CRUGOS: wb selftest ok",
         ):
             if marker not in text:
                 return fail(f"missing serial marker: {marker!r}", text)
@@ -542,6 +552,14 @@ def main() -> int:
             return fail("the scanout size differs from the resource size", text)
         if int(scanout.group(3)) < 1 or int(scanout.group(4)) < 1:
             return fail("expected at least one flush to the host", text)
+        # A hold boot (wb.wait=0 wb.hold=N) skips the action selftest by design:
+        # nothing is scripted to click.  The finished hold proves the desktop
+        # stayed up instead, and the gate's own driver pins the pixels.
+        if "CRUGOS: wb holding desktop" in text:
+            if "CRUGOS: wb hold finished" not in text:
+                return fail("the workbench hold never finished", text)
+        elif "CRUGOS: wb selftest ok" not in text:
+            return fail("missing serial marker: 'CRUGOS: wb selftest ok'", text)
         selftest = re.search(
             r"CRUGOS: gpu selftest ok \((\d+)x(\d+), (\d+) transfer\(s\), "
             r"(\d+) flush\(es\)\)", text)
@@ -1110,6 +1128,29 @@ def main() -> int:
         if marker not in text:
             return fail(f"missing serial marker: {marker!r}", text)
 
+    # Phase UI: both themes report themselves at boot; the wallpaper prints the
+    # size it rendered, which must be the scanout size the guest booted with.
+    if theme_mode != "no":
+        markers = {"glass": "CRUGOS: theme glass active",
+                   "classic": "CRUGOS: theme classic active"}
+        if theme_mode in markers:
+            if markers[theme_mode] not in text:
+                return fail(f"missing serial marker: {markers[theme_mode]!r}", text)
+        elif not any(marker in text for marker in markers.values()):
+            return fail("expected the guest to report its theme", text)
+    if wallpaper_mode in ("yes", "sunset"):
+        match = re.search(r"CRUGOS: wallpaper sunset (\d+)x(\d+)", text)
+        if match is None:
+            return fail("missing serial marker: 'CRUGOS: wallpaper sunset WxH'",
+                        text)
+        if int(match.group(1)) < 320 or int(match.group(2)) < 240:
+            return fail("the wallpaper size is too small to be a screen", text)
+    elif wallpaper_mode == "off":
+        if "CRUGOS: wallpaper off" not in text:
+            return fail("missing serial marker: 'CRUGOS: wallpaper off'", text)
+        if re.search(r"CRUGOS: wallpaper sunset \d+x\d+", text):
+            return fail("the wallpaper was rendered although it was off", text)
+
     raw_exit = exit_path.read_text().strip()
     try:
         status = int(raw_exit)
@@ -1138,6 +1179,7 @@ def main() -> int:
           "gpuedid", gpu_edid_mode, "gpucursor", gpu_cursor_mode,
           "dnshostile", dnshostile_mode, "trapvector", trapvector_mode,
           "synflood", synflood_mode,
+          "theme", theme_mode, "wallpaper", wallpaper_mode,
           "heap", expect_heap, "user", expect_user,
           "isolated", expect_users, "ushell", expect_ushell,
           "spawn", expect_spawn, "fork", expect_fork,

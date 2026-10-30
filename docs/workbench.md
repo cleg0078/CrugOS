@@ -499,6 +499,19 @@ window that is already frontmost is a no-op -- no event, no count and no
 repaint -- because the stacking order would not change. Compare the depth
 gadget, which sends a window back and activates the new top window.
 
+## The zoom gadget
+
+Phase UI stage A adds a fourth title box, the zoom gadget, to the left of the
+send-to-front box: in the glass title bar the bar now reads drag area, zoom,
+front, depth, close. A press saves the window rectangle, grows
+the window to the whole screen and prints `CRUGOS: wb window N zoomed`; the
+next press restores the saved rectangle. Either way `INTUITION_EVENT_RESIZE` is
+queued with the new geometry and the action count grows by one.
+
+The gadget is drawn and active in the glass theme only: `wb.theme=classic`
+keeps the phase 6 title bar with its three boxes, so the classic pixels stay
+identical to the earlier gates. See [ui.md](ui.md) for the chrome as a whole.
+
 ## Screens
 
 Phase 6I gives Intuition more than one screen. Up to `INTUITION_MAX_SCREENS` (3)
@@ -548,6 +561,10 @@ Four colours define the desktop:
 | window body | `INTUITION_WINDOW_RGB` `0x00081018` | (8,16,24) |
 | active title bar | `INTUITION_TITLE_ACTIVE_RGB` `0x00FFB000` | (255,176,0) |
 
+Those are the classic theme's values. Under the glass default every one of them
+comes from the theme table instead, and the title bar becomes a gradient with a
+1 px highlight; see [ui.md](ui.md).
+
 `wb.screens=1` (default 0, the plain single-screen desktop) makes
 `kernel/gfx/workbench.c` add a second screen called `Tools` with background
 `0x00203010`, open a 340x200 `Tools` window at (160,140) on it, give that
@@ -556,7 +573,7 @@ a body-relative (12,60,160,22) `Send to Workbench` gadget, return to screen 0 an
 print `CRUGOS: wb screens ready (%u screen(s), front %d)`. A press on the gadget
 moves the Tools window to screen 0, which is the programmatic way to show a move
 without dragging the window's title bar across a screen edge. In screens mode the
-Workbench window body reads `phase s1` and the self-test ends with
+Workbench window body reads `phase 8b` and the self-test ends with
 `CRUGOS: wb screens selftest ok (%u switch(es), %u move(s))`.
 
 ## Commodities Exchange
@@ -733,7 +750,7 @@ box with exclusive x1/y1) and `intuition_redraw()` /
 `fb_present_end()`, which clip the rectangle, transfer it with
 `TRANSFER_TO_HOST_2D` and flush it with `RESOURCE_FLUSH`. One repaint is one
 transfer and one flush; the console flushes once per line rather than once per
-glyph. Window body text paints `phase s1`, and the boot prints
+glyph. Window body text paints `phase 8b`, and the boot prints
 `CRUGOS: virtio-gpu ready (1280x800, 1000 backing page(s), resource 1, modern pci)` and
 `CRUGOS: gpu scanout ok (1280x800, 1 transfer(s), 1 flush(es))` before the desktop
 marker.
@@ -747,6 +764,40 @@ before the guest exits 33. The Workbench still renders in software -- the
 device only carries the finished pixels. Gate 61 `make test-gpu-usb` repeats
 it with a hotplugged `usb-mouse` on an xHCI controller and proves the
 keyboard and mouse path that the 64-bit BAR fix repaired. See [gpu.md](gpu.md).
+
+## The glass theme (phase UI stage A)
+
+Phase UI stage A separates the desktop's look from its code. `kernel/gfx/theme.c`
+holds two complete palettes and metric tables -- `classic`, the phase 6 look,
+and `glass`, a light theme with rounded corners and a soft drop shadow --
+selected by `theme_set()` and read back through `theme_get()`. The window
+manager reads every colour and size through macros named after the old
+constants (`INTUITION_TITLE_HEIGHT`, `INTUITION_WINDOW_RGB` and so on), so no
+call site in `kernel/gfx/intuition.c` had to change and `classic` reproduces
+the phase 6 pixels exactly.
+
+`wb.theme=glass` (the default) and `wb.theme=classic` choose the table; the
+token prints `CRUGOS: theme <name>` while the command line is parsed,
+`wb_init` prints `CRUGOS: theme glass active` after the desktop is up, and an
+unknown value prints `CRUGOS: theme ignored (use wb.theme=classic|glass)` and
+leaves glass selected. `wb.wallpaper=sunset` (the glass default) or
+`wb.wallpaper=off` (the classic default) does the same for the background:
+`wb_init` prints `CRUGOS: wallpaper sunset 1280x800`, a refused value prints
+`CRUGOS: wallpaper ignored (use wb.wallpaper=off|sunset)`, and an allocation
+failure prints `CRUGOS: wallpaper unavailable, desktop colour kept`.
+
+The glass chrome comes from the same tables: a 24 px gradient title bar with a
+1 px top highlight, a 10x10 accent square before the title, a 1 px rounded frame
+around the body, a two-pixel soft shadow to the right and below, 14x14 flat
+title gadgets separated by thin dividers, a 24 px menu bar and rounded menus.
+Desktop icons are drawn procedurally at 48x48 with an accent selection ring and
+a white label on a translucent plate (see [ui.md](ui.md) for the tables and the
+canvas primitives).
+
+The theme gates pin the classic table explicitly -- `wb.theme=classic
+wb.wallpaper=off` -- so every earlier screenshot assertion still describes the
+phase 6 look, while `make test-theme-glass` reads the glass pixels out of a QMP
+screendump. See [ui.md](ui.md) for gates 69 to 71.
 
 ## The event queue
 
@@ -793,7 +844,7 @@ index and the new tile origin.
 
    | id | rectangle | title | body |
    | --- | --- | --- | --- |
-   | 1 | (80, 90) 360x220 | `Workbench` | `CrugOS Workbench` / `phase s1` / `software rendered` |
+   | 1 | (80, 90) 360x220 | `Workbench` | `CrugOS Workbench` / `phase 8b` / `software rendered` |
    | 2 | (480, 300) 320x200 | `Shell` | `4.OS` / `crugos>`, or the shell grid when `wb.shell=1` |
 
    Window 1 carries the `Workbench` (About/Info/Quit) and `Window`
@@ -848,6 +899,8 @@ tokens do. Values are decimal, capped, and ignored when malformed:
 | `wb.cx=1` | 0/1 | register the four commodity hotkey utilities, open the `Exchange` manager and run the cx self-test (needs `wb.enable=1`) |
 | `wb.app=1` | 0/1 | add the `Applications:` icon and its bundle window, and run the app self-test (needs `wb.enable=1`) |
 | `wb.pkg=1` | 0/1 | open the `Packages` window, install the demo package on a body press and run the package self-test (needs `wb.enable=1`) |
+| `wb.theme=glass\|classic` | name | palette and metric table for the desktop; `glass` is the default and `classic` is the phase 6 look |
+| `wb.wallpaper=off\|sunset` | name | procedural desktop background; `sunset` with glass, `off` with classic |
 
 `make test-workbench` boots with `wb.enable=1 wb.wait=30 wb.drag=1`,
 `make test-workbench-menu` with `wb.enable=1 wb.wait=30 wb.menu=1 wb.acts=4`,
@@ -888,7 +941,7 @@ CRUGOS: wb window 2 drag start (512, 312)
 CRUGOS: wb window 2 drag to (557, 337)
 CRUGOS: wb window 2 moved to (570, 350)
 CRUGOS: wb selftest ok (1 drag(s), 0 action(s))
-CRUGOS: phase s1 boot ok
+CRUGOS: phase ui1 boot ok
 ```
 
 The menu gate is a second boot and adds the action lines:
@@ -906,7 +959,7 @@ CRUGOS: wb menu 'Workbench' open (window 1)
 CRUGOS: wb menu 'Workbench' selected ('Quit')
 CRUGOS: wb action 4 menu window 1 item 2
 CRUGOS: wb selftest ok (0 drag(s), 4 action(s))
-CRUGOS: phase s1 boot ok
+CRUGOS: phase ui1 boot ok
 ```
 
 The shell gate is a third boot: it adds `CRUGOS: wb shell ready (window 2,
@@ -933,7 +986,7 @@ CRUGOS: wb menu 'Workbench' item 1 highlighted ('Info')
 CRUGOS: wb menu 'Workbench' selected ('Info')
 CRUGOS: wb action 2 menu window 1 item 1
 CRUGOS: wb selftest ok (0 drag(s), 2 action(s))
-CRUGOS: phase s1 boot ok
+CRUGOS: phase ui1 boot ok
 ```
 
 The desktop gate is a fifth boot: it selects the `System:` object, opens its
@@ -951,7 +1004,7 @@ CRUGOS: wb window 3 sent to back
 CRUGOS: wb action 3 depth window 3
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb selftest ok (0 drag(s), 3 action(s))
-CRUGOS: phase s1 boot ok
+CRUGOS: phase ui1 boot ok
 ```
 
 The icon gate is a sixth boot: it focuses the `System:` object from the
@@ -975,7 +1028,7 @@ CRUGOS: wb window 1 sent to front
 CRUGOS: wb action 5 front window 1
 CRUGOS: wb icons selftest ok (1 move(s), 1 front(s))
 CRUGOS: wb selftest ok (0 drag(s), 5 action(s))
-CRUGOS: phase s1 boot ok
+CRUGOS: phase ui1 boot ok
 ```
 
 The drawer gate is a seventh boot, the only one that fills the volume first:
@@ -1001,7 +1054,7 @@ CRUGOS: wb drawer refreshed (29 entries)
 CRUGOS: wb selftest ok (0 drag(s), 0 action(s))
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb drawer selftest ok (3 scroll(s), 1 refresh(es))
-CRUGOS: phase s1 boot ok
+CRUGOS: phase ui1 boot ok
 ```
 
 The select gate is an eighth boot: same filled drawer, but the pointer now
@@ -1024,7 +1077,7 @@ CRUGOS: wb drawer scrollbar to (top 18 of 29)
 CRUGOS: wb drawer selected '<name>' (index 18 of 29)
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb select selftest ok (2 select(s), 1 scrollbar drag(s))
-CRUGOS: phase s1 boot ok
+CRUGOS: phase ui1 boot ok
 ```
 
 The screens gate is a ninth boot: two screens, a switch and a move between them:
@@ -1039,7 +1092,7 @@ CRUGOS: wb action 3 screen-move window 3 to 0
 CRUGOS: wb screen 0 front (3 window(s))
 CRUGOS: wb action 4 screen 0 front
 CRUGOS: wb screens selftest ok (2 switch(es), 1 move(s))
-CRUGOS: phase s1 boot ok
+CRUGOS: phase ui1 boot ok
 ```
 
 The commodities gate is a tenth boot: four registered utilities, a manager
@@ -1055,7 +1108,7 @@ CRUGOS: wb action 3 commodity Mute fired (muted)
 CRUGOS: wb action 4 commodity Clock fired (uptime 1 s)
 CRUGOS: wb cx selftest ok (2 toggle(s), 2 fire(s))
 CRUGOS: wb selftest ok (0 drag(s), 4 action(s))
-CRUGOS: phase s1 boot ok
+CRUGOS: phase ui1 boot ok
 ```
 
 The app-bundle gate boots the desktop with a three-bundle registry
@@ -1073,7 +1126,7 @@ CRUGOS: wb app launch hello tid 11
 CRUGOS: wb app reaped tid 11 exit 0
 CRUGOS: wb selftest ok (0 drag(s), 0 action(s))
 CRUGOS: wb app selftest ok (2 click(s), 1 launch(es))
-CRUGOS: phase s1 boot ok
+CRUGOS: phase ui1 boot ok
 ```
 
 | marker | when |
@@ -1292,10 +1345,11 @@ there is no keyboard text entry, only focus, movement and menu selection.
 ## Host tests
 
 `make test-host` links the real `kernel/gfx/intuition.c`,
-`kernel/gfx/commodities.c`, `kernel/app/manifest.c`, `kernel/app/pkg.c`,
-`kernel/lib/caps.c`, `kernel/lib/perms.c`, `kernel/crypto/sha512.c`,
-`kernel/crypto/ed25519.c`, `kernel/lib/textgrid.c` and
-`kernel/shell/shell.c` and reports 8528 checks.
+`kernel/gfx/commodities.c`, `kernel/gfx/color.c`, `kernel/gfx/paint.c`,
+`kernel/gfx/theme.c`, `kernel/gfx/wallpaper.c`, `kernel/app/manifest.c`,
+`kernel/app/pkg.c`, `kernel/lib/caps.c`, `kernel/lib/perms.c`,
+`kernel/crypto/sha512.c`, `kernel/crypto/ed25519.c`, `kernel/lib/textgrid.c` and
+`kernel/shell/shell.c` and reports 8833 checks.
 `tests/host/test_intuition.c` replaces the framebuffer primitives with counting
 stubs and the cursor accessors with a settable fake (`test_fb_fake_reset()` /
 `test_fb_cursor_set()` from `tests/host/test_gfx.c`), then checks:
@@ -1370,6 +1424,20 @@ stubs and the cursor accessors with a settable fake (`test_fb_fake_reset()` /
   activation, out-of-range window and screen indexes refused, switching to the
   front screen being a no-op that still sets the target, and a drag pending
   across a switch dropped.
+- the colour helpers: `test_color` packs and unpacks RGBX and BGRX, blends
+  towards a destination with alpha 0, 128 and 255, and interpolates palette
+  ramps with the up and down rounding.
+- the paint helpers: `test_paint` checks the rounded-corner inset table,
+  monotonic insets, the gradient endpoints and midpoint, and the shadow alpha
+  fading from strength to floor.
+- the theme tables: `test_theme` checks both palettes are plain RGB values,
+  the classic metrics still match the phase 6 numbers (title 20, border 2,
+  menubar 18), the glass numbers (title 24, border 1, radius 3, menubar 24,
+  shadow 2), that selection round-trips and that `theme_parse()` accepts
+  exactly `glass` and `classic`.
+- the wallpaper: `test_wallpaper` accepts `off` and `sunset` exactly, checks
+  the sunset's sky and sea colours and the sun disc, and follows a fake
+  framebuffer through `wallpaper_render()` and `wallpaper_draw()`.
 
 `tests/host/test_textgrid.c` covers the grid on its own, and
 `tests/host/test_shell.c` runs the command table against a fake `shell_io`:
@@ -1444,8 +1512,14 @@ anything else. The script then:
 6. waits for exit status 33 and prints
    `ok: workbench title-bar drag (N drag(s), window 2 at (x, y), exit 33)`.
 
+Every desktop gate driver in `scripts/` appends `wb.theme=classic` to the gate
+command line (the block above shows only the tokens the test itself needs), so
+the title colours, frame pixels and desktop background asserted there stay the
+phase 6 values while the booted default is the glass theme; `classic` also
+defaults `wb.wallpaper=off`, so those gates allocate no wallpaper.
+
 `make test-workbench` then runs `scripts/boot-check.py` with `EXPECT_WB=yes`
-(the phase s1 boot marker, the desktop marker, a `wb selftest ok`, at least one
+(the phase ui1 boot marker, the desktop marker, a `wb selftest ok`, at least one
 `wb window N opened`, one `wb window N moved to`, and one `wb cursor at` with
 numeric coordinates) and `scripts/check-disk.py` for the ext4 root.
 
@@ -1480,7 +1554,7 @@ larger relative motion into several 8-bit HID reports and the guest drops some
 of them, so a single jump of 644 pixels landed 136 pixels short when the gate
 was first written.
 
-`boot-check.py` then runs with `EXPECT_MENU=yes`, which requires the phase s1
+`boot-check.py` then runs with `EXPECT_MENU=yes`, which requires the phase ui1
 marker, the desktop marker, the menu open and selected markers, the gadget
 click marker, the close marker, at least one `wb action N ...` line and a
 `wb selftest ok (N drag(s), M action(s))` with at least one action, and
@@ -1526,7 +1600,7 @@ wb.acts=$(WB_KEYS_ACTS)`:
    and Enter to select it, requiring the highlight marker, the selection marker
    and `wb action 2 menu window 1 item 1`.
 5. waits for exit status 33, then runs `scripts/boot-check.py` with
-   `EXPECT_KEYS=yes` (the phase s1 marker, the desktop and keys markers, the
+   `EXPECT_KEYS=yes` (the phase ui1 marker, the desktop and keys markers, the
    resize and key-move markers, the menu markers and a two-action
    `wb selftest ok`) and `scripts/check-disk.py`, and prints
    `ok: workbench resize and keyboard navigation (exit 33)`.
@@ -1558,7 +1632,7 @@ wb.acts=$(WB_DESK_ACTS)`:
    back: the drawer title bar turns idle grey `(128,128,128)` and the Shell
    title bar behind it becomes amber at the same point.
 6. waits for exit status 33, then runs `scripts/boot-check.py` with
-   `EXPECT_DESK=yes` (the phase s1 marker, the desktop and icon markers, the
+   `EXPECT_DESK=yes` (the phase ui1 marker, the desktop and icon markers, the
    drawer marker, the icon and depth action lines, the desk self-test line and
    a three-action `wb selftest ok`) and `scripts/check-disk.py`, and prints
    `ok: workbench desktop objects and depth (exit 33)`.
@@ -1585,7 +1659,7 @@ wb.ikeys=1 wb.acts=$(WB_ICONS_ACTS)`:
 5. presses the front gadget at (394,102): the same title bar turns amber
    `(255,176,0)` again and the log carries
    `CRUGOS: wb window 1 sent to front`.
-6. waits for exit status 33, then `scripts/boot-check.py` requires the phase s1
+6. waits for exit status 33, then `scripts/boot-check.py` requires the phase ui1
    marker, the icons-ready, focus, drag, drop, front and action markers, the
    icon self-test line and `EXPECT_ICONS=yes` (its ok line reads `desk no icons
    yes storage disk`), and `scripts/check-disk.py` still runs a clean `e2fsck`.

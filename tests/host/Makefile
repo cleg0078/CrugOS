@@ -13,10 +13,13 @@ SOURCES := main.c test_string.c test_printf.c test_elf.c test_bitmap.c test_vm_m
            test_shell.c test_harden.c \
            test_heap.c test_trap.c test_argv.c test_ufile.c \
            test_uaccess.c test_exec.c test_vm_space.c test_pkg.c test_gpu.c \
+           test_color.c test_paint.c test_theme.c test_wallpaper.c \
            ../../drivers/usb/usb_hid.c \
            ../../kernel/audio/audio.c ../../kernel/audio/mixer.c \
            ../../kernel/gfx/gfx.c ../../kernel/gfx/intuition.c \
-           ../../kernel/gfx/commodities.c ../../kernel/gpu/gpu_util.c \
+           ../../kernel/gfx/commodities.c ../../kernel/gfx/color.c ../../kernel/gfx/theme.c \
+           ../../kernel/gfx/paint.c ../../kernel/gfx/icons.c \
+           ../../kernel/gfx/wallpaper.c ../../kernel/gpu/gpu_util.c \
            ../../kernel/gpu/edid.c \
            ../../kernel/input/input.c ../../kernel/net/net_util.c \
            ../../kernel/net/dns.c \

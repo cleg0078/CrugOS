@@ -4,6 +4,8 @@
 #include <crug/kernel.h>
 #include <crug/fb.h>
 #include <crug/gpu.h>
+#include <crug/color.h>
+#include <crug/paint.h>
 
 #define FB_GLYPH_W 8
 #define FB_GLYPH_H 16
@@ -400,6 +402,124 @@ int fb_text_enabled(void)
     return g_text_enabled;
 }
 
+/* Forward declaration: the clipped fill helper below feeds fb_fill_raw. */
+static void fb_fill_raw(u32 x, u32 y, u32 w, u32 h,
+                        const framebuffer_info *fb, u32 color);
+
+/* --- phase UI: clip stack, blending and the desktop primitives --- */
+
+static u32 g_clip[FB_CLIP_MAX][4]; /* x, y, w, h, already intersected */
+static u32 g_clip_depth;
+
+static void fb_clip_bounds(u32 *x, u32 *y, u32 *w, u32 *h)
+{
+    u32 cx = 0u, cy = 0u, cw = g_fb.width, ch = g_fb.height;
+    u32 x1, y1, x2, y2;
+
+    if (g_clip_depth) {
+        cx = g_clip[g_clip_depth - 1u][0];
+        cy = g_clip[g_clip_depth - 1u][1];
+        cw = g_clip[g_clip_depth - 1u][2];
+        ch = g_clip[g_clip_depth - 1u][3];
+    }
+    x1 = *x > cx ? *x : cx;
+    y1 = *y > cy ? *y : cy;
+    x2 = (*x + *w) < (cx + cw) ? (*x + *w) : (cx + cw);
+    y2 = (*y + *h) < (cy + ch) ? (*y + *h) : (cy + ch);
+    if (x2 <= x1 || y2 <= y1) {
+        *x = x1;
+        *y = y1;
+        *w = 0u;
+        *h = 0u;
+        return;
+    }
+    *x = x1;
+    *y = y1;
+    *w = x2 - x1;
+    *h = y2 - y1;
+}
+
+int fb_clip_push(u32 x, u32 y, u32 w, u32 h)
+{
+    if (!g_ready || g_clip_depth >= FB_CLIP_MAX) {
+        return -1;
+    }
+    fb_clip_bounds(&x, &y, &w, &h);
+    g_clip[g_clip_depth][0] = x;
+    g_clip[g_clip_depth][1] = y;
+    g_clip[g_clip_depth][2] = w;
+    g_clip[g_clip_depth][3] = h;
+    g_clip_depth++;
+    return 0;
+}
+
+void fb_clip_pop(void)
+{
+    if (g_clip_depth) {
+        g_clip_depth--;
+    }
+}
+
+void fb_clip_reset(void)
+{
+    g_clip_depth = 0u;
+}
+
+int fb_clip_depth(void)
+{
+    return (int)g_clip_depth;
+}
+
+static int fb_inside(u32 x, u32 y)
+{
+    const u32 *c;
+
+    if (x >= g_fb.width || y >= g_fb.height) {
+        return 0;
+    }
+    if (!g_clip_depth) {
+        return 1;
+    }
+    c = g_clip[g_clip_depth - 1u];
+    return x >= c[0] && y >= c[1] && x < c[0] + c[2] && y < c[1] + c[3];
+}
+
+/* One clipped, unblended fill; callers hold the cursor save bracket. */
+static void fb_rect_rgb(u32 x, u32 y, u32 w, u32 h, u32 rgb)
+{
+    u32 cx = x, cy = y, cw = w, ch = h;
+
+    if (!w || !h) {
+        return;
+    }
+    fb_clip_bounds(&cx, &cy, &cw, &ch);
+    if (!cw || !ch) {
+        return;
+    }
+    fb_fill_raw(cx, cy, cw, ch, &g_fb, fb_pixel_color(rgb));
+}
+
+/* One clipped, unblended blend; callers hold the cursor save bracket. */
+static void fb_blend_raw(u32 x, u32 y, u32 w, u32 h, u32 rgb, u32 alpha)
+{
+    u32 cx = x, cy = y, cw = w, ch = h;
+    u32 row, col;
+
+    if (!w || !h || !alpha) {
+        return;
+    }
+    fb_clip_bounds(&cx, &cy, &cw, &ch);
+    if (!cw || !ch) {
+        return;
+    }
+    for (row = cy; row < cy + ch; row++) {
+        for (col = cx; col < cx + cw; col++) {
+            fb_store(col, row,
+                     color_blend_device(fb_read(col, row), rgb, alpha,
+                                        g_fb.format));
+        }
+    }
+}
 static void fb_fill_raw(u32 x, u32 y, u32 w, u32 h, const framebuffer_info *fb,
                         u32 color)
 {
@@ -421,24 +541,21 @@ void fb_fill_rect(u32 x, u32 y, u32 w, u32 h, u32 rgb)
         return;
     }
     fb_cursor_restore();
-    fb_fill_raw(x, y, w, h, &g_fb, fb_pixel_color(rgb));
+    fb_rect_rgb(x, y, w, h, rgb);
     fb_cursor_composite();
     fb_present_flush();
 }
 
 void fb_frame_rect(u32 x, u32 y, u32 w, u32 h, u32 rgb)
 {
-    u32 color;
-
     if (!g_ready || w < 2u || h < 2u) {
         return;
     }
-    color = fb_pixel_color(rgb);
     fb_cursor_restore();
-    fb_fill_raw(x, y, w, 1u, &g_fb, color);
-    fb_fill_raw(x, y + h - 1u, w, 1u, &g_fb, color);
-    fb_fill_raw(x, y, 1u, h, &g_fb, color);
-    fb_fill_raw(x + w - 1u, y, 1u, h, &g_fb, color);
+    fb_rect_rgb(x, y, w, 1u, rgb);
+    fb_rect_rgb(x, y + h - 1u, w, 1u, rgb);
+    fb_rect_rgb(x, y, 1u, h, rgb);
+    fb_rect_rgb(x + w - 1u, y, 1u, h, rgb);
     fb_cursor_composite();
     fb_present_flush();
 }
@@ -452,7 +569,7 @@ static void fb_glyph_px(u32 x0, u32 y0, unsigned char c, u32 fg, u32 bg)
         u8 bits = glyph[row];
         for (col = 0; col < FB_GLYPH_W; col++) {
             u32 color = (bits & (0x80u >> col)) ? fg : bg;
-            if (x0 + col < g_fb.width && y0 + row < g_fb.height) {
+            if (fb_inside(x0 + col, y0 + row)) {
                 fb_store(x0 + col, y0 + row, color);
             }
         }
@@ -480,6 +597,257 @@ void fb_draw_text(u32 x, u32 y, const char *text, u32 fg, u32 bg)
     fb_cursor_composite();
     fb_present_flush();
 }
+/* --- phase UI: composite primitives built on the clip stack --------------- */
+
+/* The colour formats in include/crug/color.h mirror the boot pixel formats;
+   a drift here would silently swap red and blue. */
+_Static_assert(CRUG_COLOR_RGBX == (u32)CRUG_PIXEL_RGBX8888,
+              "color.h RGBX constant drifted from the boot format");
+_Static_assert(CRUG_COLOR_BGRX == (u32)CRUG_PIXEL_BGRX8888,
+              "color.h BGRX constant drifted from the boot format");
+
+void fb_blend_rect(u32 x, u32 y, u32 w, u32 h, u32 rgb, u32 alpha)
+{
+    if (!g_ready || !w || !h || !alpha) {
+        return;
+    }
+    fb_cursor_restore();
+    fb_blend_raw(x, y, w, h, rgb, alpha);
+    fb_cursor_composite();
+    fb_present_flush();
+}
+
+void fb_round_rect(u32 x, u32 y, u32 w, u32 h, u32 radius, u32 fill, u32 border)
+{
+    u32 row;
+
+    if (!g_ready || !w || !h) {
+        return;
+    }
+    if (radius > w / 2u) {
+        radius = w / 2u;
+    }
+    if (radius > h / 2u) {
+        radius = h / 2u;
+    }
+    fb_cursor_restore();
+    for (row = 0u; row < h; row++) {
+        u32 dy;
+        u32 inset;
+        u32 sx;
+        u32 sw;
+
+        /* paint_round_inset() counts dy from the outermost corner row: the
+           first rows are cut back by the circle, the straight middle rows
+           are not inset at all, so the border lands on the rectangle edge. */
+        if (row < radius) {
+            dy = row;
+        } else if (row + radius >= h) {
+            dy = h - 1u - row;
+        } else {
+            dy = radius;
+        }
+        inset = paint_round_inset(radius, dy);
+        if (inset * 2u >= w) {
+            continue;
+        }
+        sx = x + inset;
+        sw = w - 2u * inset;
+        if (fill) {
+            fb_rect_rgb(sx, y + row, sw, 1u, fill);
+        }
+        if (border) {
+            fb_rect_rgb(sx, y + row, 1u, 1u, border);
+            fb_rect_rgb(sx + sw - 1u, y + row, 1u, 1u, border);
+        }
+    }
+    if (border) {
+        u32 top_inset = paint_round_inset(radius, 0u);
+        u32 top_w = w > 2u * top_inset ? w - 2u * top_inset : 0u;
+
+        if (top_w) {
+            fb_rect_rgb(x + top_inset, y, top_w, 1u, border);
+            fb_rect_rgb(x + top_inset, y + h - 1u, top_w, 1u, border);
+        }
+    }
+    fb_cursor_composite();
+    fb_present_flush();
+}
+
+void fb_vgradient_rect(u32 x, u32 y, u32 w, u32 h, u32 top_rgb, u32 bottom_rgb)
+{
+    u32 row;
+
+    if (!g_ready || !w || !h) {
+        return;
+    }
+    fb_cursor_restore();
+    for (row = 0u; row < h; row++) {
+        fb_rect_rgb(x, y + row, w, 1u,
+                    paint_gradient_rgb(top_rgb, bottom_rgb, row, h));
+    }
+    fb_cursor_composite();
+    fb_present_flush();
+}
+
+void fb_shadow_box(u32 x, u32 y, u32 w, u32 h, u32 depth)
+{
+    u32 i;
+
+    if (!g_ready || !w || !h || !depth) {
+        return;
+    }
+    if (depth > 8u) {
+        depth = 8u;
+    }
+    fb_cursor_restore();
+    for (i = 0u; i < depth; i++) {
+        u32 alpha = paint_shadow_alpha(i, depth, 96u, 24u);
+        u32 height = h > i ? h - i : 1u;
+        u32 width = w > i ? w - i : 1u;
+
+        /* One column to the right and one row below the box, shifted a
+           little further out per band so the edge looks soft. */
+        fb_blend_raw(x + w + i, y + 2u + i, 1u, height, 0x00000000u, alpha);
+        fb_blend_raw(x + 2u + i, y + h + i, width, 1u, 0x00000000u, alpha);
+    }
+    fb_cursor_composite();
+    fb_present_flush();
+}
+
+void fb_blit_keyed(u32 x, u32 y, u32 w, u32 h, const u32 *src, u32 stride_px,
+                   u32 key_rgb)
+{
+    u32 row, col;
+
+    if (!g_ready || !src || !w || !h) {
+        return;
+    }
+    key_rgb &= 0x00FFFFFFu;
+    fb_cursor_restore();
+    for (row = 0u; row < h; row++) {
+        for (col = 0u; col < w; col++) {
+            u32 px = src[row * stride_px + col] & 0x00FFFFFFu;
+            if (px == key_rgb || !fb_inside(x + col, y + row)) {
+                continue;
+            }
+            fb_store(x + col, y + row, fb_pixel_color(px));
+        }
+    }
+    fb_cursor_composite();
+    fb_present_flush();
+}
+
+void fb_blit(u32 x, u32 y, u32 w, u32 h, const u32 *src, u32 stride_px)
+{
+    u32 row, col;
+
+    if (!g_ready || !src || !w || !h) {
+        return;
+    }
+    fb_cursor_restore();
+    for (row = 0u; row < h; row++) {
+        for (col = 0u; col < w; col++) {
+            u32 px = src[row * stride_px + col] & 0x00FFFFFFu;
+            if (!fb_inside(x + col, y + row)) {
+                continue;
+            }
+            fb_store(x + col, y + row, fb_pixel_color(px));
+        }
+    }
+    fb_cursor_composite();
+    fb_present_flush();
+}
+
+void fb_draw_text_clipped(u32 x, u32 y, const char *text, u32 fg, u32 bg,
+                          u32 max_w)
+{
+    u32 fg_color, bg_color;
+    u32 cells, len, draw, i;
+
+    if (!g_ready || !text || !max_w || y >= g_fb.height) {
+        return;
+    }
+    cells = max_w / FB_GLYPH_W;
+    if (!cells) {
+        return;
+    }
+    len = (u32)strlen(text);
+    draw = (len > cells) ? (cells > 3u ? cells - 3u : cells) : len;
+    fg_color = fb_pixel_color(fg);
+    bg_color = fb_pixel_color(bg);
+    fb_cursor_restore();
+    for (i = 0u; i < draw && i < len; i++) {
+        if (x + FB_GLYPH_W > g_fb.width) {
+            break;
+        }
+        fb_glyph_px(x, y, (unsigned char)text[i], fg_color, bg_color);
+        x += FB_GLYPH_W;
+    }
+    if (len > cells && cells > 3u) {
+        for (i = 0u; i < 3u; i++) {
+            if (x + FB_GLYPH_W > g_fb.width) {
+                break;
+            }
+            fb_glyph_px(x, y, (unsigned char)'.', fg_color, bg_color);
+            x += FB_GLYPH_W;
+        }
+    }
+    fb_cursor_composite();
+    fb_present_flush();
+}
+
+/* Draw only the set glyph pixels, leaving the background alone: the glass
+   title bar and the desktop wallpaper both need text over a gradient. */
+void fb_draw_text_transparent(u32 x, u32 y, const char *text, u32 fg)
+{
+    u32 fg_color;
+
+    if (!g_ready || !text || y >= g_fb.height) {
+        return;
+    }
+    fg_color = fb_pixel_color(fg);
+    fb_cursor_restore();
+    while (*text && x + FB_GLYPH_W <= g_fb.width) {
+        unsigned char ch = (unsigned char)*text++;
+        u32 row, col;
+
+        if (ch >= 128u) {
+            ch = '?';
+        }
+        for (row = 0u; row < FB_GLYPH_H; row++) {
+            u8 bits = crug_font8x16[ch][row];
+
+            for (col = 0u; col < FB_GLYPH_W; col++) {
+                if (!(bits & (0x80u >> col))) {
+                    continue;
+                }
+                if (!fb_inside(x + col, y + row)) {
+                    continue;
+                }
+                fb_store(x + col, y + row, fg_color);
+            }
+        }
+        x += FB_GLYPH_W;
+    }
+    fb_cursor_composite();
+    fb_present_flush();
+}
+
+u32 fb_text_width(const char *text)
+{
+    return text ? (u32)strlen(text) * FB_GLYPH_W : 0u;
+}
+
+int fb_sample(u32 x, u32 y, u32 *rgb)
+{
+    if (!g_ready || !rgb || x >= g_fb.width || y >= g_fb.height) {
+        return -1;
+    }
+    *rgb = color_unpack(fb_read(x, y), g_fb.format);
+    return 0;
+}
+
 /* Adopt a caller-owned linear buffer as the display and its present callback. */
 int fb_attach_linear(u8 *base, u32 width, u32 height, u32 stride, u32 format,
                      fb_present_fn present)
