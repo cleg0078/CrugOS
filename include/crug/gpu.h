@@ -42,6 +42,47 @@ void gpu_damage_reset(struct gpu_damage *dmg);
 void gpu_damage_add(struct gpu_damage *dmg, u32 x, u32 y, u32 w, u32 h);
 int gpu_damage_rect(const struct gpu_damage *dmg, struct gpu_rect *out);
 
+/* Phase 8B: EDID mode selection and the hardware cursor plane.  The pure
+   parser in kernel/gpu/edid.c decodes the base block the device answers to
+   GET_EDID so the scanout can adopt the monitor's preferred mode instead of
+   guessing from a fixed list, and the cursor plane lets the device composite
+   the pointer so the framebuffer no longer carries a software sprite. */
+#define GPU_EDID_MAX_BYTES 1024u
+#define GPU_EDID_MAX_MODES 4u
+#define GPU_CURSOR_PX 64u
+
+struct gpu_edid_mode {
+    u32 width;
+    u32 height;
+    u32 clock_khz;
+    u32 refresh_hz;
+};
+
+struct gpu_edid {
+    int valid;
+    u32 block_count;
+    u16 vendor;                 /* three packed five-bit letters */
+    u16 product;
+    u32 serial;
+    u32 week;
+    u32 year;
+    u32 width_cm;
+    u32 height_cm;
+    u32 mode_count;
+    struct gpu_edid_mode modes[GPU_EDID_MAX_MODES];
+    int has_preferred;
+    struct gpu_edid_mode preferred;
+};
+
+/* Decode a raw EDID byte stream (base block plus extensions).  Returns 0 when
+   the header and base-block checksum are good and at least one detailed
+   timing descriptor was found, -1 otherwise. */
+int gpu_edid_parse(const u8 *data, u32 len, struct gpu_edid *out);
+
+/* Write the three-letter manufacturer id ("DEL", "AUO", ...) as a NUL
+   terminated string.  Unknown or zero ids produce "???". */
+void gpu_edid_vendor(const struct gpu_edid *edid, char name[4]);
+
 /* Driver control (drivers/gpu/virtio_gpu.c). */
 void gpu_cmdline(const boot_info *bi);
 int gpu_init(void);
@@ -53,3 +94,10 @@ u32 gpu_height(void);
 u64 gpu_transfers(void);
 u64 gpu_flushes(void);
 u32 gpu_errors(void);
+
+/* Phase 8B status: whether the device offered EDID and whether the cursor
+   plane accepted its cursor resource. */
+int gpu_edid_available(void);
+int gpu_cursor_ready(void);
+u64 gpu_cursor_updates(void);
+u64 gpu_cursor_moves(void);

@@ -50,6 +50,8 @@
 #   make test-app-bundles        launch a .app bundle from the desktop and from the shell
 #   make test-gpu    boot on a virtio-gpu scanout and verify the GPU-backed desktop
 #   make test-gpu-usb  scanout plus a hotplugged USB mouse above 4 GiB
+#   make test-gpu-edid  pick the display mode from the device EDID
+#   make test-gpu-cursor  move the pointer on the virtio-gpu cursor plane
 #   make test-pkg    install, update and remove a signed package
 #   make test-caps   launch an installed bundle and prove its capability wall
 #   make crypt-disk  build the AES-256-XTS crypt test disk
@@ -217,6 +219,12 @@ GPU_WB_WAIT ?= 30
 GPU_RUN_TIMEOUT_SEC ?= 300
 GPU_QEMU_EXTRA ?= -vga none -device virtio-gpu-pci,id=gpu0
 GPU_USB_QEMU_EXTRA ?= $(GPU_QEMU_EXTRA) -device qemu-xhci,id=xhci
+
+# EDID gate (make test-gpu-edid): the device is pinned to a non-default
+# 1152x864 timing, so the mode and the scanout can only match it when the
+# driver decoded the EDID instead of its 1024x768 fallback list.
+GPU_EDID_DEVICE ?= virtio-gpu-pci,id=gpu0,xres=1152,yres=864
+GPU_EDID_QEMU_EXTRA ?= -vga none -device $(GPU_EDID_DEVICE)
 
 # Package gates (make test-pkg / make test-caps): pkg.test=1 installs the
 # signed captest bundle, updates it, refuses a downgrade and an untrusted
@@ -451,7 +459,8 @@ HOST_MKPKG_SOURCES := tools/mkpkg.c kernel/crypto/ed25519.c \
         test-workbench test-workbench-menu test-workbench-shell test-workbench-keys \
         test-workbench-desk test-workbench-icons test-workbench-drawer \
         test-workbench-select test-workbench-screens test-workbench-cx \
-        test-workbench-pkg test-app-bundles test-gpu test-gpu-usb test-pkg test-caps packages mkpkg \
+        test-workbench-pkg test-app-bundles test-gpu test-gpu-usb \
+        test-gpu-edid test-gpu-cursor test-pkg test-caps packages mkpkg \
         iso check-iso test-iso usb \
         crash-disk \
         check-disk size check-efi repro test-host preflight version options clean distclean help
@@ -995,6 +1004,41 @@ test-gpu-usb: esp
 	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no --expect-gpu=yes
 	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
 
+# EDID gate (phase 8B): the device is pinned to 1152x864, which is neither
+# the driver's 1024x768 fallback nor QEMU's default, so a guest that ends up
+# at that mode can only have adopted the GET_EDID timing.  The verdict also
+# re-checks the scanout pixels, because a wrong mode moves the desktop
+# samples out of place.
+test-gpu-edid: esp
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(MAKE) --no-print-directory disk
+	$(Q)$(PYTHON) scripts/run-gpu.py --repo $(CURDIR) \
+		--disk $(abspath $(DISK_IMG)) --serial-log $(abspath $(SERIAL_LOG)) \
+		--exit-code $(abspath $(QEMU_EXIT)) \
+		--wb-wait $(GPU_WB_WAIT) \
+		--run-timeout $(GPU_RUN_TIMEOUT_SEC) \
+		--expect-edid \
+		--qemu-extra "$(GPU_EDID_QEMU_EXTRA)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no --expect-gpu=yes --expect-gpu-edid=yes
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
+# Hardware-cursor gate (phase 8B): UPDATE_CURSOR and MOVE_CURSOR travel on
+# virtqueue 1 with their own 64x64 resource; a screendump of the scanout
+# device never contains them, so the serial counters are the evidence that the
+# plane (not the software sprite) moved.
+test-gpu-cursor: esp
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(MAKE) --no-print-directory disk
+	$(Q)$(PYTHON) scripts/run-gpu.py --repo $(CURDIR) \
+		--disk $(abspath $(DISK_IMG)) --serial-log $(abspath $(SERIAL_LOG)) \
+		--exit-code $(abspath $(QEMU_EXIT)) \
+		--wb-wait $(GPU_WB_WAIT) \
+		--run-timeout $(GPU_RUN_TIMEOUT_SEC) \
+		--expect-cursor \
+		--qemu-extra "$(GPU_QEMU_EXTRA)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no --expect-gpu=yes --expect-gpu-cursor=yes
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
 # App-bundle gate (phase 7A): wb.app=1 adds the Applications icon; a double
 # click opens the bundle list and a double click on a row launches that
 # program, which the desktop then reaps with its exit status.  A second boot
@@ -1448,6 +1492,8 @@ options:
 	@printf '  %-16s %s\n' GPU_RUN_TIMEOUT_SEC "$(GPU_RUN_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' GPU_QEMU_EXTRA "$(GPU_QEMU_EXTRA)"
 	@printf '  %-16s %s\n' GPU_USB_QEMU_EXTRA "$(GPU_USB_QEMU_EXTRA)"
+	@printf '  %-16s %s\n' GPU_EDID_DEVICE "$(GPU_EDID_DEVICE)"
+	@printf '  %-16s %s\n' GPU_EDID_QEMU_EXTRA "$(GPU_EDID_QEMU_EXTRA)"
 	@printf '  %-16s %s\n' EXPECT_PKG "$(EXPECT_PKG)"
 	@printf '  %-16s %s\n' PKG_RUN_TIMEOUT_SEC "$(PKG_RUN_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' EXPECT_CAPS "$(EXPECT_CAPS)"

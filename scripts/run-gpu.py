@@ -31,11 +31,21 @@ SCANOUT = b"CRUGOS: gpu scanout ok"
 DESKTOP = b"CRUGOS: wb desktop ready"
 GPU_OK = b"CRUGOS: gpu selftest ok"
 WB_OK = b"CRUGOS: wb selftest ok"
+EDID = b"CRUGOS: gpu edid"
+MODE_EDID = b"CRUGOS: gpu mode"
+CURSOR_READY = b"CRUGOS: gpu cursor ready"
+CURSOR_OK = b"CRUGOS: gpu cursor selftest ok"
 USB_CTRL = b"CRUGOS: usb controller ready (xhci"
 USB_MOUSE = b"CRUGOS: usb mouse ready"
 USB_MOVE = b"CRUGOS: usb mouse move"
 
 SCANOUT_RE = re.compile(r"CRUGOS: gpu scanout ok \((\d+)x(\d+), (\d+) transfer\(s\)")
+EDID_RE = re.compile(
+    r"CRUGOS: gpu edid (\d+)x(\d+) \(vendor ([A-Z?]{3}), product 0x([0-9a-f]{4}), "
+    r"(\d+) mode\(s\)\)")
+MODE_EDID_RE = re.compile(r"CRUGOS: gpu mode (\d+)x(\d+) \(edid preferred\)")
+CURSOR_OK_RE = re.compile(
+    r"CRUGOS: gpu cursor selftest ok \((\d+) show\(s\), (\d+) move\(s\)\)")
 GPU_OK_RE = re.compile(
     r"CRUGOS: gpu selftest ok \((\d+)x(\d+), (\d+) transfer\(s\), (\d+) flush\(es\)\)")
 
@@ -210,6 +220,10 @@ def main():
     ap.add_argument("--device", default="gpu0")
     ap.add_argument("--qemu-extra",
                     default="-vga none -device virtio-gpu-pci,id=gpu0")
+    ap.add_argument("--expect-edid", action="store_true",
+                    help="require the display mode to come from the device EDID")
+    ap.add_argument("--expect-cursor", action="store_true",
+                    help="require the hardware cursor plane instead of the sprite")
     ap.add_argument("--usb", action="store_true",
                     help="also hotplug a USB mouse with a 64-bit BAR")
     ap.add_argument("--moves", type=int, default=2)
@@ -281,10 +295,56 @@ def main():
         want_w = int(match.group(1))
         want_h = int(match.group(2))
 
+        if args.expect_edid:
+            # The device publishes a non-default timing: the mode and the
+            # scanout must both come from the EDID instead of the fallback.
+            text_now = read_log(serial_log).decode("utf-8", "replace")
+            edid = EDID_RE.search(text_now)
+            if edid is None:
+                return fail("the guest never decoded an EDID timing")
+            chosen = MODE_EDID_RE.search(text_now)
+            if chosen is None:
+                return fail("the EDID preferred timing did not become the mode")
+            if (chosen.group(1), chosen.group(2)) != (edid.group(1), edid.group(2)):
+                return fail("mode %sx%s differs from the EDID preferred %sx%s"
+                            % (chosen.group(1), chosen.group(2),
+                               edid.group(1), edid.group(2)))
+            if int(edid.group(5)) < 1:
+                return fail("the EDID reported no timing")
+            if (edid.group(1), edid.group(2)) != (str(want_w), str(want_h)):
+                return fail("scanout %dx%d differs from the EDID timing %sx%s"
+                            % (want_w, want_h, edid.group(1), edid.group(2)))
+            print("gpu: edid %sx%s (vendor %s, product 0x%s, %s mode(s))"
+                  % (edid.group(1), edid.group(2), edid.group(3),
+                     edid.group(4), edid.group(5)))
+
         if not wait_for(serial_log, DESKTOP, 1, proc, args.boot_timeout):
             return fail("guest never reported the Workbench desktop")
         if not wait_for(serial_log, GPU_OK, 1, proc, args.boot_timeout):
             return fail("guest never finished the GPU selftest")
+
+        if args.expect_cursor:
+            # The cursor plane is its own virtqueue and its pixels never reach
+            # the scanout resource, so the counters are the whole proof.
+            if not wait_for(serial_log, CURSOR_OK, 1, proc, args.boot_timeout):
+                return fail("the hardware cursor selftest never completed")
+            text_now = read_log(serial_log).decode("utf-8", "replace")
+            if CURSOR_READY not in read_log(serial_log):
+                return fail("the hardware cursor plane was never installed")
+            if "CRUGOS: gpu cursor show " not in text_now:
+                return fail("the cursor plane was never shown")
+            if "CRUGOS: gpu cursor move " not in text_now:
+                return fail("the cursor plane was never moved")
+            cursor = CURSOR_OK_RE.search(text_now)
+            if cursor is None:
+                return fail("the hardware cursor counters are malformed")
+            shows = int(cursor.group(1))
+            cursor_moves = int(cursor.group(2))
+            if shows < 1 or cursor_moves < 1:
+                return fail("the cursor plane received too little: %d/%d"
+                            % (shows, cursor_moves))
+            print("gpu: cursor plane %d show(s), %d move(s)"
+                  % (shows, cursor_moves))
 
         qmp = Qmp(sock_path)
         if args.usb:
@@ -323,9 +383,11 @@ def main():
 
         # Window geometry comes from workbench.c: the Workbench window opens at
         # (80, 90) and the Shell at (480, 300); the Shell is created second and
-        # is therefore the active (amber) window. Samples avoid the text.
+        # is therefore the active (amber) window. Samples avoid the text. The
+        # background point follows the real size because an EDID gate can run
+        # at a different resolution.
         samples = [
-            ("desktop background", 1200, 700, DESKTOP_BG),
+            ("desktop background", width - 80, height - 80, DESKTOP_BG),
             ("shell title bar", 600, 306, TITLE_ACTIVE),
             ("workbench title bar", 200, 96, TITLE_IDLE),
             ("workbench frame", 80, 150, FRAME),
@@ -384,8 +446,13 @@ def main():
               "%d transfer(s), %d flush(es), exit %d)"
               % (want_w, want_h, moves, transfers, flushes, status))
         return 0
-    print("ok: virtio-gpu scanout %dx%d (%d transfer(s), %d flush(es), exit %d)"
-          % (want_w, want_h, transfers, flushes, status))
+    extra = ""
+    if args.expect_edid:
+        extra += ", mode from the EDID"
+    if args.expect_cursor:
+        extra += ", hardware cursor"
+    print("ok: virtio-gpu scanout %dx%d%s (%d transfer(s), %d flush(es), exit %d)"
+          % (want_w, want_h, extra, transfers, flushes, status))
     return 0
 
 

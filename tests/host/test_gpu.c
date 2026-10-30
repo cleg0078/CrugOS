@@ -187,6 +187,136 @@ static void test_gpu_damage(void)
     gpu_damage_reset(NULL);
 }
 
+
+/* --- EDID base block (phase 8B) ------------------------------------- */
+
+static void edid_set16(u8 *blk, u32 off, u32 value)
+{
+    blk[off] = (u8)(value & 0xFFu);
+    blk[off + 1u] = (u8)((value >> 8) & 0xFFu);
+}
+
+static void edid_seal(u8 *blk)
+{
+    u32 i;
+    u32 sum = 0u;
+
+    for (i = 0; i < 127u; i++) {
+        sum += (u32)blk[i];
+    }
+    blk[127] = (u8)((256u - (sum & 0xFFu)) & 0xFFu);
+}
+
+static void edid_detail_timing(u8 *blk, u32 index, u32 clock_10khz,
+                               u32 hactive, u32 hblank, u32 vactive,
+                               u32 vblank)
+{
+    u8 *d = blk + 54u + index * 18u;
+
+    edid_set16(d, 0u, clock_10khz);
+    d[2] = (u8)(hactive & 0xFFu);
+    d[3] = (u8)(hblank & 0xFFu);
+    d[4] = (u8)(((hactive >> 8) & 0x0Fu) << 4) |
+           (u8)((hblank >> 8) & 0x0Fu);
+    d[5] = (u8)(vactive & 0xFFu);
+    d[6] = (u8)(vblank & 0xFFu);
+    d[7] = (u8)(((vactive >> 8) & 0x0Fu) << 4) |
+           (u8)((vblank >> 8) & 0x0Fu);
+}
+
+static void edid_build(u8 *blk)
+{
+    u32 i;
+
+    for (i = 0; i < 128u; i++) {
+        blk[i] = 0u;
+    }
+    blk[0] = 0x00u; blk[1] = 0xFFu; blk[2] = 0xFFu; blk[3] = 0xFFu;
+    blk[4] = 0xFFu; blk[5] = 0xFFu; blk[6] = 0xFFu; blk[7] = 0x00u;
+    /* 'RHT' = 18/8/20 packed big-endian at offset 8. */
+    blk[8] = 0x49u; blk[9] = 0x14u;
+    blk[10] = 0x34u; blk[11] = 0x12u;
+    blk[12] = 0x45u; blk[13] = 0x23u;
+    blk[16] = 12u;
+    blk[17] = 34u;   /* 1990 + 34 = 2024 */
+    blk[18] = 1u; blk[19] = 3u;
+    blk[21] = 30u; blk[22] = 19u;
+    edid_detail_timing(blk, 0u, 6500u, 1024u, 320u, 768u, 38u);
+    /* Descriptor 1 stays zero: word 0 == 0 marks a display descriptor. */
+    edid_detail_timing(blk, 2u, 4000u, 800u, 256u, 600u, 28u);
+    edid_seal(blk);
+}
+
+static void test_gpu_edid(void)
+{
+    u8 blk[128];
+    struct gpu_edid edid;
+    char vendor[4];
+    u32 i;
+
+    edid_build(blk);
+    CHECK(gpu_edid_parse(blk, sizeof(blk), &edid) == 0);
+    CHECK(edid.valid == 1);
+    CHECK(edid.block_count == 1u);
+    CHECK(edid.vendor == 0x4914u);
+    CHECK(edid.product == 0x1234u);
+    CHECK(edid.serial == 0x2345u);
+    CHECK(edid.week == 12u);
+    CHECK(edid.year == 2024u);
+    CHECK(edid.width_cm == 30u);
+    CHECK(edid.height_cm == 19u);
+    CHECK(edid.mode_count == 2u);
+    CHECK(edid.has_preferred == 1);
+    CHECK(edid.preferred.width == 1024u);
+    CHECK(edid.preferred.height == 768u);
+    CHECK(edid.preferred.clock_khz == 65000u);
+    CHECK(edid.preferred.refresh_hz == 60u);
+    CHECK(edid.modes[1].width == 800u);
+    CHECK(edid.modes[1].height == 600u);
+    CHECK(edid.modes[1].refresh_hz == 60u);
+    gpu_edid_vendor(&edid, vendor);
+    CHECK_STR(vendor, "RHT");
+
+    /* A wrong checksum or header rejects the whole block and zeroes it. */
+    blk[127] = (u8)(blk[127] + 1u);
+    CHECK(gpu_edid_parse(blk, sizeof(blk), &edid) == -1);
+    CHECK(edid.valid == 0);
+    CHECK(edid.mode_count == 0u);
+    edid_seal(blk);
+    blk[0] = 0xAAu;
+    edid_seal(blk);
+    CHECK(gpu_edid_parse(blk, sizeof(blk), &edid) == -1);
+
+    /* Truncated input, no timing and null pointers are all rejected. */
+    edid_build(blk);
+    CHECK(gpu_edid_parse(blk, 127u, &edid) == -1);
+    for (i = 54u; i < 126u; i++) {
+        blk[i] = 0u;
+    }
+    edid_seal(blk);
+    CHECK(gpu_edid_parse(blk, sizeof(blk), &edid) == -1);
+    CHECK(gpu_edid_parse(NULL, sizeof(blk), &edid) == -1);
+    CHECK(gpu_edid_parse(blk, sizeof(blk), NULL) == -1);
+
+    /* All four detailed timings are kept; the first stays preferred. */
+    edid_build(blk);
+    edid_detail_timing(blk, 1u, 4000u, 800u, 256u, 600u, 28u);
+    edid_detail_timing(blk, 3u, 6500u, 1024u, 320u, 768u, 38u);
+    edid_seal(blk);
+    CHECK(gpu_edid_parse(blk, sizeof(blk), &edid) == 0);
+    CHECK(edid.mode_count == 4u);
+    CHECK(edid.preferred.width == 1024u);
+
+    /* A manufacturer id outside A..Z has no printable name. */
+    edid_build(blk);
+    blk[8] = 0x00u;
+    blk[9] = 0x00u;
+    edid_seal(blk);
+    CHECK(gpu_edid_parse(blk, sizeof(blk), &edid) == 0);
+    gpu_edid_vendor(&edid, vendor);
+    CHECK_STR(vendor, "???");
+}
+
 void test_gpu_functions(void)
 {
     test_gpu_encoding();
@@ -195,4 +325,5 @@ void test_gpu_functions(void)
     test_gpu_backing_pages();
     test_gpu_display_pick();
     test_gpu_damage();
+    test_gpu_edid();
 }

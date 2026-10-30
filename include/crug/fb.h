@@ -58,4 +58,28 @@ int fb_attach_linear(u8 *base, u32 width, u32 height, u32 stride, u32 format,
 void fb_present(void);
 void fb_present_begin(void);
 void fb_present_end(void);
+
+/* Phase 8B: hardware cursor plane.  When the display device can move a cursor
+   itself the driver installs these callbacks and the sprite is no longer
+   composited into the framebuffer: fb_cursor_show_at() forwards the position
+   to the device, and fb_cursor_visible() keeps reporting whether the pointer
+   is on screen.  Removing the callbacks hides the device cursor and returns to
+   the software sprite. */
+struct fb_cursor_ops {
+    int (*show)(u32 x, u32 y);
+    int (*move)(u32 x, u32 y);
+    void (*hide)(void);
+};
+
+int fb_set_cursor_ops(const struct fb_cursor_ops *ops);
+int fb_cursor_hardware(void);
+
+/* The software sprite, exposed so a device cursor image can be built from the
+   same pixels: fb_cursor_sprite() returns 0 for a transparent pixel, 1 for the
+   border and 2 for the body; the colours are the RGB values used for them. */
+u32 fb_cursor_width(void);
+u32 fb_cursor_height(void);
+u32 fb_cursor_sprite(u32 x, u32 y);
+u32 fb_cursor_border_rgb(void);
+u32 fb_cursor_body_rgb(void);
 #endif /* CRUG_FB_H */

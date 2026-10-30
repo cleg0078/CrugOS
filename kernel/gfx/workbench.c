@@ -1474,7 +1474,7 @@ int wb_init(void)
     intuition_init();
     intuition_set_reporting(g_reporting);
     top = intuition_open(80, 90, 360, 220, "Workbench",
-                         "CrugOS Workbench\nphase 8a\nsoftware rendered");
+                         "CrugOS Workbench\nphase 8b\nsoftware rendered");
     shell_id = intuition_open(480, 300, 320, 200, "Shell", "4.OS\ncrugos>");
     intuition_set_menus(top, wb_menus_top, 2u);
     intuition_add_gadget(top, 12, 60, 96, 22, "Run");
@@ -1492,7 +1492,7 @@ int wb_init(void)
         } else {
             (void)intuition_set_screen((u32)screen);
             g_tools_window = intuition_open(160, 140, 340, 200, "Tools",
-                                            "CrugOS Tools\nphase 8a\nsecond screen");
+                                            "CrugOS Tools\nphase 8b\nsecond screen");
             if (g_tools_window > 0) {
                 intuition_set_menus(g_tools_window, wb_menus_tools, 2u);
                 intuition_add_gadget(g_tools_window, 12, 60, 160, 22,

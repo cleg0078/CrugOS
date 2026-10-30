@@ -1,6 +1,6 @@
 # Roadmap
 
-The specification defines 61 phases/gates. Phase 0 established the smallest
+The specification defines 63 phases/gates. Phase 0 established the smallest
 end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
 phase 1 makes the kernel own physical memory, page tables, exceptions and
 timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
@@ -1932,6 +1932,85 @@ reachable until then.
 - docs: `docs/gpu.md` is new and README, boot, build, workbench and
   versioning follow it.
 - All 61 gates pass at `v0.46.0`.
+
+## Phase 8B - EDID and the hardware cursor (done)
+
+- `include/crug/gpu.h` gained the pure EDID and cursor surface:
+  `GPU_EDID_MAX_BYTES` (1024), `GPU_EDID_MAX_MODES` (4), `GPU_CURSOR_PX` (64),
+  `struct gpu_edid_mode` (clock in kHz, width, height, refresh),
+  `struct gpu_edid` (block count, vendor, product, serial, week, year, size in
+  cm, up to four modes, the preferred timing and a `valid` flag),
+  `gpu_edid_parse()`, `gpu_edid_vendor()`, `gpu_edid_available()` and the
+  `gpu_cursor_ready()` / `_updates()` / `_moves()` counters;
+  `kernel/gpu/edid.c` is the parser and is compiled into the host tests.
+- Parser rules: at least 128 bytes, the `00 FF FF FF FF FF FF 00` header and a
+  checksum of 0 mod 256, then the four 18-byte detailed timing descriptors at
+  offset 54. Descriptors whose first word is 0 are display descriptors and are
+  skipped, at most four timings are kept, the first one is the preferred mode,
+  and a payload with no timing returns -1 with a zeroed result. The vendor id
+  is one big-endian word split into three five-bit letters; a letter outside
+  1..26 prints `???`. Bit 15 of that word is *not* a validity flag -- treating
+  it as one was the bug 8B fixed.
+- The driver asks `GET_EDID` (0x20) on control queue 0 right after
+  `GET_DISPLAY_INFO`, after seeing feature bit 2 (`VIRTIO_GPU_F_EDID`; bit 1 is
+  virgl, bit 0 the 3D feature) and expecting response 0x1104. The mode order
+  is now `gpu.size=`, then the EDID preferred timing, then the host display
+  info, then the 1024x768/800x600/640x480 ladder, and the boot names the source:
+  `CRUGOS: gpu edid 1152x864 (vendor RHT, product 0x1234, 1 mode(s))` and
+  `CRUGOS: gpu mode 1152x864 (edid preferred)`.
+- The pointer moved onto the device's hardware cursor plane: a second
+  virtqueue (queue 1) with its own 64x64 resource (id 2), a 48-byte
+  `UPDATE_CURSOR` and a 40-byte `MOVE_CURSOR`, each submitted with one
+  non-write descriptor and a single 16-bit notify store, waiting only for the
+  used index because the cursor queue returns no response. Queue 1 is enabled
+  before `DRIVER_OK`; without it the boot prints
+  `CRUGOS: gpu cursor queue unavailable (no cursor plane)` and stays on the
+  software sprite.
+- The cursor commands used to go through the control queue, which has no cursor
+  case and answers `0x1200` err-unspec, so the kernel silently fell back to
+  the sprite even when the device had a plane. `include/crug/fb.h` now carries
+  `struct fb_cursor_ops` (show/move/hide) and `fb_set_cursor_ops()`; `fb.c`
+  defers every show, move and hide to those ops and falls back to the old
+  software sprite when an op fails or none is installed, and
+  `fb_attach_linear()` resets the shown state. The boot prints
+  `CRUGOS: gpu cursor ready (64x64, resource 2, hardware plane)`,
+  `CRUGOS: gpu cursor show 640 400`, `CRUGOS: gpu cursor move 648 404` and
+  `CRUGOS: gpu cursor selftest ok (2 show(s), 1 move(s))`; the selftest hides,
+  shows at the centre, shows 8 px right and 4 px down, hides again and fails if
+  either counter is zero.
+- Gate 62 `make test-gpu-edid` pins the device to 1152x864 with
+  `GPU_EDID_DEVICE ?= virtio-gpu-pci,id=gpu0,xres=1152,yres=864` and
+  `GPU_EDID_QEMU_EXTRA ?= -vga none -device $(GPU_EDID_DEVICE)` -- a timing
+  that is neither the driver's 1024x768 fallback nor QEMU's 1280x800 default,
+  so only a real `GET_EDID` can produce it. `scripts/run-gpu.py` takes its
+  `--expect-edid` leg and the gate ends on
+  `ok: virtio-gpu scanout 1152x864, mode from the EDID (14 transfer(s),
+  14 flush(es), exit 33)` with `boot-check.py --expect-gpu-edid=yes`.
+- Gate 63 `make test-gpu-cursor` uses the default device from
+  `GPU_QEMU_EXTRA`, where QEMU manufactures a 1280x800 EDID. A screendump of
+  `gpu0` never contains the hardware cursor plane, so the gate cannot check
+  pixels: `run-gpu.py --expect-cursor` and the serial counters are the evidence
+  and the gate prints
+  `ok: virtio-gpu scanout 1280x800, hardware cursor (14 transfer(s),
+  14 flush(es), exit 33)`.
+- Host tests add a synthetic 128-byte EDID to `tests/host/test_gpu.c` (vendor
+  `RHT` = id 0x4914, product 0x1234, a 1024x768@60 timing at 6500x10 kHz and an
+  800x600@60 timing at 4000) plus bad-checksum, bad-header, 127-byte,
+  no-timing, null-pointer, four-timing-cap and unknown-vendor cases: `make
+  test-host` reports 8521 checks and `make size` a 352432 B (344 KiB) file and
+  a 1002250 B (978 KiB) load image (`.text` 251174 B, `.rodata` 38272 B,
+  `.data` 100 B, `.bss` 712704 B).
+- Limits: 3D still needs virgl, which this host cannot exercise (no `/dev/dri`
+  render node, so QEMU prints `The display backend does not have OpenGL
+  support enabled`); blob resources need `blob=on` and are unused; one scanout
+  and one display, no multi-head (`max_outputs=2` is not gated); `gpu.size=`
+  still wins over the EDID by design; the cursor is one 64x64 sprite whose
+  pixels no screendump can assert, only its counters; the software sprite
+  remains the fallback. See [gpu.md](gpu.md).
+- docs: `docs/gpu.md` gains the EDID mode-selection and hardware-cursor
+  sections and the gate 62/63 paragraphs, alongside README, boot, build,
+  workbench and versioning.
+- All 63 gates pass at `v0.47.0`.
 
 ## Bootable media - hybrid UEFI ISO (done, `v0.23.1`)
 

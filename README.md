@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 8A virtio-gpu scanout (`v0.46.0`)
+## Status: phase 8B EDID and the hardware cursor (`v0.47.0`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -96,6 +96,9 @@ resource with contiguous backing pages, attaches it as the scanout, and
 presents the desktop as damage rectangles, while the firmware framebuffer
 remains the fallback; `make test-gpu` is gate 60 and `make test-gpu-usb` is
 gate 61, which repeats the scanout with a hotplugged USB mouse above 4 GiB.
+Phase 8B parses the display's EDID and prefers the monitor's own timing when
+`gpu.size=` is absent, and moves the pointer onto the device's hardware cursor
+plane; `make test-gpu-edid` is gate 62 and `make test-gpu-cursor` is gate 63.
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -1589,7 +1592,8 @@ dwords, clamped to [4 KiB, 64 KiB]. Without a GPU OVMF leaves the BAR
 unassigned and the kernel assigns `0xffb00000`, which is why no earlier gate
 saw the bug;
 - there is no 3D yet: no virglrenderer, no Vulkan, no command stream and no
-accelerated triangle, which is what a future phase 8B is for;
+accelerated triangle; phase 8B adds EDID mode selection and the hardware
+cursor plane instead, and 3D stays deferred;
 - `tests/host/test_gpu.c` covers the pure helpers (command encoding, response
 classes, rectangle clipping, backing-page arithmetic, display pick and damage
 merge), so `make test-host` reports 8488 checks; `make size` reports a 347208 B
@@ -1599,6 +1603,51 @@ merge), so `make test-host` reports 8488 checks; `make size` reports a 347208 B
 See [docs/gpu.md](docs/gpu.md) for the transport, the resource, the present
 model and the failure lines.
 
+Phase 8B finishes the display side of the GPU phase without touching 3D:
+
+- `kernel/gpu/edid.c` is a pure EDID parser (eight-byte header and a 128-byte
+checksum that must sum to zero, four 18-byte detailed timing descriptors from
+offset 54, display descriptors skipped, at most `GPU_EDID_MAX_MODES` 4
+timings, and the vendor decoded from the one big-endian word at offset 8 with
+`???` for a letter outside 1..26); `gpu_edid_parse()` rejects a blob with no
+usable timing;
+- `drivers/gpu/virtio_gpu.c` negotiates the EDID feature (bit 2), issues
+`GET_EDID` 0x20 after `GET_DISPLAY_INFO` and accepts the 0x1104 response, then
+picks the mode in the order `gpu.size=`, the EDID preferred timing, the host
+display info and the built-in 1024x768/800x600/640x480 list, printing
+`CRUGOS: gpu edid WxH (vendor ..., product ..., N mode(s))` and
+`CRUGOS: gpu mode WxH (<source>)`;
+- the pointer moves to the device's hardware cursor plane: queue 1 carries its
+own 64x64 resource 2, a 48-byte `UPDATE_CURSOR` and a 40-byte `MOVE_CURSOR`
+travel as one non-write descriptor plus a single 16-bit notify and the driver
+only waits for the used index, because the cursor queue writes no used-ring
+response; `struct fb_cursor_ops` lets `fb.c` delegate show/move/hide and fall
+back to the phase 5D software sprite when no plane exists or an op fails; the
+self-test requires both a show and a move counter;
+- the cursor commands do not ride the control queue: its 2D command switch has
+no cursor case and answers 0x1200 (`err-unspec`), which used to make the
+kernel silently fall back to the sprite;
+- `make test-gpu-edid` is gate 62 and pins the device to a 1152x864 timing
+that is neither the fallback nor a QEMU default, so the scanout size can only
+come from the decoded EDID (`--expect-edid`, `--expect-gpu-edid=yes`);
+- `make test-gpu-cursor` is gate 63 and takes the serial show and move
+counters as its evidence, because a screendump of `gpu0` never contains the
+cursor plane (`--expect-cursor`, `--expect-gpu-cursor=yes`);
+- `tests/host/test_gpu.c` gained a synthetic 128-byte EDID (vendor `RHT`,
+product `0x1234`, 1024x768@60 and 800x600@60) plus rejection cases for a bad
+checksum, a bad header, 127-byte input, no detailed timing and null pointers,
+a four-timing cap and the unknown-vendor path, so `make test-host` reports
+8521 checks; `make size` reports a 352432 B (344 KiB) kernel file and a
+1002250 B (978 KiB) load image (`.text` 251174 B, `.rodata` 38272 B, `.data`
+100 B, `.bss` 712704 B), and all 63 gates pass;
+- 3D is still deferred: this host has no `/dev/dri` render node, so QEMU
+refuses virgl (`The display backend does not have OpenGL support enabled`,
+`egl: no drm render node available`) and blob resources stay off; the 3D half
+of phase 8 is both unimplemented and untestable here.
+
+See [docs/gpu.md](docs/gpu.md) for the EDID parser rules, the mode priority,
+the second virtqueue and the failure lines.
+
 The kernel also detects AVX2, enables XSAVE state and, by default, refuses to
 boot without AVX2. Self-tests run at boot, then the kernel prints a boot report
 to a 16550 serial port and the framebuffer and exits QEMU deterministically for
@@ -1607,9 +1656,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.46.0 (phase 8a) -- Amiga-inspired microkernel bring-up
+CrugOS 0.47.0 (phase 8b) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.46.0
+CRUGOS: version 0.47.0
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -1658,7 +1707,7 @@ CRUGOS: tcp http served (72 bytes)
 CRUGOS: net selftest ok
 CRUGOS: gfx ready (1024x768, cursor at 512,384)
 CRUGOS: selftest ok
-kernel : 0x0000000000100000 size=339 KiB
+kernel : 0x0000000000100000 size=344 KiB
 boot   : cpu=0 acpi_rsdp=0x1f77e000 fdt=0x0 initrd=0x0
 memory : 36 regions, usable 474080 KiB (462 MiB)
 pmm    : total=118520 free=118462 bitmap=131072 B
@@ -1670,7 +1719,7 @@ heap   : total=57344 B used=8976 B slab_pages=12 large_pages=2
 sched  : switches=112
 boot   : pmm=27601 us cpu=408 us vm=624 us traps=333 us timer=65376 us heap=507 us storage=95213 us sched=5952 us syscall=107 us total=196126 us
 timer  : 2687896922 Hz (pit), ticks=31, mono=458247353 ns
-CRUGOS: phase 8a boot ok
+CRUGOS: phase 8b boot ok
 ```
 
 This excerpt is the `make test-tcp` boot. The guest is both a TCP client and a
@@ -1901,6 +1950,8 @@ make test-caps   # launch the installed bundle and prove its capability wall
 make test-workbench-pkg  # install, remove and reinstall a signed package from the Workbench
 make test-gpu    # boot on a virtio-gpu scanout and verify the GPU-backed desktop
 make test-gpu-usb  # scanout plus a hotplugged USB mouse above 4 GiB
+make test-gpu-edid    # take the scanout mode from the display's EDID
+make test-gpu-cursor  # drive the hardware cursor plane and count its updates
 make test-hardening  # craft hostile superblock/inode/crypt images and boot them
 make test-heap   # corrupt the kernel heap and prove the integrity checker catches it
 make test-trap   # inject eight crafted faults and check the report, IST and panic
@@ -1960,6 +2011,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `WB_CX_RUN_TIMEOUT_SEC`, `WB_APP_WAIT`, `WB_APP_ACTS`,
 `WB_APP_RUN_TIMEOUT_SEC`, `WB_PKG_WAIT`, `WB_PKG_RUN_TIMEOUT_SEC`,
 `GPU_WB_WAIT`, `GPU_RUN_TIMEOUT_SEC`, `GPU_QEMU_EXTRA`, `GPU_USB_QEMU_EXTRA`,
+`GPU_EDID_DEVICE`, `GPU_EDID_QEMU_EXTRA`,
 `MKPKG`, `PKG_DATA_DIR`, `PKG_SEED`, `PKG_BAD_SEED`, `PKG_RUN_TIMEOUT_SEC`,
 `CAPS_RUN_TIMEOUT_SEC`, `HARDEN_TIMEOUT_SEC`,
 `HEAP_STRESS_OPS`, `HEAP_RUN_TIMEOUT_SEC`, `TRAP_TIMEOUT_SEC`, `FUZZ_CASES`,
@@ -1992,7 +2044,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/arch/x86_64/` | boot code, linker script, port I/O, serial, i8042 keyboard, framebuffer, CPU/IDT/APIC/timer, context switch |
 | `kernel/core/` | kernel entry, console, printf, panic, self-tests, scheduler, handles, MsgPort, syscall dispatcher, boot report |
 | `kernel/exec/` | ELF loader for ring-3 programs: segment policy, W^X user mappings and the user stack |
-| `kernel/gpu/` | the pure virtio-gpu command, response and damage helpers shared with the host tests |
+| `kernel/gpu/` | the pure virtio-gpu command, response and damage helpers and the EDID parser, shared with the host tests |
 | `kernel/lib/` | freestanding string, formatting, bitmap, console line-editor and text-grid routines, the capability mask and the permission policy |
 | `kernel/input/` | `input.device`: set-1 scancode decoder, the console byte queue and the pointer state |
 | `kernel/audio/` | `audio.device` PCM ring, the per-channel mixer and the tone generator |
@@ -2004,7 +2056,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 | `kernel/block/` | block-device registry, partitions, bounds checks, RAID1/RAID10, boot-time rebuild and the AES-256-XTS `crypt.device` |
 | `kernel/fs/` | GPT, writable checksummed ext4, checksummed JBD2 journal and the storage boot policy (including the console passphrase prompt) |
 | `kernel/crypto/` | AES, XTS, AES-NI, BLAKE2b, Argon2id, SHA-512 and Ed25519 (shared with the host tools) |
-| `drivers/` | PCI, legacy virtio-blk, the virtio-gpu 2D driver, NVMe and AHCI/SATA block device drivers, legacy virtio-net, and the xHCI controller with its USB HID keyboard, mouse and Audio Class decoders (audio frames flow into `kernel/audio/`) |
+| `drivers/` | PCI, legacy virtio-blk, the virtio-gpu 2D driver with its EDID fetch and hardware cursor plane, NVMe and AHCI/SATA block device drivers, legacy virtio-net, and the xHCI controller with its USB HID keyboard, mouse and Audio Class decoders (audio frames flow into `kernel/audio/`) |
 | `scripts/` | QEMU runner, disk/RAID1/RAID10/crypt image builders, the hybrid ISO builder (`mkiso.sh`, `mkfat.py`), boot/PE/disk/RAID/journal/crypt/ISO checks, the serial and keyboard prompt drivers, tamper helper, size and reproducibility gates |
 | `tests/host/` | host unit tests for freestanding code and the mount-path fuzzer (`fuzz_mount.c`) |
 | `tools/` | host-side development tools (`gen-font.py`, `mkcrypt.c`, `gen-crc32c.py`) |

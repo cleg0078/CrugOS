@@ -120,12 +120,14 @@ static u32 g_cursor_y;
 static u32 g_cursor_saved[FB_CURSOR_HEIGHT][FB_CURSOR_WIDTH];
 static int g_cursor_wanted;  /* the consumer asked for a cursor */
 static int g_cursor_drawn;   /* the sprite is currently in the framebuffer */
+static const struct fb_cursor_ops *g_cursor_ops;  /* phase 8B: device cursor */
+static int g_cursor_hw_shown;                     /* the device cursor is visible */
 
 static void fb_cursor_composite(void)
 {
     u32 row, col;
 
-    if (!g_ready || !g_cursor_wanted || g_cursor_drawn) {
+    if (!g_ready || !g_cursor_wanted || g_cursor_drawn || g_cursor_ops) {
         return;
     }
     for (row = 0; row < FB_CURSOR_HEIGHT; row++) {
@@ -201,6 +203,7 @@ void fb_init(const framebuffer_info *fb)
     gpu_damage_reset(&g_dmg);
     g_cursor_wanted = 0;
     g_cursor_drawn = 0;
+    g_cursor_hw_shown = 0;
     g_cursor_x = 0;
     g_cursor_y = 0;
     if (!fb || fb->base == 0 || fb->width == 0 || fb->height == 0 ||
@@ -322,10 +325,25 @@ int fb_dimensions(u32 *width, u32 *height)
 
 void fb_cursor_show_at(u32 x, u32 y)
 {
+    int ok;
+
     if (!g_ready) {
         return;
     }
     fb_cursor_restore();
+    if (g_cursor_ops) {
+        ok = g_cursor_hw_shown ? g_cursor_ops->move(x, y) : g_cursor_ops->show(x, y);
+        if (ok == 0) {
+            g_cursor_x = x;
+            g_cursor_y = y;
+            g_cursor_wanted = 1;
+            g_cursor_hw_shown = 1;
+            return;
+        }
+        /* The device refused the cursor: fall back to the software sprite. */
+        g_cursor_ops = 0;
+        g_cursor_hw_shown = 0;
+    }
     g_cursor_x = x;
     g_cursor_y = y;
     g_cursor_wanted = 1;
@@ -336,12 +354,19 @@ void fb_cursor_show_at(u32 x, u32 y)
 void fb_cursor_hide(void)
 {
     fb_cursor_restore();
+    if (g_cursor_ops && g_cursor_hw_shown) {
+        g_cursor_ops->hide();
+        g_cursor_hw_shown = 0;
+    }
     g_cursor_wanted = 0;
     fb_present_flush();
 }
 
 int fb_cursor_visible(void)
 {
+    if (g_cursor_ops && g_cursor_wanted) {
+        return 1;
+    }
     return g_cursor_drawn;
 }
 
@@ -478,6 +503,7 @@ int fb_attach_linear(u8 *base, u32 width, u32 height, u32 stride, u32 format,
     g_text_enabled = 1;
     g_cursor_wanted = 0;
     g_cursor_drawn = 0;
+    g_cursor_hw_shown = 0;
     g_present = present;
     g_present_depth = 0;
     gpu_damage_reset(&g_dmg);
@@ -485,4 +511,51 @@ int fb_attach_linear(u8 *base, u32 width, u32 height, u32 stride, u32 format,
     fb_clear();
     fb_present_flush();
     return 0;
+}
+/* Phase 8B: the hardware cursor plane.  The virtio-gpu driver installs these
+   callbacks so the device moves the pointer itself; the software sprite path
+   stays intact for the GOP framebuffer and for the fallback when the device
+   refuses a cursor command. */
+int fb_set_cursor_ops(const struct fb_cursor_ops *ops)
+{
+    fb_cursor_restore();
+    if (g_cursor_hw_shown && g_cursor_ops) {
+        g_cursor_ops->hide();
+        g_cursor_hw_shown = 0;
+    }
+    g_cursor_ops = ops;
+    return 0;
+}
+
+int fb_cursor_hardware(void)
+{
+    return g_cursor_ops != 0;
+}
+
+u32 fb_cursor_width(void)
+{
+    return FB_CURSOR_WIDTH;
+}
+
+u32 fb_cursor_height(void)
+{
+    return FB_CURSOR_HEIGHT;
+}
+
+u32 fb_cursor_sprite(u32 x, u32 y)
+{
+    if (x >= FB_CURSOR_WIDTH || y >= FB_CURSOR_HEIGHT) {
+        return 0u;
+    }
+    return (u32)g_cursor_shape[y][x];
+}
+
+u32 fb_cursor_border_rgb(void)
+{
+    return FB_CURSOR_BORDER_RGB;
+}
+
+u32 fb_cursor_body_rgb(void)
+{
+    return FB_CURSOR_BODY_RGB;
 }

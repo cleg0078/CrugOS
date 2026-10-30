@@ -24,10 +24,16 @@
 #define GPU_QUEUE_MAX 64u
 #define GPU_QUEUE_PAGES 3u
 #define GPU_CMD_MAX 256u
-#define GPU_RESP_MAX 512u
+#define GPU_RESP_MAX 1088u
 #define GPU_TIMEOUT_NS 2000000000ull
 #define GPU_FORMAT_B8G8R8X8 2u
+#define GPU_FORMAT_B8G8R8A8 1u
 #define GPU_RESOURCE_ID 1u
+#define GPU_CURSOR_RESOURCE_ID 2u
+#define GPU_CURSOR_PX 64u
+/* VIRTIO_GPU_F_EDID is device feature bit 1; bit 0 is VIRGL, which this
+   driver never negotiates. */
+#define GPU_FEATURE_EDID 2u
 
 #define GPU_CMD_GET_DISPLAY_INFO 0x0100u
 #define GPU_CMD_RESOURCE_CREATE_2D 0x0101u
@@ -35,8 +41,14 @@
 #define GPU_CMD_RESOURCE_FLUSH 0x0104u
 #define GPU_CMD_TRANSFER_TO_HOST_2D 0x0105u
 #define GPU_CMD_RESOURCE_ATTACH_BACKING 0x0106u
+#define GPU_CMD_GET_EDID 0x010Au
+#define GPU_CMD_UPDATE_CURSOR 0x0300u
+#define GPU_CMD_MOVE_CURSOR 0x0301u
 #define GPU_RESP_OK_NODATA 0x1100u
 #define GPU_RESP_OK_DISPLAY_INFO 0x1101u
+/* Response ids: NODATA 0x1100, DISPLAY_INFO 0x1101, CAPSET_INFO 0x1102,
+   CAPSET 0x1103, EDID 0x1104 (virtio_gpu.h). */
+#define GPU_RESP_OK_EDID 0x1104u
 
 #define GPU_VQ_F_NEXT 1u
 #define GPU_VQ_F_WRITE 2u
@@ -87,6 +99,17 @@ struct gpu_vq_used {
     u16 avail_event;
 } __attribute__((packed));
 
+/* Phase 8B: one virtqueue ring plus its own notification doorbell. */
+struct gpu_queue {
+    u16 size;
+    u64 pa;
+    struct gpu_vq_desc *desc;
+    struct gpu_vq_avail *avail;
+    struct gpu_vq_used *used;
+    u16 last_used;
+    volatile u8 *notify;
+};
+
 struct gpu_caps {
     u8 common_bar;
     u8 notify_bar;
@@ -128,6 +151,18 @@ struct gpu_state {
     u64 transfers;
     u64 flushes;
     u32 errors;
+    /* Phase 8B: EDID mode negotiation and the hardware cursor plane. */
+    int edid_feature;
+    int edid_ok;
+    struct gpu_edid edid;
+    int cursor_ready;
+    int cursor_shown;
+    u64 cursor_pa;
+    u64 cursor_pages;
+    u8 *cursor;
+    u64 cursor_updates;
+    u64 cursor_moves;
+    struct gpu_queue cursor_q;
 };
 
 static struct gpu_state g_gpu;
@@ -137,6 +172,7 @@ static int g_gpu_enable = 1;
 static u32 g_gpu_want_w;
 static u32 g_gpu_want_h;
 static int g_gpu_test;
+static const char *g_gpu_mode_src = "fallback";
 
 static int gpu_is_space(char c)
 {
@@ -380,17 +416,23 @@ static int gpu_parse_caps(struct gpu_state *g)
     return (g->caps.have_common && g->caps.have_notify) ? 0 : -1;
 }
 
-static int gpu_queue_init(struct gpu_state *g)
+/* Set up one virtqueue ring. The notification doorbell of queue N lives at
+   notify_bar + notify_off + N * notify_off_multiplier (virtio 1.0 4.1.4.4).
+   The offset returned by QUEUE_NOTIFY_OFF is already included above. */
+static int gpu_queue_setup(struct gpu_state *g, u16 index, struct gpu_queue *out)
 {
     volatile u8 *va;
     u64 size;
     u16 qsize;
+    u16 noff;
     u64 pa;
+    u32 stride;
 
-    gpu_w16(g->common, GPU_CFG_QUEUE_SELECT, 0u);
+    gpu_w16(g->common, GPU_CFG_QUEUE_SELECT, index);
     qsize = gpu_r16(g->common, GPU_CFG_QUEUE_SIZE);
     if (qsize < 2u || qsize > GPU_QUEUE_MAX || (qsize & (qsize - 1u)) != 0u) {
-        kprintf("CRUGOS: virtio-gpu unsupported queue size %u\n", (unsigned)qsize);
+        kprintf("CRUGOS: virtio-gpu unsupported queue %u size %u\n",
+                (unsigned)index, (unsigned)qsize);
         return -1;
     }
     pa = pmm_alloc_pages(GPU_QUEUE_PAGES);
@@ -398,13 +440,13 @@ static int gpu_queue_init(struct gpu_state *g)
         return -1;
     }
     memset(pmm_phys_to_virt(pa), 0, GPU_QUEUE_PAGES * CRUG_PAGE_SIZE);
-    g->qsize = qsize;
-    g->queue_pa = pa;
-    g->desc = (struct gpu_vq_desc *)pmm_phys_to_virt(pa);
-    g->avail = (struct gpu_vq_avail *)pmm_phys_to_virt(pa + CRUG_PAGE_SIZE);
-    g->used = (struct gpu_vq_used *)pmm_phys_to_virt(pa + 2u * CRUG_PAGE_SIZE);
-    g->last_used = 0u;
-    g->notify_off = gpu_r16(g->common, GPU_CFG_QUEUE_NOTIFY_OFF);
+    out->size = qsize;
+    out->pa = pa;
+    out->desc = (struct gpu_vq_desc *)pmm_phys_to_virt(pa);
+    out->avail = (struct gpu_vq_avail *)pmm_phys_to_virt(pa + CRUG_PAGE_SIZE);
+    out->used = (struct gpu_vq_used *)pmm_phys_to_virt(pa + 2u * CRUG_PAGE_SIZE);
+    out->last_used = 0u;
+    noff = gpu_r16(g->common, GPU_CFG_QUEUE_NOTIFY_OFF);
     gpu_w64(g->common, GPU_CFG_QUEUE_DESC, pa);
     gpu_w64(g->common, GPU_CFG_QUEUE_DRIVER, pa + CRUG_PAGE_SIZE);
     gpu_w64(g->common, GPU_CFG_QUEUE_DEVICE, pa + 2u * CRUG_PAGE_SIZE);
@@ -414,10 +456,47 @@ static int gpu_queue_init(struct gpu_state *g)
             return -1;
         }
     }
-    g->notify = g->bar_va[g->caps.notify_bar] + g->caps.notify_off;
+    stride = g->caps.notify_mul;
+    if (stride == 0u) {
+        stride = 4u;
+    }
+    out->notify = g->bar_va[g->caps.notify_bar] + g->caps.notify_off +
+                  (u32)noff * stride;
+    return 0;
+}
+
+static int gpu_queue_init(struct gpu_state *g)
+{
+    struct gpu_queue q;
+    volatile u8 *va;
+    u64 size;
+
+    if (gpu_queue_setup(g, 0u, &q) != 0) {
+        return -1;
+    }
+    g->qsize = q.size;
+    g->queue_pa = q.pa;
+    g->desc = q.desc;
+    g->avail = q.avail;
+    g->used = q.used;
+    g->last_used = 0u;
+    g->notify = q.notify;
     if (g->caps.isr_bar < 6u && gpu_map_bar(g, g->caps.isr_bar, &va, &size) == 0) {
         g->isr = g->bar_va[g->caps.isr_bar] + g->caps.isr_off;
     }
+    return 0;
+}
+
+/* The cursor plane is virtqueue 1: QEMU pops UPDATE_CURSOR and MOVE_CURSOR
+   from its own queue and pushes no response, so completion is the used ring. */
+static int gpu_cursor_queue_init(struct gpu_state *g)
+{
+    struct gpu_queue q;
+
+    if (gpu_queue_setup(g, 1u, &q) != 0) {
+        return -1;
+    }
+    g->cursor_q = q;
     return 0;
 }
 
@@ -471,7 +550,8 @@ static int gpu_submit(u32 cmd_len, u32 want_type)
     type = gpu_get32(g_resp, 0u);
     if (want_type && type != want_type) {
         kprintf("CRUGOS: virtio-gpu command 0x%x answered 0x%x (%s)\n",
-                (unsigned)cmd_len, (unsigned)type, gpu_resp_name(type));
+                (unsigned)gpu_get32(g_cmd, 0u), (unsigned)type,
+                gpu_resp_name(type));
         g->errors++;
         return -1;
     }
@@ -500,24 +580,52 @@ static int gpu_display_info(struct gpu_state *g, u32 *width, u32 *height)
                             width, height);
 }
 
-static int gpu_create_resource(struct gpu_state *g, u32 width, u32 height)
+/* Phase 8B: the EDID block names the panel's preferred mode. The device
+   offers it only when VIRTIO_GPU_F_EDID was negotiated. */
+static int gpu_edid_query(struct gpu_state *g)
 {
+    u32 size;
+
+    if (!g->edid_feature) {
+        return -1;
+    }
+    gpu_cmd_init(g_cmd, GPU_CMD_MAX, GPU_CMD_GET_EDID);
+    gpu_put32(g_cmd, 24u, 0u);
+    gpu_put32(g_cmd, 28u, 0u);
+    if (gpu_submit(32u, GPU_RESP_OK_EDID) != 0) {
+        return -1;
+    }
+    size = gpu_get32(g_resp, 24u);
+    if (size == 0u) {
+        return -1;
+    }
+    if (size > GPU_EDID_MAX_BYTES) {
+        size = GPU_EDID_MAX_BYTES;
+    }
+    if (gpu_edid_parse((const u8 *)g_resp + 32u, size, &g->edid) != 0) {
+        return -1;
+    }
+    g->edid_ok = 1;
+    return 0;
+}
+static int gpu_create_resource(struct gpu_state *g, u32 id, u32 format,
+                              u32 width, u32 height)
+{
+    (void)g;
     gpu_cmd_init(g_cmd, GPU_CMD_MAX, GPU_CMD_RESOURCE_CREATE_2D);
-    gpu_put32(g_cmd, 24u, GPU_RESOURCE_ID);
-    gpu_put32(g_cmd, 28u, GPU_FORMAT_B8G8R8X8);
+    gpu_put32(g_cmd, 24u, id);
+    gpu_put32(g_cmd, 28u, format);
     gpu_put32(g_cmd, 32u, width);
     gpu_put32(g_cmd, 36u, height);
     return gpu_submit(40u, GPU_RESP_OK_NODATA);
 }
 
-static int gpu_attach_backing(struct gpu_state *g)
+static int gpu_attach_backing(u32 id, u64 pa, u32 len)
 {
-    u32 len = (u32)(g->backing_pages * CRUG_PAGE_SIZE);
-
     gpu_cmd_init(g_cmd, GPU_CMD_MAX, GPU_CMD_RESOURCE_ATTACH_BACKING);
-    gpu_put32(g_cmd, 24u, GPU_RESOURCE_ID);
+    gpu_put32(g_cmd, 24u, id);
     gpu_put32(g_cmd, 28u, 1u);
-    gpu_put64(g_cmd, 32u, g->backing_pa);
+    gpu_put64(g_cmd, 32u, pa);
     gpu_put32(g_cmd, 40u, len);
     gpu_put32(g_cmd, 44u, 0u);
     return gpu_submit(48u, GPU_RESP_OK_NODATA);
@@ -576,35 +684,225 @@ static void gpu_present_cb(u32 x, u32 y, u32 w, u32 h)
     (void)gpu_present(x, y, w, h);
 }
 
+static const struct fb_cursor_ops g_gpu_cursor_ops;
+
+/* One B8G8R8A8 texel for the 12x19 sprite. The sprite is 1-pixel bordered
+   so the cursor stays visible on both the grey chrome and the dark desktop. */
+static u32 gpu_cursor_texel(u32 x, u32 y)
+{
+    u32 shape;
+    u32 rgb;
+
+    if (x >= fb_cursor_width() || y >= fb_cursor_height()) {
+        return 0u;
+    }
+    shape = fb_cursor_sprite(x, y);
+    if (shape == 1u) {
+        rgb = fb_cursor_border_rgb();
+    } else if (shape == 2u) {
+        rgb = fb_cursor_body_rgb();
+    } else {
+        return 0u;
+    }
+    return (0xFFu << 24) | (rgb & 0xFFu) | (((rgb >> 8) & 0xFFu) << 8) |
+           (((rgb >> 16) & 0xFFu) << 16);
+}
+
+static int gpu_cursor_submit(u32 cmd_len)
+{
+    struct gpu_queue *q = &g_gpu.cursor_q;
+    u16 head;
+    u64 deadline;
+
+    if (!g_gpu.present || !q->desc || cmd_len < 24u || cmd_len > GPU_CMD_MAX) {
+        return -1;
+    }
+    q->desc[0].addr = pmm_virt_to_phys(g_cmd);
+    q->desc[0].len = cmd_len;
+    q->desc[0].flags = 0u;
+    q->desc[0].next = 0u;
+    head = (u16)(q->avail->idx % q->size);
+    q->avail->ring[head] = 0u;
+    __sync_synchronize();
+    q->avail->idx++;
+    __sync_synchronize();
+    *(volatile u16 *)(uintptr)q->notify = 1u;
+    __sync_synchronize();
+    deadline = timer_monotonic_ns() + GPU_TIMEOUT_NS;
+    while (q->used->idx == q->last_used) {
+        if (timer_monotonic_ns() > deadline) {
+            g_gpu.errors++;
+            return -1;
+        }
+    }
+    __sync_synchronize();
+    q->last_used = q->used->idx;
+    return 0;
+}
+
+static int gpu_cursor_update(u32 x, u32 y, u32 id)
+{
+    gpu_cmd_init(g_cmd, GPU_CMD_MAX, GPU_CMD_UPDATE_CURSOR);
+    gpu_put32(g_cmd, 24u, x);
+    gpu_put32(g_cmd, 28u, y);
+    gpu_put32(g_cmd, 32u, 0u);
+    gpu_put32(g_cmd, 36u, 0u);
+    gpu_put32(g_cmd, 40u, id);
+    gpu_put32(g_cmd, 44u, 0u);
+    return gpu_cursor_submit(48u);
+}
+
+static int gpu_cursor_move_cmd(u32 x, u32 y)
+{
+    gpu_cmd_init(g_cmd, GPU_CMD_MAX, GPU_CMD_MOVE_CURSOR);
+    gpu_put32(g_cmd, 24u, x);
+    gpu_put32(g_cmd, 28u, y);
+    gpu_put32(g_cmd, 32u, 0u);
+    gpu_put32(g_cmd, 36u, 0u);
+    return gpu_cursor_submit(40u);
+}
+
+static int gpu_cursor_op_show(u32 x, u32 y)
+{
+    struct gpu_state *g = &g_gpu;
+
+    if (!g->cursor_ready) {
+        return -1;
+    }
+    if (gpu_cursor_update(x, y, GPU_CURSOR_RESOURCE_ID) != 0) {
+        return -1;
+    }
+    g->cursor_updates++;
+    g->cursor_shown = 1;
+    kprintf("CRUGOS: gpu cursor show %u %u\n", (unsigned)x, (unsigned)y);
+    return 0;
+}
+
+static int gpu_cursor_op_move(u32 x, u32 y)
+{
+    struct gpu_state *g = &g_gpu;
+
+    if (!g->cursor_ready) {
+        return -1;
+    }
+    if (gpu_cursor_move_cmd(x, y) != 0) {
+        return -1;
+    }
+    g->cursor_moves++;
+    kprintf("CRUGOS: gpu cursor move %u %u\n", (unsigned)x, (unsigned)y);
+    return 0;
+}
+
+static void gpu_cursor_op_hide(void)
+{
+    struct gpu_state *g = &g_gpu;
+
+    if (!g->cursor_ready || !g->cursor_shown) {
+        return;
+    }
+    (void)gpu_cursor_update(0u, 0u, 0u);
+    g->cursor_shown = 0;
+}
+
+/* The hardware cursor plane keeps the pointer out of the rendered surface:
+   the scanner composites a 64x64 ARGB resource over the scanout, so the
+   compositor never has to save and restore the pixels underneath. */
+static int gpu_cursor_init(struct gpu_state *g)
+{
+    u32 bytes = GPU_CURSOR_PX * GPU_CURSOR_PX * 4u;
+    u32 pages = (bytes + (u32)CRUG_PAGE_SIZE - 1u) / (u32)CRUG_PAGE_SIZE;
+    u64 pa;
+    u8 *img;
+    u32 y;
+    u32 x;
+
+    if (!g->cursor_q.desc) {
+        return -1;
+    }
+    pa = pmm_alloc_pages(pages);
+    if (!pa) {
+        return -1;
+    }
+    img = (u8 *)pmm_phys_to_virt(pa);
+    memset(img, 0, (usize)pages * CRUG_PAGE_SIZE);
+    for (y = 0u; y < GPU_CURSOR_PX; y++) {
+        for (x = 0u; x < GPU_CURSOR_PX; x++) {
+            u32 texel = gpu_cursor_texel(x, y);
+            u64 off = ((u64)y * GPU_CURSOR_PX + x) * 4u;
+
+            gpu_put32(img, (u32)off, texel);
+        }
+    }
+    if (gpu_create_resource(g, GPU_CURSOR_RESOURCE_ID, GPU_FORMAT_B8G8R8A8,
+                            GPU_CURSOR_PX, GPU_CURSOR_PX) != 0) {
+        pmm_free_pages(pa, pages);
+        return -1;
+    }
+    if (gpu_attach_backing(GPU_CURSOR_RESOURCE_ID, pa, bytes) != 0) {
+        pmm_free_pages(pa, pages);
+        return -1;
+    }
+    g->cursor_pa = pa;
+    g->cursor_pages = pages;
+    g->cursor = img;
+    g->cursor_ready = 1;
+    if (fb_set_cursor_ops(&g_gpu_cursor_ops) != 0) {
+        g->cursor_ready = 0;
+        return -1;
+    }
+    kprintf("CRUGOS: gpu cursor ready (%ux%u, resource %u, hardware plane)\n",
+            (unsigned)GPU_CURSOR_PX, (unsigned)GPU_CURSOR_PX,
+            (unsigned)GPU_CURSOR_RESOURCE_ID);
+    return 0;
+}
+
+static const struct fb_cursor_ops g_gpu_cursor_ops = {
+    gpu_cursor_op_show,
+    gpu_cursor_op_move,
+    gpu_cursor_op_hide
+};
 /* Sizes are tried in order until a contiguous backing buffer fits: the
-   preferred gpu.size=, the display mode, then 1024x768, 800x600 and 640x480. */
-static int gpu_pick_backing(u32 display_w, u32 display_h, u32 *out_w,
-                            u32 *out_h)
+   preferred gpu.size=, the EDID preferred timing, the display mode, then
+   1024x768, 800x600 and 640x480. Each accepted size records why it won. */
+static int gpu_pick_backing(u32 display_w, u32 display_h, u32 edid_w,
+                            u32 edid_h, u32 *out_w, u32 *out_h)
 {
     static const u32 fallback[][2] = { { 1024u, 768u }, { 800u, 600u },
                                        { 640u, 480u } };
-    u32 widths[4];
-    u32 heights[4];
+    u32 widths[5];
+    u32 heights[5];
+    const char *sources[5];
     u32 count = 0u;
     u32 i;
 
     if (g_gpu_want_w && g_gpu_want_h) {
         widths[count] = g_gpu_want_w;
         heights[count] = g_gpu_want_h;
+        sources[count] = "gpu.size";
+        count++;
+    }
+    if (edid_w && edid_h &&
+        !(edid_w == g_gpu_want_w && edid_h == g_gpu_want_h)) {
+        widths[count] = edid_w;
+        heights[count] = edid_h;
+        sources[count] = "edid preferred";
         count++;
     }
     if (gpu_backing_pages(display_w, display_h) &&
-        !(display_w == g_gpu_want_w && display_h == g_gpu_want_h)) {
+        !(display_w == g_gpu_want_w && display_h == g_gpu_want_h) &&
+        !(display_w == edid_w && display_h == edid_h)) {
         widths[count] = display_w;
         heights[count] = display_h;
+        sources[count] = "display info";
         count++;
     }
-    for (i = 0; i < 3u && count < 4u; i++) {
+    for (i = 0; i < 3u && count < 5u; i++) {
         if (fallback[i][0] == display_w && fallback[i][1] == display_h) {
             continue;
         }
         widths[count] = fallback[i][0];
         heights[count] = fallback[i][1];
+        sources[count] = "fallback";
         count++;
     }
     for (i = 0; i < count; i++) {
@@ -623,6 +921,7 @@ static int gpu_pick_backing(u32 display_w, u32 display_h, u32 *out_w,
         g_gpu.backing = (u8 *)pmm_phys_to_virt(pa);
         *out_w = widths[i];
         *out_h = heights[i];
+        g_gpu_mode_src = sources[i];
         return 0;
     }
     return -1;
@@ -637,6 +936,7 @@ int gpu_init(void)
     u32 display_h = 0u;
     u32 width = 0u;
     u32 height = 0u;
+    u32 features_lo;
     u32 features_hi;
 
     g->present = 0;
@@ -666,11 +966,15 @@ int gpu_init(void)
     gpu_status_write(g, VIRTIO_STATUS_ACKNOWLEDGE);
     gpu_status_write(g, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
     gpu_w32(g->common, GPU_CFG_DEVICE_FEATURE_SELECT, 0u);
-    (void)gpu_r32(g->common, GPU_CFG_DEVICE_FEATURE);
+    features_lo = gpu_r32(g->common, GPU_CFG_DEVICE_FEATURE);
     gpu_w32(g->common, GPU_CFG_DEVICE_FEATURE_SELECT, 1u);
     features_hi = gpu_r32(g->common, GPU_CFG_DEVICE_FEATURE);
+    /* Phase 8B: only the EDID feature is accepted on page 0; VIRGL and
+       RESOURCE_BLOB stay off, so no host GL context is requested. */
+    g->edid_feature = (features_lo & GPU_FEATURE_EDID) ? 1 : 0;
     gpu_w32(g->common, GPU_CFG_DRIVER_FEATURE_SELECT, 0u);
-    gpu_w32(g->common, GPU_CFG_DRIVER_FEATURE, 0u);
+    gpu_w32(g->common, GPU_CFG_DRIVER_FEATURE,
+            (features_lo & GPU_FEATURE_EDID) ? GPU_FEATURE_EDID : 0u);
     gpu_w32(g->common, GPU_CFG_DRIVER_FEATURE_SELECT, 1u);
     gpu_w32(g->common, GPU_CFG_DRIVER_FEATURE, (features_hi & 1u) ? 1u : 0u);
     gpu_status_write(g, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER |
@@ -685,6 +989,9 @@ int gpu_init(void)
         kprintf("CRUGOS: virtio-gpu ignored (no control queue)\n");
         return 0;
     }
+    if (gpu_cursor_queue_init(g) != 0) {
+        kprintf("CRUGOS: gpu cursor queue unavailable (no cursor plane)\n");
+    }
     gpu_status_write(g, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER |
                         VIRTIO_STATUS_FEATURES_OK | VIRTIO_STATUS_DRIVER_OK);
 
@@ -693,20 +1000,42 @@ int gpu_init(void)
         g->present = 0;
         return 0;
     }
-    if (gpu_pick_backing(display_w, display_h, &width, &height) != 0) {
-        kprintf("CRUGOS: virtio-gpu ignored (no backing memory for %ux%u)\n",
-                (unsigned)display_w, (unsigned)display_h);
-        g->present = 0;
-        return 0;
+    if (g->edid_feature) {
+        if (gpu_edid_query(g) == 0) {
+            char vendor[4];
+
+            gpu_edid_vendor(&g->edid, vendor);
+            kprintf("CRUGOS: gpu edid %ux%u (vendor %s, product 0x%04x, %u mode(s))\n",
+                    (unsigned)g->edid.preferred.width,
+                    (unsigned)g->edid.preferred.height, vendor,
+                    (unsigned)g->edid.product,
+                    (unsigned)g->edid.mode_count);
+        } else {
+            kprintf("CRUGOS: gpu edid unavailable (no timing)\n");
+        }
+    }
+    {
+        u32 edid_w = g->edid_ok ? g->edid.preferred.width : 0u;
+        u32 edid_h = g->edid_ok ? g->edid.preferred.height : 0u;
+
+        if (gpu_pick_backing(display_w, display_h, edid_w, edid_h, &width,
+                             &height) != 0) {
+            kprintf("CRUGOS: virtio-gpu ignored (no backing memory for %ux%u)\n",
+                    (unsigned)display_w, (unsigned)display_h);
+            g->present = 0;
+            return 0;
+        }
     }
     g->width = width;
     g->height = height;
-    if (gpu_create_resource(g, width, height) != 0) {
+    if (gpu_create_resource(g, GPU_RESOURCE_ID, GPU_FORMAT_B8G8R8X8, width,
+                            height) != 0) {
         kprintf("CRUGOS: virtio-gpu ignored (resource create failed)\n");
         g->present = 0;
         return 0;
     }
-    if (gpu_attach_backing(g) != 0) {
+    if (gpu_attach_backing(GPU_RESOURCE_ID, g->backing_pa,
+                           (u32)(g->backing_pages * CRUG_PAGE_SIZE)) != 0) {
         kprintf("CRUGOS: virtio-gpu ignored (attach backing failed)\n");
         g->present = 0;
         return 0;
@@ -724,6 +1053,11 @@ int gpu_init(void)
         return 0;
     }
     g->enabled = 1;
+    kprintf("CRUGOS: gpu mode %ux%u (%s)\n", (unsigned)width,
+            (unsigned)height, g_gpu_mode_src);
+    if (gpu_cursor_init(g) != 0) {
+        kprintf("CRUGOS: gpu cursor unavailable (hardware plane)\n");
+    }
     kprintf("CRUGOS: virtio-gpu ready (%ux%u, %llu backing page(s), resource %u, modern pci)\n",
             (unsigned)width, (unsigned)height,
             (unsigned long long)g->backing_pages, (unsigned)GPU_RESOURCE_ID);
@@ -786,6 +1120,26 @@ u32 gpu_errors(void)
     return g_gpu.errors;
 }
 
+int gpu_edid_available(void)
+{
+    return g_gpu.edid_ok;
+}
+
+int gpu_cursor_ready(void)
+{
+    return g_gpu.cursor_ready;
+}
+
+u64 gpu_cursor_updates(void)
+{
+    return g_gpu.cursor_updates;
+}
+
+u64 gpu_cursor_moves(void)
+{
+    return g_gpu.cursor_moves;
+}
+
 /* Re-present the whole resource: with a GPU attached the desktop pixels
    leave the guest through the same path the compositor uses. */
 int gpu_selftest(void)
@@ -806,5 +1160,23 @@ int gpu_selftest(void)
     kprintf("CRUGOS: gpu selftest ok (%ux%u, %llu transfer(s), %llu flush(es))\n",
             (unsigned)g->width, (unsigned)g->height,
             (unsigned long long)g->transfers, (unsigned long long)g->flushes);
+    if (g->cursor_ready) {
+        u32 cx = g->width / 2u;
+        u32 cy = g->height / 2u;
+
+        /* Hide first so the first show reaches the device show path even if
+           the desktop already put the pointer on screen. */
+        fb_cursor_hide();
+        fb_cursor_show_at(cx, cy);
+        fb_cursor_show_at(cx + 8u, cy + 4u);
+        fb_cursor_hide();
+        if (g->cursor_updates == 0u || g->cursor_moves == 0u) {
+            kprintf("CRUGOS: gpu cursor selftest failed (device cursor)\n");
+            return -1;
+        }
+        kprintf("CRUGOS: gpu cursor selftest ok (%llu show(s), %llu move(s))\n",
+                (unsigned long long)g->cursor_updates,
+                (unsigned long long)g->cursor_moves);
+    }
     return 0;
 }

@@ -44,7 +44,7 @@ REQUIRED_MARKERS = (
     "CRUGOS: selftest ok",
     "CRUGOS: nvme ready",
     "CRUGOS: ahci ready",
-    "CRUGOS: phase 8a boot ok",
+    "CRUGOS: phase 8b boot ok",
 )
 # A rejected unlock stops before scheduling, storage mounting and self-tests.
 WRONG_CRYPT_MARKERS = (
@@ -112,6 +112,8 @@ def main() -> int:
     caps_mode = "no"
     wbpkg_mode = "no"
     gpu_mode = "no"
+    gpu_edid_mode = "no"
+    gpu_cursor_mode = "no"
     argv = []
     for arg in sys.argv[1:]:
         if arg == "--storage=none":
@@ -154,6 +156,16 @@ def main() -> int:
         elif arg.startswith("--expect-gpu="):
             print(f"FAIL: invalid gpu expectation {arg!r}", file=sys.stderr)
             return 2
+        elif arg == "--expect-gpu-edid=yes":
+            gpu_edid_mode = "yes"
+        elif arg.startswith("--expect-gpu-edid="):
+            print(f"FAIL: invalid gpu EDID expectation {arg!r}", file=sys.stderr)
+            return 2
+        elif arg == "--expect-gpu-cursor=yes":
+            gpu_cursor_mode = "yes"
+        elif arg.startswith("--expect-gpu-cursor="):
+            print(f"FAIL: invalid gpu cursor expectation {arg!r}", file=sys.stderr)
+            return 2
         else:
             argv.append(arg)
     sys.argv = [sys.argv[0]] + argv
@@ -170,7 +182,8 @@ def main() -> int:
               "[EXPECT_FORKBIG]]]]]]]]]]]]]]]]]]]]]]]]]] "
               "[--storage=none] [--expect-screen=yes] [--expect-cx=yes] "
               "[--expect-app=yes] [--expect-pkg=yes] [--expect-caps=yes] "
-              "[--expect-wbpkg=yes] [--expect-gpu=yes]",
+              "[--expect-wbpkg=yes] [--expect-gpu=yes] "
+              "[--expect-gpu-edid=yes] [--expect-gpu-cursor=yes]",
               file=sys.stderr)
         return 2
 
@@ -278,6 +291,14 @@ def main() -> int:
         return fail(f"invalid packages-window mode {wbpkg_mode!r}", text)
     if gpu_mode not in ("no", "yes"):
         return fail(f"invalid gpu mode {gpu_mode!r}", text)
+    if gpu_edid_mode not in ("no", "yes"):
+        return fail(f"invalid gpu EDID mode {gpu_edid_mode!r}", text)
+    if gpu_cursor_mode not in ("no", "yes"):
+        return fail(f"invalid gpu cursor mode {gpu_cursor_mode!r}", text)
+    if gpu_edid_mode == "yes" and gpu_mode != "yes":
+        return fail("--expect-gpu-edid=yes also needs --expect-gpu=yes", text)
+    if gpu_cursor_mode == "yes" and gpu_mode != "yes":
+        return fail("--expect-gpu-cursor=yes also needs --expect-gpu=yes", text)
 
     required = list(REQUIRED_MARKERS)
     if storage_mode == "none":
@@ -484,6 +505,41 @@ def main() -> int:
             return fail("expected the desktop repaint to flush at least twice", text)
     elif "CRUGOS: virtio-gpu ready (" in text:
         return fail("unexpected virtio-gpu scanout without --expect-gpu=yes", text)
+
+    if gpu_edid_mode == "yes":
+        # The device advertises one detailed timing; the driver must query it
+        # and adopt it instead of its fixed fallback list.
+        edid = re.search(
+            r"CRUGOS: gpu edid (\d+)x(\d+) \(vendor ([A-Z?]{3}), "
+            r"product 0x([0-9a-f]{4}), (\d+) mode\(s\)\)", text)
+        if edid is None:
+            return fail("expected the GPU to decode the device EDID", text)
+        if int(edid.group(5)) < 1:
+            return fail("expected at least one EDID timing", text)
+        mode = re.search(
+            r"CRUGOS: gpu mode (\d+)x(\d+) \(edid preferred\)", text)
+        if mode is None:
+            return fail("expected the EDID preferred timing to become the mode", text)
+        if (mode.group(1), mode.group(2)) != (edid.group(1), edid.group(2)):
+            return fail("the chosen mode differs from the EDID preferred timing", text)
+
+    if gpu_cursor_mode == "yes":
+        # The hardware cursor lives on its own virtqueue; a screendump of the
+        # scanout device cannot show it, so the serial counters are the proof.
+        for marker in (
+            "CRUGOS: gpu cursor ready (64x64, resource 2, hardware plane)",
+            "CRUGOS: gpu cursor show ",
+            "CRUGOS: gpu cursor move ",
+        ):
+            if marker not in text:
+                return fail(f"missing serial marker: {marker!r}", text)
+        cursor = re.search(
+            r"CRUGOS: gpu cursor selftest ok \((\d+) show\(s\), "
+            r"(\d+) move\(s\)\)", text)
+        if cursor is None:
+            return fail("expected the hardware cursor selftest counters", text)
+        if int(cursor.group(1)) < 1 or int(cursor.group(2)) < 1:
+            return fail("the cursor plane received no show or move", text)
 
     if expect_wb == "yes":
         for marker in (
@@ -1015,6 +1071,7 @@ def main() -> int:
           "select", expect_select, "screen", screen_mode, "cx", cx_mode,
           "app", app_mode, "pkg", pkg_mode, "caps", caps_mode,
           "wbpkg", wbpkg_mode, "gpu", gpu_mode,
+          "gpuedid", gpu_edid_mode, "gpucursor", gpu_cursor_mode,
           "heap", expect_heap, "user", expect_user,
           "isolated", expect_users, "ushell", expect_ushell,
           "spawn", expect_spawn, "fork", expect_fork,

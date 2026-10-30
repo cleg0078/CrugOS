@@ -11,16 +11,23 @@ sent, not what a VGA adapter was still holding in memory.
 
 Only the 2D path exists. There is no virglrenderer context, no Vulkan, no
 command stream and no 3D resource; the specification's "accelerated triangle"
-acceptance item is deferred to a future 8B. Phase 8A is about the display
+acceptance item is still deferred. Phase 8A is about the display
 plumbing a 3D renderer would later draw through: a device, a resource, a
 scanout, and a present path that tells the host what changed.
+
+Phase 8B adds the two pieces the 2D path was missing: the display's EDID is
+fetched and parsed so the scanout follows the monitor's preferred timing, and
+the pointer gets the device's own hardware cursor plane instead of being
+painted into the same pixels. There is still no virgl context and no 3D
+resource; the specification's accelerated triangle stays deferred.
 
 The software path is not replaced, it is fronted. With no virtio-gpu device,
 with `gpu.enable=0`, or after any driver failure, the kernel keeps booting on
 the GOP framebuffer exactly as it did in phase 7C. All 59 earlier gates still
-boot that way and are unchanged. `make test-gpu` is gate 60 and
-`make test-gpu-usb` is gate 61; those two are the only gates that boot a
-GPU.
+boot that way and are unchanged. `make test-gpu` is gate 60,
+`make test-gpu-usb` gate 61, `make test-gpu-edid` gate 62 and
+`make test-gpu-cursor` gate 63; those four are the only gates that boot a
+GPU. The last two are the phase 8B pair.
 
 ## Why a GPU path
 
@@ -118,10 +125,11 @@ framebuffer code. If any of those fails the boot continues on the firmware
 framebuffer, because a display device that cannot be driven is a worse
 outcome only if it stops the machine.
 
-The resource is never resized and never replaced. There is no second resource,
-no cursor plane and no scanout for an overlay; a hardware cursor would need a
-second resource plus cursor commands, and the pointer sprite is still drawn by
-the software renderer into the same pixels.
+The 2D resource is never resized and never replaced. Phase 8A had no second
+resource, no cursor plane and no scanout for an overlay; phase 8B adds exactly
+one more resource, the 64x64 cursor plane, on its own queue. A device without
+that plane still gets the software sprite drawn into the same pixels, so the
+compositor path is unchanged either way.
 
 ## The framebuffer and the damage rectangle
 
@@ -161,7 +169,7 @@ numbers in the two success lines rather than trusting a screenshot alone.
 | Token | Default | Meaning |
 | --- | --- | --- |
 | `gpu.enable=0|1` | 1 | `0` disables the driver and keeps the firmware framebuffer |
-| `gpu.size=WxH` | none | preferred scanout size; the host mode and then the built-in list are the fallbacks |
+| `gpu.size=WxH` | none | preferred scanout size, ahead of the EDID; the EDID preferred timing, the host mode and the built-in list are the fallbacks |
 | `gpu.test=1` | 0 | makes the self-test announce a skip on a software framebuffer |
 
 The boot prints one line when the device is up and one when the scanout is
@@ -192,9 +200,14 @@ the transport, so a log can be read without another command. The scanout line's
 counters are one transfer and one flush: the first full present of the desktop.
 The self-test line's counters are the ones `make test-gpu` asserts.
 
+With EDID support the ready line is preceded by the EDID and mode-source
+lines of phase 8B (below), and the pointer is shown on the hardware cursor
+plane rather than painted into the resource; `gpu.size=` still wins over the
+EDID, so every earlier gate and the demo keep their size.
+
 ## The gate
 
-`make test-gpu` is gate 60 of 61. It is the only gate that boots without any
+`make test-gpu` is gate 60 of 63. It is the only gate that boots without any
 firmware framebuffer: the QEMU command line is
 `-vga none -device virtio-gpu-pci,id=gpu0`, so the GOP has no adapter to bind
 and the virtio-gpu resource is the machine's only display. A screendump of the
@@ -223,7 +236,7 @@ requires the guest to exit 33 and runs `scripts/check-disk.py`. The boot-check
 line carries `gpu yes` and every earlier flag `no`:
 
 ```
-ok: boot markers found, version 0.46.0 avx2 yes raid no nvme no rebuild no
+ok: boot markers found, version 0.47.0 avx2 yes raid no nvme no rebuild no
 ahci no crypt no aes any net no tcp no dns no usb no mouse no audio no gfx no
 wb no menu no shell no keys no desk no icons no drawer no select no screen no
 cx no app no pkg no caps no wbpkg no gpu yes ... QEMU exit status 33
@@ -340,6 +353,174 @@ CRUGOS: usb selftest ok (0 key(s), 2 pointer event(s))
 earlier gate's argument order are unchanged. The descriptor `0627:0001` is
 QEMU's `usb-mouse`, and it arrives on port 5 of the xHCI's eight ports.
 
+## EDID mode selection
+
+The 2D scanout of phase 8A took its mode from the host's `GET_DISPLAY_INFO`
+answer or from the built-in list. That is enough for QEMU, but on a real
+monitor the display's own preferred timing is the one it advertises in its
+EDID, and a driver that ignores it can pick a size the panel then scales.
+Phase 8B fetches the blob and parses it in the kernel.
+
+The control queue issues `GET_EDID` (command 0x20) directly after
+`GET_DISPLAY_INFO`, and the driver negotiates the EDID device feature as bit 2
+of the feature word (`VIRTIO_GPU_F_EDID`; bit 1 is VIRGL and bit 0 is the 3D
+half this phase does not use). A success response is 0x1104
+(`GPU_RESP_OK_EDID`). The blob is copied into a 1024-byte buffer
+(`GPU_EDID_MAX_BYTES`) and handed to `gpu_edid_parse()` in
+`kernel/gpu/edid.c`, a pure file with no console, allocator or port I/O that
+the host tests link directly.
+
+### The parser rules
+
+- the blob must be at least 128 bytes and must start with the eight-byte EDID
+  header `00 ff ff ff ff ff ff 00`;
+- the 128-byte block must sum to 0 modulo 256, the checksum byte included;
+- the four 18-byte detailed timing descriptors begin at offset 54; a
+  descriptor whose first word is zero is a display descriptor (monitor name,
+  range limits, serial number) and is skipped rather than decoded as a
+  timing;
+- at most `GPU_EDID_MAX_MODES` (4) timings are kept, the first one is the
+  preferred timing, and a blob with no usable timing is rejected because an
+  EDID that names no mode cannot drive a scanout;
+- the vendor id is one big-endian word at offset 8, decoded as three five-bit
+  letters (`a = (id >> 10) & 31`, `b = (id >> 5) & 31`, `c = id & 31`); a
+  letter outside 1..26 prints as `???`, so a malformed id cannot crash the
+  parser or emit control characters.
+
+Each timing decodes as `clock_khz` = the little-endian word 0 times 10,
+`width = b2 | ((b4 & 0xf0) << 4)` with `hblank = b3 | ((b4 & 0x0f) << 8)`,
+`height = b5 | ((b7 & 0xf0) << 4)` with `vblank = b6 | ((b7 & 0x0f) << 8)`, and
+`refresh_hz = clock_khz * 1000 / (htotal * vtotal)`. Every read stays inside
+the 18-byte descriptor it came from.
+
+### Mode priority
+
+`gpu_init()` now chooses in four steps and prints which one won:
+
+1. `gpu.size=WxH` from the command line, when present and acceptable;
+2. the preferred EDID timing;
+3. the host `GET_DISPLAY_INFO` mode;
+4. the built-in 1024x768 fallback, then 800x600 and 640x480, capped at
+   4096x2160 and 8192 backing pages.
+
+`gpu.size=` deliberately stays ahead of the EDID: it is what lets a gate, or
+`make demo` with `DEMO_GPU_SIZE=`, pin a size on a host whose monitor
+advertises something else. The two new lines say what happened:
+
+```
+CRUGOS: gpu edid 1152x864 (vendor RHT, product 0x1234, 1 mode(s))
+CRUGOS: gpu mode 1152x864 (edid preferred)
+```
+
+The EDID line carries the preferred timing, the vendor, the product code and
+the timing count; the mode line names the source (`edid preferred`,
+`gpu.size`, `display info` or `fallback`), so a log explains why the scanout
+is the size it is instead of leaving the reader to guess.
+
+### Gate 62: make test-gpu-edid
+
+`make test-gpu-edid` is gate 62. It pins the device to a timing that neither
+the fallback nor QEMU's default can produce:
+
+```
+GPU_EDID_DEVICE ?= virtio-gpu-pci,id=gpu0,xres=1152,yres=864
+GPU_EDID_QEMU_EXTRA ?= -vga none -device $(GPU_EDID_DEVICE)
+```
+
+1152x864 is neither the driver's 1024x768 fallback nor QEMU's usual 1280x800,
+so a 1152x864 scanout can only come from a decoded EDID. The gate runs
+`scripts/run-gpu.py --expect-edid`, then `boot-check.py` with
+`--expect-gpu=yes --expect-gpu-edid=yes`, then `scripts/check-disk.py` like
+every boot gate. The `--expect-edid` leg requires the EDID line, the
+`(edid preferred)` mode line whose size equals the decoded EDID, at least one
+EDID timing in that line's `N mode(s)` count and a screendump whose size
+equals the timing. The verified output is:
+
+```
+gpu: edid 1152x864 (vendor RHT, product 0x1234, 1 mode(s))
+gpu: device gpu0 screendump 1152x864
+ok: virtio-gpu scanout 1152x864, mode from the EDID (14 transfer(s), 14 flush(es),
+exit 33)
+```
+
+The runner also re-checks the four desktop pixel samples against the
+1152x864 screendump, and `boot-check.py` reports `gpu yes gpuedid yes
+gpucursor no` before the QEMU exit status 33. The EDID is QEMU's manufactured
+one for the pinned device, not the host monitor's, so the 1152x864 timing is
+the same on every machine: that is what makes the gate hermetic, and it is
+also why the EDID gate does not need a real panel.
+
+## The hardware cursor plane
+
+The 12x19 sprite of phase 5D is a framebuffer citizen: the console and the
+compositor save the pixels under it and recomposite them on every move.
+Virtio-gpu has a hardware cursor plane that never touches guest memory, so
+phase 8B moves the pointer onto it when the device offers one.
+
+### The second queue
+
+The cursor plane is queue 1, configured alongside control queue 0 and enabled
+before `DRIVER_OK`. It has its own 64x64 `B8G8R8X8_UNORM` resource (resource
+id 2, `GPU_CURSOR_PX` pixels a side) attached the same way as the scanout.
+`UPDATE_CURSOR` is a 48-byte command that uploads the sprite, and
+`MOVE_CURSOR` is a 40-byte command that places it; each is submitted with one
+non-write descriptor and a single 16-bit queue notify, and the driver only
+waits for the used index to advance. A cursor move must never block the
+compositor on a response structure, so the driver does not require a used-ring
+response for these commands at all.
+
+The commands deliberately do not travel on the control queue: its 2D command
+switch has no cursor case and answers 0x1200 (`err-unspec`), which an earlier
+implementation read as a device failure and silently fell back to the sprite.
+The cursor queue is the only path now.
+
+### The sprite and the fallback
+
+`include/crug/fb.h` gained `struct fb_cursor_ops` with `show`, `move` and
+`hide` callbacks plus `fb_set_cursor_ops()`, and `kernel/arch/x86_64/fb.c`
+defers every cursor show, move and hide to the installed ops. If no ops are
+installed, or an op returns an error, the old software sprite is drawn into
+the scanout exactly as before, so a device without a cursor plane keeps a
+working pointer. `fb_attach_linear()` clears the hardware-shown state, which
+is what stops a stale plane from lingering after a re-attach.
+
+The sequence reads:
+
+```
+CRUGOS: gpu cursor ready (64x64, resource 2, hardware plane)
+CRUGOS: gpu cursor show 640 400
+CRUGOS: gpu cursor move 648 404
+CRUGOS: gpu cursor selftest ok (2 show(s), 1 move(s))
+```
+
+A device that offers no cursor plane prints
+`CRUGOS: gpu cursor queue unavailable (no cursor plane)` and stays on the
+sprite. `gpu_selftest()` now hides the pointer, shows it at the centre, shows
+it at centre+8/+4, hides it again and fails the boot self-test when either the
+show or the move counter is zero, so a queue that accepts commands but never
+updates is caught without a screenshot.
+
+### Gate 63: make test-gpu-cursor
+
+`make test-gpu-cursor` is gate 63. It boots the default device from
+`GPU_QEMU_EXTRA` (QEMU manufactures a 1280x800 EDID under `-display none`),
+runs `scripts/run-gpu.py --expect-cursor`, then `boot-check.py` with
+`--expect-gpu=yes --expect-gpu-cursor=yes`. A screendump of `gpu0` never
+contains the cursor plane, because the host scans it out separately, so the
+serial counters are the evidence rather than pixels:
+
+```
+gpu: cursor plane 2 show(s), 1 move(s)
+ok: virtio-gpu scanout 1280x800, hardware cursor (14 transfer(s), 14 flush(es),
+exit 33)
+```
+
+The boot-check line reports `gpu yes gpuedid no gpucursor yes`, the QEMU exit
+status is 33 and `e2fsck` is clean, as in every boot gate. The only proof of
+cursor drawing is therefore the guest's own counters plus the fact that the
+desktop pixels and the scanout counters are unchanged; the gate never claims a
+pixel assertion it cannot make.
+
 ## Failure modes
 
 Every driver failure keeps the boot alive on the software framebuffer and
@@ -362,6 +543,7 @@ up cannot be debugged over serial.
 | `CRUGOS: virtio-gpu ignored (set scanout failed)` | `SET_SCANOUT` failed |
 | `CRUGOS: virtio-gpu ignored (framebuffer attach failed)` | `fb_attach_linear()` refused |
 | `CRUGOS: virtio-gpu command 0x<type> answered 0x<code> (<name>)` | a late command returned an error |
+| `CRUGOS: gpu cursor queue unavailable (no cursor plane)` | queue 1 could not be configured; the pointer stays on the sprite |
 | `CRUGOS: gpu selftest failed (present)` | the self-test could not present |
 
 The same "ignore and continue" rule applies to a device that answers slowly:
@@ -370,16 +552,18 @@ line with a timeout name rather than by spinning forever.
 
 ## Limits
 
-- 2D scanout only. There is no 3D, no virglrenderer, no Vulkan, no command
-  stream, no shader and no "accelerated triangle"; the specification's phase 8
-  acceptance item is deferred to a future 8B. Nothing in this phase should be
-  read as partial 3D support.
-- One resource, one scanout, one display. No second resource, no overlay, no
-  hardware cursor plane and no multi-head. The pointer is still painted into
-  the same pixels by the software renderer.
+- 2D scanout only. There is no virglrenderer context, no Vulkan, no command
+  stream, no shader and no "accelerated triangle"; that acceptance item of the
+  specification's phase 8 remains deferred. Phase 8B adds EDID mode selection
+  and the hardware cursor plane, which are display plumbing, not 3D: nothing
+  in this release should be read as partial 3D support.
+- Two resources, one scanout, one display. Resource 1 is the desktop, resource
+  2 is the 64x64 cursor. There is no overlay, no multi-head (`max_outputs=2`
+  is not gated) and no clone. When the device has no cursor plane the pointer
+  is still painted into resource 1 by the software renderer.
 - No mode-set after boot and no hotplug. The mode is chosen once from the
-  token, the host display info or the built-in list; a display change needs a
-  reboot.
+  token, the EDID preferred timing, the host display info or the built-in
+  list, and a display change needs a reboot.
 - One command in flight with a two-second deadline, and a queue of at most 64
   entries. The driver is not interrupt-driven; it polls.
 - The backing is contiguous physical memory capped at
@@ -398,7 +582,20 @@ line with a timeout name rather than by spinning forever.
   the firmware framebuffer looks normal apart from the missing
   `virtio-gpu ready` line, so a gate must ask for it explicitly with
   `--expect-gpu=yes`.
-- `make test-host` covers the pure helpers only (encoding, response classes,
-  rectangle clipping, backing-page arithmetic, display pick and damage merge),
-  so it reports 8488 checks. The command sequence, the queue and the present
-  path are proved only by the gate.
+- `make test-host` covers the pure helpers only (command encoding, response
+  classes, rectangle clipping, backing-page arithmetic, display pick, damage
+  merge, the EDID parser and its rejection cases), so it reports 8521 checks.
+  The command sequence, the queues, the present path and the cursor plane are
+  proved only by the gates.
+- The EDID is parsed but not acted on beyond the mode: no colour depth, gamma,
+  aspect-ratio or range-limit handling, and no mode list is offered to
+  userspace. `gpu.size=` still overrides the preferred timing by design.
+- The hardware cursor is a 64x64 plane with one sprite; there is no
+  per-window cursor, no alpha blending beyond the device's own scanout and no
+  cursor pixels in a screendump. A gate can therefore assert the show and move
+  counters but never the pointer's colour.
+- No 3D on this host in any case: there is no `/dev/dri` render node, so QEMU
+  refuses virgl with `The display backend does not have OpenGL support
+  enabled` and `egl: no drm render node available`, and blob resources stay
+  off unless the device is created with `blob=on`. The 3D half is not merely
+  unimplemented, it is untestable here.

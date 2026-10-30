@@ -17,6 +17,7 @@ SOURCES := main.c test_string.c test_printf.c test_elf.c test_bitmap.c test_vm_m
            ../../kernel/audio/audio.c ../../kernel/audio/mixer.c \
            ../../kernel/gfx/gfx.c ../../kernel/gfx/intuition.c \
            ../../kernel/gfx/commodities.c ../../kernel/gpu/gpu_util.c \
+           ../../kernel/gpu/edid.c \
            ../../kernel/input/input.c ../../kernel/net/net_util.c \
            ../../kernel/net/dns.c \
            ../../kernel/lib/string.c ../../kernel/lib/printf.c ../../kernel/lib/bitmap.c \

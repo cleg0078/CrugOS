@@ -60,7 +60,8 @@ window a toggle whose body press installs while the package is absent and
 removes while it is present and grows `pkg.test=1` into install, update and
 removal checks, and phase 8A adds `gpu.enable=<0|1>`, `gpu.size=WxH` and
 `gpu.test=1` for the virtio-gpu driver, parsed by `gpu_cmdline()` right after
-the heap and before the desktop, and phase H2 adds
+the heap and before the desktop; phase 8B gives the same driver the display's
+EDID (no new token) with `gpu.size=` still ahead of it, and phase H2 adds
 `heap.stress=<1..200000>` and `heap.guard=1`,
 parsed by `heap_cmdline()` right after `heap_init()`, and phase H3 adds
 `trap.test=<recipe>` (`de`, `ud`, `gp`, `pf`, `df`, `nmi`, `mc`, `db`) for the
@@ -166,14 +167,25 @@ post-snapshot allocations cannot push it over capacity.
    `gpu.size=<WxH>` and `gpu.test=<0|1>`: a boot without a modern
    virtio-gpu-pci function, or with `gpu.enable=0`, prints one reason line (or
    nothing at all when the PCI bus is empty), keeps the firmware framebuffer and
-   carries on; with a device it prints `CRUGOS: virtio-gpu ready (1280x800, 1000
+   carries on; with a device it fetches the EDID (`GET_EDID`, right after
+   `GET_DISPLAY_INFO`), picks the mode from `gpu.size=`, the EDID preferred
+   timing, the host display info or the built-in list, and prints
+   `CRUGOS: gpu edid 1280x800 (vendor RHT, product 0x1234, 1 mode(s))` and
+   `CRUGOS: gpu mode 1280x800 (edid preferred)` (the gate-62 device, pinned to
+   1152x864, prints the same pair with that timing); it then sets up the hardware
+   cursor queue, printing `CRUGOS: gpu cursor ready (64x64, resource 2,
+   hardware plane)`, and only then `CRUGOS: virtio-gpu ready (1280x800, 1000
    backing page(s), resource 1, modern pci)` and
-   `CRUGOS: gpu scanout ok (1280x800, 1 transfer(s), 1 flush(es))`, and the
-   framebuffer then lives in the GPU resource. `gpu_selftest()` runs right after
+   `CRUGOS: gpu scanout ok (1280x800, 1 transfer(s), 1 flush(es))`; the
+   framebuffer then lives in the GPU resource. A device without a cursor plane
+   prints `CRUGOS: gpu cursor queue unavailable (no cursor plane)` and keeps
+   the software sprite. `gpu_selftest()` runs right after
    `wb_init`: with `gpu.test=1` and no device it prints
    `CRUGOS: gpu selftest skipped (software framebuffer)` instead of staying
    silent, and on a device it prints `CRUGOS: gpu selftest start` and
-   `CRUGOS: gpu selftest ok (1280x800, 13 transfer(s), 13 flush(es))`.
+   `CRUGOS: gpu selftest ok (1280x800, 13 transfer(s), 13 flush(es))`, followed
+   by `gpu cursor show`/`gpu cursor move` lines and
+   `CRUGOS: gpu cursor selftest ok (2 show(s), 1 move(s))`.
    `wb_cmdline` then reads
    `wb.enable=`, `wb.wait=<seconds>`, `wb.drag=<n>`, `wb.menu=<0|1>`,
    `wb.acts=<n>`, `wb.hold=<seconds>`, `wb.keys=<0|1>`, `wb.desk=<0|1>`,
@@ -357,7 +369,7 @@ post-snapshot allocations cannot push it over capacity.
     capability check exits 35 before the report.
 14. The user self-test of step 13, when it ran, has already joined its threads;
     then `report_boot`, `storage_lock` (wipes the passphrase, the volume keys
-    and the bounce buffer), `CRUGOS: phase 8a boot ok`, then
+    and the bounce buffer), `CRUGOS: phase 8b boot ok`, then
     `wb_hold` (only when
     `wb.hold=` was given: the guest stays alive with the desktop on screen until
     the deadline), `trap_test_run()` (only when `trap.test=` was given, so the
@@ -521,6 +533,9 @@ CRUGOS: vm ready
 CRUGOS: cpu ready
 CRUGOS: timer ready
 CRUGOS: heap ready
+CRUGOS: gpu edid 1280x800 (vendor ..., product ..., N mode(s))  # only with an EDID
+CRUGOS: gpu mode 1280x800 (display info)  # source: edid preferred, gpu.size, display info or fallback
+CRUGOS: gpu cursor ready (64x64, resource 2, hardware plane)  # or: cursor queue unavailable
 CRUGOS: virtio-gpu ready (1280x800, 1000 backing page(s), resource 1, modern pci)  # only with a modern virtio-gpu-pci device
 CRUGOS: gpu scanout ok (1280x800, 1 transfer(s), 1 flush(es))
 CRUGOS: input ready (serial + keyboard)   # or: (serial only)
@@ -640,7 +655,7 @@ CRUGOS: wb window 1 sent to front
 CRUGOS: wb action 6 front window 1
 CRUGOS: wb icons selftest ok (1 move(s), 1 front(s))
 CRUGOS: sh run 'ver'
-CRUGOS: sh out CrugOS 0.46.0 (phase 8a), x86_64
+CRUGOS: sh out CrugOS 0.47.0 (phase 8b), x86_64
 CRUGOS: wb selftest ok (1 drag(s), 1 action(s))
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb drawer selftest ok (3 scroll(s), 1 refresh(es))
@@ -699,11 +714,11 @@ CRUGOS: sh exit 7
 CRUGOS: user shell finished (exit 7)
 CRUGOS: user selftest ok (3 program(s), 1 fault(s))
 boot   : pmm=28575 us cpu=414 us vm=617 us traps=317 us timer=65299 us heap=494 us storage=95001 us sched=5614 us syscall=90 us total=196426 us
-CRUGOS: phase 8a boot ok
+CRUGOS: phase 8b boot ok
 ```
 
 With `trap.test=<recipe>` the same boot ends differently: the injector runs after
-`CRUGOS: phase 8a boot ok`, injects exactly one fault and the guest exits 35
+`CRUGOS: phase 8b boot ok`, injects exactly one fault and the guest exits 35
 instead of 33. A `trap.test=de` boot ends:
 
 ```
@@ -776,7 +791,7 @@ CRUGOS: sh exit 7
 CRUGOS: user shell finished (exit 7)
 CRUGOS: user selftest ok (3 program(s), 1 fault(s))
 boot   : pmm=28575 us cpu=414 us vm=617 us traps=317 us timer=65299 us heap=494 us storage=95001 us sched=5614 us syscall=90 us total=196426 us
-CRUGOS: phase 8a boot ok
+CRUGOS: phase 8b boot ok
 ```
 
 A `user.test=7` boot, the second leg of `make test-app-bundles`, adds the app
@@ -1080,6 +1095,24 @@ the working path. The gate hot-plugs a `usb-mouse` over QMP and requires
 `--expect-gpu=yes` boot-check and the same disk check as gate 60. See
 [gpu.md](gpu.md).
 
+`make test-gpu-edid` (gate 62) pins the device to 1152x864
+(`GPU_EDID_DEVICE ?= virtio-gpu-pci,id=gpu0,xres=1152,yres=864`, wrapped by
+`GPU_EDID_QEMU_EXTRA ?= -vga none -device $(GPU_EDID_DEVICE)`), a timing that
+neither the 1024x768 fallback nor QEMU's 1280x800 default produces, so the
+scanout can only come from the decoded EDID. The runner's `--expect-edid` leg
+requires the `gpu edid` line, the `(edid preferred)` mode line whose size equals
+the EDID timing, at least one timing in the count and a screendump of that
+size, then `boot-check.py --expect-gpu=yes --expect-gpu-edid=yes` and the same
+disk check.
+
+`make test-gpu-cursor` (gate 63) runs the default device from
+`GPU_QEMU_EXTRA`; QEMU manufactures a 1280x800 EDID under `-display none`. A
+screendump never contains the cursor plane, so the gate takes the serial
+counters `gpu cursor show`, `gpu cursor move` and
+`CRUGOS: gpu cursor selftest ok (2 show(s), 1 move(s))` as its evidence, with
+`boot-check.py --expect-gpu=yes --expect-gpu-cursor=yes`. See [gpu.md](gpu.md)
+for both.
+
 The `audio` lines appear only on machines with a USB audio function: a default
 `q35` boot prints `CRUGOS: audio device absent`, while `make test-audio` adds
 `-device usb-audio` behind `qemu-xhci` on an `-audiodev none` backend, so the log
@@ -1113,14 +1146,14 @@ replaced by the skip marker, and the USB device the firmware booted from shows
 up in the USB lines as an unsupported mass-storage function:
 
 ```
-CRUGOS: version 0.46.0
+CRUGOS: version 0.47.0
 CRUGOS: usb controller ready (xhci, 8 port(s))
 CRUGOS: usb device 46f4:0001 on port 1 (speed 4)
 CRUGOS: usb device class 8 on port 1 (unsupported)
 CRUGOS: storage skipped (storage=none)
 CRUGOS: heap check ok (6 slab(s), 8 object(s), 1 large block(s))
 CRUGOS: selftest ok
-CRUGOS: phase 8a boot ok
+CRUGOS: phase 8b boot ok
 ```
 
 `kernel/core/report.c` prints the machine description between them: kernel
