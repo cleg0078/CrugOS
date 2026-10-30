@@ -46,6 +46,17 @@ EDID_RE = re.compile(
 MODE_EDID_RE = re.compile(r"CRUGOS: gpu mode (\d+)x(\d+) \(edid preferred\)")
 CURSOR_OK_RE = re.compile(
     r"CRUGOS: gpu cursor selftest ok \((\d+) show\(s\), (\d+) move\(s\)\)")
+# gpu.cursor=sw bakes the 12x19 software sprite into the scanout resource, so
+# the pointer is part of the framebuffer pixels the screendump carries.
+SPRITE_MARK = b"CRUGOS: gpu cursor software sprite (gpu.cursor=sw)"
+SPRITE_BODY = (255, 208, 64)  # FB_CURSOR_BODY_RGB 0x00FFD040 in fb.c
+SPRITE_W = 12
+SPRITE_H = 19
+SPRITE_MIN_PX = 40  # the real arrow body covers 71 pixels
+GFX_READY_RE = re.compile(
+    r"CRUGOS: gfx ready \(\d+x\d+, cursor at (\d+),(\d+)\)")
+GFX_CURSOR_RE = re.compile(r"CRUGOS: gfx cursor at \((\d+), (\d+)\)")
+WB_CURSOR_RE = re.compile(r"CRUGOS: wb cursor at \((\d+), (-?\d+)\)")
 GPU_OK_RE = re.compile(
     r"CRUGOS: gpu selftest ok \((\d+)x(\d+), (\d+) transfer\(s\), (\d+) flush\(es\)\)")
 
@@ -207,6 +218,31 @@ def count_color(shot, colour):
                if pixels[off:off + 3] == want)
 
 
+def last_pointer(text):
+    """Return the last pointer position the guest printed, or None."""
+    best = None
+    for rx in (GFX_READY_RE, GFX_CURSOR_RE, WB_CURSOR_RE):
+        for match in rx.finditer(text):
+            if best is None or match.start() > best[0]:
+                best = (match.start(), int(match.group(1)), int(match.group(2)))
+    if best is None:
+        return None
+    return best[1], best[2]
+
+
+def count_in_box(shot, x, y, w, h, colour):
+    width, height, pixels = read_ppm(shot)
+    want = bytes(colour)
+    found = 0
+    for yy in range(max(0, y), min(height, y + h)):
+        row = yy * width
+        for xx in range(max(0, x), min(width, x + w)):
+            off = (row + xx) * 3
+            if pixels[off:off + 3] == want:
+                found += 1
+    return found
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--make", default="make")
@@ -224,6 +260,8 @@ def main():
                     help="require the display mode to come from the device EDID")
     ap.add_argument("--expect-cursor", action="store_true",
                     help="require the hardware cursor plane instead of the sprite")
+    ap.add_argument("--expect-sprite", action="store_true",
+                    help="require the software sprite baked into the scanout")
     ap.add_argument("--usb", action="store_true",
                     help="also hotplug a USB mouse with a 64-bit BAR")
     ap.add_argument("--moves", type=int, default=2)
@@ -256,6 +294,12 @@ def main():
     # even when it would skip. wb.wait= gives the driver a window to take the
     # screendump while the desktop is complete and the guest is still alive.
     cmdline = "wb.enable=1 wb.wait=%d gpu.enable=1 gpu.test=1" % args.wb_wait
+    # The hardware cursor plane is opt-in: QEMU's GTK window hides a guest
+    # cursor image while the pointer is grabbed, so the sprite is the default.
+    if args.expect_cursor:
+        cmdline += " gpu.cursor=hw"
+    if args.expect_sprite:
+        cmdline += " gpu.cursor=sw"
     if args.usb:
         # usb.mouse= opens the kernel poll window that catches a hotplug
         # (usb_selftest loops usb_poll until the device and its reports
@@ -345,6 +389,13 @@ def main():
                             % (shows, cursor_moves))
             print("gpu: cursor plane %d show(s), %d move(s)"
                   % (shows, cursor_moves))
+        if args.expect_sprite:
+            if not wait_for(serial_log, SPRITE_MARK, 1, proc,
+                            args.boot_timeout):
+                return fail("the guest never selected the software cursor sprite")
+            if CURSOR_READY in read_log(serial_log):
+                return fail("the hardware cursor plane was installed as well")
+            print("gpu: software cursor sprite selected")
 
         qmp = Qmp(sock_path)
         if args.usb:
@@ -380,6 +431,19 @@ def main():
         if width != want_w or height != want_h:
             return fail("scanout is %dx%d but the resource is %dx%d"
                         % (width, height, want_w, want_h))
+
+        if args.expect_sprite:
+            point = last_pointer(read_log(serial_log).decode("utf-8", "replace"))
+            if point is None:
+                return fail("the guest never reported a pointer position")
+            body_px = count_in_box(shot, point[0], point[1], SPRITE_W,
+                                   SPRITE_H, SPRITE_BODY)
+            print("gpu: sprite at (%d, %d) carries %d body px"
+                  % (point[0], point[1], body_px))
+            if body_px < SPRITE_MIN_PX:
+                return fail("the software sprite is not in the scanout at "
+                            "(%d, %d): %d body pixel(s)"
+                            % (point[0], point[1], body_px))
 
         # Window geometry comes from workbench.c: the Workbench window opens at
         # (80, 90) and the Shell at (480, 300); the Shell is created second and
@@ -451,6 +515,8 @@ def main():
         extra += ", mode from the EDID"
     if args.expect_cursor:
         extra += ", hardware cursor"
+    if args.expect_sprite:
+        extra += ", software cursor sprite"
     print("ok: virtio-gpu scanout %dx%d%s (%d transfer(s), %d flush(es), exit %d)"
           % (want_w, want_h, extra, transfers, flushes, status))
     return 0

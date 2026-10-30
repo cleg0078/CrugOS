@@ -172,6 +172,11 @@ static int g_gpu_enable = 1;
 static u32 g_gpu_want_w;
 static u32 g_gpu_want_h;
 static int g_gpu_test;
+/* Phase 8B follow-up: gpu.cursor=hw selects the device cursor plane.
+   The default is the software sprite, because the QEMU GTK window hides a
+   guest cursor image while the pointer is grabbed (gd_update_cursor() in
+   ui/gtk.c installs a 1x1 null cursor) and the guest would draw nothing. */
+static int g_gpu_cursor_hw;
 static const char *g_gpu_mode_src = "fallback";
 
 static int gpu_is_space(char c)
@@ -285,6 +290,14 @@ static void gpu_cmdline_token(const char *tok, u32 len)
         gpu_parse_size(tok + 9, len - 9u);
     } else if (gpu_prefix(tok, len, "gpu.test=")) {
         g_gpu_test = gpu_parse_u32(tok + 9, len - 9u, 1u) ? 1 : 0;
+    } else if (gpu_prefix(tok, len, "gpu.cursor=")) {
+        int mode = gpu_cursor_mode_parse(tok + 11, len - 11u);
+
+        if (mode < 0) {
+            kprintf("CRUGOS: gpu cursor mode ignored (use gpu.cursor=sw|hw)\n");
+        } else {
+            g_gpu_cursor_hw = mode;
+        }
     }
 }
 
@@ -1023,7 +1036,7 @@ int gpu_init(void)
         kprintf("CRUGOS: virtio-gpu ignored (no control queue)\n");
         return 0;
     }
-    if (gpu_cursor_queue_init(g) != 0) {
+    if (g_gpu_cursor_hw && gpu_cursor_queue_init(g) != 0) {
         kprintf("CRUGOS: gpu cursor queue unavailable (no cursor plane)\n");
     }
     gpu_status_write(g, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER |
@@ -1089,8 +1102,12 @@ int gpu_init(void)
     g->enabled = 1;
     kprintf("CRUGOS: gpu mode %ux%u (%s)\n", (unsigned)width,
             (unsigned)height, g_gpu_mode_src);
-    if (gpu_cursor_init(g) != 0) {
-        kprintf("CRUGOS: gpu cursor unavailable (hardware plane)\n");
+    if (g_gpu_cursor_hw) {
+        if (gpu_cursor_init(g) != 0) {
+            kprintf("CRUGOS: gpu cursor unavailable (hardware plane)\n");
+        }
+    } else {
+        kprintf("CRUGOS: gpu cursor software sprite (gpu.cursor=sw)\n");
     }
     kprintf("CRUGOS: virtio-gpu ready (%ux%u, %llu backing page(s), resource %u, modern pci)\n",
             (unsigned)width, (unsigned)height,

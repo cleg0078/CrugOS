@@ -43,6 +43,24 @@ u32 gpu_cmd_init(u8 *buf, u32 cap, u32 type)
     return GPU_HDR_SIZE;
 }
 
+/* gpu.cursor= policy: 1 = the device cursor plane, 0 = the software sprite
+   baked into the scanout, -1 = an unknown value. A window that hides a
+   guest-supplied cursor image (QEMU's GTK UI while the pointer is grabbed)
+   needs the sprite, so the sprite is the default and the plane is opt-in. */
+int gpu_cursor_mode_parse(const char *text, u32 len)
+{
+    if (!text) {
+        return -1;
+    }
+    if (len == 2u && text[0] == 'h' && text[1] == 'w') {
+        return 1;
+    }
+    if (len == 2u && text[0] == 's' && text[1] == 'w') {
+        return 0;
+    }
+    return -1;
+}
+
 /* 1 = OK_NODATA, 2 = OK_DISPLAY_INFO, -1 = protocol error, 0 = unknown. */
 int gpu_resp_class(u32 type)
 {

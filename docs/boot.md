@@ -164,7 +164,8 @@ post-snapshot allocations cannot push it over capacity.
    `CRUGOS: gfx framebuffer absent` or
    `CRUGOS: gfx ready (1024x768, cursor at 512,384)`. `gpu_init` runs right after
    the heap and before `input_init`, fed by `gpu_cmdline`'s `gpu.enable=<0|1>`,
-   `gpu.size=<WxH>` and `gpu.test=<0|1>`: a boot without a modern
+   `gpu.size=<WxH>`, `gpu.cursor=<sw|hw>` and `gpu.test=<0|1>`: a boot without a
+   modern
    virtio-gpu-pci function, or with `gpu.enable=0`, prints one reason line (or
    nothing at all when the PCI bus is empty), keeps the firmware framebuffer and
    carries on; with a device it fetches the EDID (`GET_EDID`, right after
@@ -172,20 +173,27 @@ post-snapshot allocations cannot push it over capacity.
    timing, the host display info or the built-in list, and prints
    `CRUGOS: gpu edid 1280x800 (vendor RHT, product 0x1234, 1 mode(s))` and
    `CRUGOS: gpu mode 1280x800 (edid preferred)` (the gate-62 device, pinned to
-   1152x864, prints the same pair with that timing); it then sets up the hardware
-   cursor queue, printing `CRUGOS: gpu cursor ready (64x64, resource 2,
-   hardware plane)`, and only then `CRUGOS: virtio-gpu ready (1280x800, 1000
-   backing page(s), resource 1, modern pci)` and
+   1152x864, prints the same pair with that timing); the pointer then follows
+   `gpu.cursor=`. The default `sw` paints the guest's own 12x19 sprite into the
+   framebuffer and prints `CRUGOS: gpu cursor software sprite (gpu.cursor=sw)`;
+   `hw` sets up the hardware cursor queue and prints
+   `CRUGOS: gpu cursor ready (64x64, resource 2, hardware plane)`, or
+   `CRUGOS: gpu cursor unavailable (hardware plane)` when the queue or the
+   resource fails. An unparsable value prints `CRUGOS: gpu cursor mode ignored
+   (use gpu.cursor=sw|hw)` and keeps the sprite. Then the driver prints
+   `CRUGOS: virtio-gpu ready (1280x800, 1000 backing page(s), resource 1,
+   modern pci)` and
    `CRUGOS: gpu scanout ok (1280x800, 1 transfer(s), 1 flush(es))`; the
-   framebuffer then lives in the GPU resource. A device without a cursor plane
-   prints `CRUGOS: gpu cursor queue unavailable (no cursor plane)` and keeps
-   the software sprite. `gpu_selftest()` runs right after
+   framebuffer then lives in the GPU resource. In `gpu.cursor=hw` a device without
+   a cursor plane prints `CRUGOS: gpu cursor queue unavailable (no cursor
+   plane)` and keeps the software sprite. `gpu_selftest()` runs right after
    `wb_init`: with `gpu.test=1` and no device it prints
    `CRUGOS: gpu selftest skipped (software framebuffer)` instead of staying
    silent, and on a device it prints `CRUGOS: gpu selftest start` and
-   `CRUGOS: gpu selftest ok (1280x800, 13 transfer(s), 13 flush(es))`, followed
-   by `gpu cursor show`/`gpu cursor move` lines and
-   `CRUGOS: gpu cursor selftest ok (2 show(s), 1 move(s))`.
+   `CRUGOS: gpu selftest ok (1280x800, 13 transfer(s), 13 flush(es))`; in
+   `gpu.cursor=hw` that is followed by `gpu cursor show`/`gpu cursor move`
+   lines and `CRUGOS: gpu cursor selftest ok (2 show(s), 1 move(s))`, while
+   sprite mode has no cursor lines to add.
    `wb_cmdline` then reads
    `wb.enable=`, `wb.wait=<seconds>`, `wb.drag=<n>`, `wb.menu=<0|1>`,
    `wb.acts=<n>`, `wb.hold=<seconds>`, `wb.keys=<0|1>`, `wb.desk=<0|1>`,
@@ -535,7 +543,7 @@ CRUGOS: timer ready
 CRUGOS: heap ready
 CRUGOS: gpu edid 1280x800 (vendor ..., product ..., N mode(s))  # only with an EDID
 CRUGOS: gpu mode 1280x800 (display info)  # source: edid preferred, gpu.size, display info or fallback
-CRUGOS: gpu cursor ready (64x64, resource 2, hardware plane)  # or: cursor queue unavailable
+CRUGOS: gpu cursor software sprite (gpu.cursor=sw)  # or: gpu cursor ready (hw)
 CRUGOS: virtio-gpu ready (1280x800, 1000 backing page(s), resource 1, modern pci)  # only with a modern virtio-gpu-pci device
 CRUGOS: gpu scanout ok (1280x800, 1 transfer(s), 1 flush(es))
 CRUGOS: input ready (serial + keyboard)   # or: (serial only)
@@ -655,7 +663,7 @@ CRUGOS: wb window 1 sent to front
 CRUGOS: wb action 6 front window 1
 CRUGOS: wb icons selftest ok (1 move(s), 1 front(s))
 CRUGOS: sh run 'ver'
-CRUGOS: sh out CrugOS 0.47.0 (phase 8b), x86_64
+CRUGOS: sh out CrugOS 0.47.1 (phase 8b), x86_64
 CRUGOS: wb selftest ok (1 drag(s), 1 action(s))
 CRUGOS: wb desk selftest ok (1 drawer(s))
 CRUGOS: wb drawer selftest ok (3 scroll(s), 1 refresh(es))
@@ -1106,8 +1114,9 @@ size, then `boot-check.py --expect-gpu=yes --expect-gpu-edid=yes` and the same
 disk check.
 
 `make test-gpu-cursor` (gate 63) runs the default device from
-`GPU_QEMU_EXTRA`; QEMU manufactures a 1280x800 EDID under `-display none`. A
-screendump never contains the cursor plane, so the gate takes the serial
+`GPU_QEMU_EXTRA` with `gpu.cursor=hw` appended, because the guest sprite is the
+default; QEMU manufactures a 1280x800 EDID under `-display none`. A screendump
+never contains the cursor plane, so the gate takes the serial
 counters `gpu cursor show`, `gpu cursor move` and
 `CRUGOS: gpu cursor selftest ok (2 show(s), 1 move(s))` as its evidence, with
 `boot-check.py --expect-gpu=yes --expect-gpu-cursor=yes`. See [gpu.md](gpu.md)
@@ -1124,9 +1133,22 @@ arrives and the script fails with a cursor-shape timeout, which is how the
 48-byte/40-byte wire-layout bug was caught; `GPU_SHAPE_WB_WAIT` (30),
 `GPU_SHAPE_BOOT_TIMEOUT_SEC` (180), `GPU_SHAPE_TIMEOUT_SEC` (240) and
 `GPU_SHAPE_RUN_TIMEOUT_SEC` (300) bound it, and `--cmdline=` swaps the gate's
-`wb.enable=1 wb.wait=30 gpu.enable=1 gpu.test=1` line (the demo command line
-returns the same 64x64 shape). Then `boot-check.py --expect-gpu=yes
---expect-gpu-cursor=yes` and the disk check. See [gpu.md](gpu.md).
+`wb.enable=1 wb.wait=30 gpu.enable=1 gpu.test=1 gpu.cursor=hw` line (the demo
+command line with `DEMO_CURSOR=hw` returns the same 64x64 shape). Then
+`boot-check.py --expect-gpu=yes --expect-gpu-cursor=yes` and the disk check.
+See [gpu.md](gpu.md).
+
+`make test-gpu-cursor-sw` (gate 65) is the pixel proof for the default
+`gpu.cursor=sw` pointer: it boots the default device with `wb.enable=1
+wb.wait=N gpu.enable=1 gpu.test=1 gpu.cursor=sw` and runs
+`scripts/run-gpu.py --expect-sprite`, which waits for `CRUGOS: gpu cursor
+software sprite (gpu.cursor=sw)`, fails if `CRUGOS: gpu cursor ready` appears,
+reads the last pointer position from the serial log and counts the
+`(255, 208, 64)` body pixels inside the 12x19 sprite box, demanding at least 40
+(measured: `gpu: sprite at (640, 400) carries 71 body px`), and prints
+`ok: virtio-gpu scanout 1280x800, software cursor sprite (15 transfer(s), 15
+flush(es), exit 33)`, then `boot-check.py --expect-gpu=yes` and the disk check.
+See [gpu.md](gpu.md).
 
 The `audio` lines appear only on machines with a USB audio function: a default
 `q35` boot prints `CRUGOS: audio device absent`, while `make test-audio` adds
@@ -1161,7 +1183,7 @@ replaced by the skip marker, and the USB device the firmware booted from shows
 up in the USB lines as an unsupported mass-storage function:
 
 ```
-CRUGOS: version 0.47.0
+CRUGOS: version 0.47.1
 CRUGOS: usb controller ready (xhci, 8 port(s))
 CRUGOS: usb device 46f4:0001 on port 1 (speed 4)
 CRUGOS: usb device class 8 on port 1 (unsupported)

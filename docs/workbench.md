@@ -1295,7 +1295,7 @@ there is no keyboard text entry, only focus, movement and menu selection.
 `kernel/gfx/commodities.c`, `kernel/app/manifest.c`, `kernel/app/pkg.c`,
 `kernel/lib/caps.c`, `kernel/lib/perms.c`, `kernel/crypto/sha512.c`,
 `kernel/crypto/ed25519.c`, `kernel/lib/textgrid.c` and
-`kernel/shell/shell.c` and reports 8521 checks.
+`kernel/shell/shell.c` and reports 8528 checks.
 `tests/host/test_intuition.c` replaces the framebuffer primitives with counting
 stubs and the cursor accessors with a settable fake (`test_fb_fake_reset()` /
 `test_fb_cursor_set()` from `tests/host/test_gfx.c`), then checks:

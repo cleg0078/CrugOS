@@ -207,7 +207,8 @@ def main():
                     default="-vga none -device virtio-gpu-pci,id=gpu0")
     ap.add_argument("--wb-wait", type=int, default=30)
     ap.add_argument("--cmdline", default=None,
-                    help="kernel command line, default wb.enable=1 wb.wait=N gpu.enable=1 gpu.test=1")
+                    help="kernel command line, default wb.enable=1 wb.wait=N "
+                         "gpu.enable=1 gpu.test=1 gpu.cursor=hw")
     ap.add_argument("--boot-timeout", type=float, default=180.0)
     ap.add_argument("--shape-timeout", type=float, default=240.0)
     ap.add_argument("--run-timeout", type=float, default=300.0)
@@ -231,7 +232,10 @@ def main():
     if args.cmdline is not None:
         cmdline = args.cmdline
     else:
-        cmdline = "wb.enable=1 wb.wait=%d gpu.enable=1 gpu.test=1" % args.wb_wait
+        # gpu.cursor=hw is what puts the sprite on the device's cursor plane,
+        # which is the only place the alpha cursor image comes from.
+        cmdline = ("wb.enable=1 wb.wait=%d gpu.enable=1 gpu.test=1 "
+                   "gpu.cursor=hw" % args.wb_wait)
     cmd = [
         args.make,
         "--no-print-directory",

@@ -53,6 +53,7 @@
 #   make test-gpu-edid  pick the display mode from the device EDID
 #   make test-gpu-cursor  move the pointer on the virtio-gpu cursor plane
 #   make test-gpu-cursor-shape  prove the cursor plane really carries pixels over VNC
+#   make test-gpu-cursor-sw  show the software sprite inside the GPU scanout (the demo pointer)
 #   make test-pkg    install, update and remove a signed package
 #   make test-caps   launch an installed bundle and prove its capability wall
 #   make crypt-disk  build the AES-256-XTS crypt test disk
@@ -299,8 +300,12 @@ DEMO_TIMEOUT_SEC ?= 900
 DEMO_FILL_FILES ?= 12
 DEMO_GPU ?= 1
 DEMO_GPU_SIZE ?= 1024x768
+# DEMO_CURSOR picks the pointer the demo draws: sw bakes the guest sprite
+# into the scanout (visible in every window manager), hw asks the device for
+# its cursor plane (a VNC viewer shows it, a GTK window hides it).
 DEMO_GPU_QEMU_EXTRA ?= -vga none -device virtio-gpu-pci,id=gpu0
-DEMO_CMDLINE ?= gpu.enable=$(DEMO_GPU) gpu.size=$(DEMO_GPU_SIZE) wb.enable=1 wb.wait=0 wb.desk=1 wb.dr=1 wb.dsel=1 wb.screens=1 wb.cx=1 wb.shell=1 wb.fill=$(DEMO_FILL_FILES) wb.hold=$(DEMO_HOLD_SEC)
+DEMO_CURSOR ?= sw
+DEMO_CMDLINE ?= gpu.enable=$(DEMO_GPU) gpu.size=$(DEMO_GPU_SIZE) gpu.cursor=$(DEMO_CURSOR) wb.enable=1 wb.wait=0 wb.desk=1 wb.dr=1 wb.dsel=1 wb.screens=1 wb.cx=1 wb.shell=1 wb.fill=$(DEMO_FILL_FILES) wb.hold=$(DEMO_HOLD_SEC)
 DEMO_MACHINE_EXTRA ?= usb=off,i8042=off
 DEMO_QEMU_EXTRA ?= $(if $(filter-out 0,$(DEMO_GPU)),$(DEMO_GPU_QEMU_EXTRA)) -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-mouse,bus=xhci.0
 
@@ -472,7 +477,8 @@ HOST_MKPKG_SOURCES := tools/mkpkg.c kernel/crypto/ed25519.c \
         test-workbench-desk test-workbench-icons test-workbench-drawer \
         test-workbench-select test-workbench-screens test-workbench-cx \
         test-workbench-pkg test-app-bundles test-gpu test-gpu-usb \
-        test-gpu-edid test-gpu-cursor test-gpu-cursor-shape test-pkg \
+        test-gpu-edid test-gpu-cursor test-gpu-cursor-shape \
+        test-gpu-cursor-sw test-pkg \
         test-caps packages mkpkg \
         iso check-iso test-iso usb \
         crash-disk \
@@ -734,6 +740,7 @@ demo: esp
 		QEMU_EXTRA="$(DEMO_QEMU_EXTRA)" \
 		CMDLINE_EXTRA="$(DEMO_CMDLINE)"
 	@echo "  NOTE  the window is the virtio-gpu 2D scanout (DEMO_GPU=0 uses the software framebuffer)"
+	@echo "  NOTE  the pointer is the guest's software sprite (DEMO_CURSOR=hw uses the device cursor plane)"
 	@echo "  NOTE  the full Workbench is on screen; drag any title bar to move a window"
 	@echo "  NOTE  double-click the 'System:' icon to open its drawer (rows select, scrollbar drags)"
 	@echo "  NOTE  click the Workbench/Tools boxes at the top right to switch screens"
@@ -1056,6 +1063,19 @@ test-gpu-cursor: esp
 # on the console, which only a display client can see.  The guest cannot even
 # tell whether the host accepted the command, because the cursor queue is not
 # answered, so the proof is the alpha-cursor rect a VNC client receives.
+test-gpu-cursor-sw: esp
+	$(Q)rm -f $(DISK_IMG)
+	$(Q)$(MAKE) --no-print-directory disk
+	$(Q)$(PYTHON) scripts/run-gpu.py --repo $(CURDIR) \
+		--disk $(abspath $(DISK_IMG)) --serial-log $(abspath $(SERIAL_LOG)) \
+		--exit-code $(abspath $(QEMU_EXIT)) \
+		--wb-wait $(GPU_WB_WAIT) \
+		--run-timeout $(GPU_RUN_TIMEOUT_SEC) \
+		--expect-sprite \
+		--qemu-extra "$(GPU_QEMU_EXTRA)"
+	$(Q)$(PYTHON) scripts/boot-check.py $(SERIAL_LOG) $(QEMU_EXIT) VERSION $(EXPECT_AVX2) no no no no no any no no no no no no no no no no no no no no no --expect-gpu=yes
+	$(Q)$(PYTHON) scripts/check-disk.py $(DISK_IMG)
+
 test-gpu-cursor-shape: esp
 	$(Q)rm -f $(DISK_IMG)
 	$(Q)$(MAKE) --no-print-directory disk
@@ -1571,6 +1591,7 @@ options:
 	@printf '  %-16s %s\n' DEMO_GPU "$(DEMO_GPU) (1 = virtio-gpu scanout, 0 = software framebuffer)"
 	@printf '  %-16s %s\n' DEMO_GPU_SIZE "$(DEMO_GPU_SIZE) (scanout the demo asks for)"
 	@printf '  %-16s %s\n' DEMO_GPU_QEMU_EXTRA "$(DEMO_GPU_QEMU_EXTRA)"
+	@printf '  %-16s %s\n' DEMO_CURSOR "$(DEMO_CURSOR) (sw = guest sprite, hw = device cursor plane)"
 	@printf '  %-16s %s\n' DEMO_TIMEOUT_SEC "$(DEMO_TIMEOUT_SEC) (seconds)"
 	@printf '  %-16s %s\n' DEMO_CMDLINE "$(DEMO_CMDLINE)"
 	@printf '  %-16s %s\n' DEMO_MACHINE_EXTRA "$(DEMO_MACHINE_EXTRA)"

@@ -317,6 +317,19 @@ static void test_gpu_edid(void)
     CHECK_STR(vendor, "???");
 }
 
+static void test_gpu_cursor_mode(void)
+{
+    /* gpu.cursor=sw keeps the sprite in the scanout, hw asks the device for
+     * its cursor plane, and anything else is ignored by the driver. */
+    CHECK(gpu_cursor_mode_parse("hw", 2u) == 1);
+    CHECK(gpu_cursor_mode_parse("sw", 2u) == 0);
+    /* The length is explicit, so a trailing byte is never silently ignored. */
+    CHECK(gpu_cursor_mode_parse("hw ", 3u) == -1);
+    CHECK(gpu_cursor_mode_parse("s", 1u) == -1);
+    CHECK(gpu_cursor_mode_parse("HW", 2u) == -1);
+    CHECK(gpu_cursor_mode_parse("h", 0u) == -1);
+    CHECK(gpu_cursor_mode_parse(NULL, 2u) == -1);
+}
 void test_gpu_functions(void)
 {
     test_gpu_encoding();
@@ -326,4 +339,5 @@ void test_gpu_functions(void)
     test_gpu_display_pick();
     test_gpu_damage();
     test_gpu_edid();
+    test_gpu_cursor_mode();
 }

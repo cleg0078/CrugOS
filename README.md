@@ -8,7 +8,7 @@ Workbench shell and applications that are self-contained bundles.
 The design contract lives in
 [specs/CrugOS_complete_kernel_spec_v3.md](specs/CrugOS_complete_kernel_spec_v3.md).
 
-## Status: phase 8B EDID and the hardware cursor (`v0.47.0`)
+## Status: phase 8B EDID and the hardware cursor (`v0.47.1`)
 
 Phases 1-3B-10 keep the boot path under a kernel that owns memory, CPU state,
 the execution model, a checksummed crash-consistent filesystem, mirrored/
@@ -97,11 +97,13 @@ presents the desktop as damage rectangles, while the firmware framebuffer
 remains the fallback; `make test-gpu` is gate 60 and `make test-gpu-usb` is
 gate 61, which repeats the scanout with a hotplugged USB mouse above 4 GiB.
 Phase 8B parses the display's EDID and prefers the monitor's own timing when
-`gpu.size=` is absent, and moves the pointer onto the device's hardware cursor
-plane; `make test-gpu-edid` is gate 62, `make test-gpu-cursor` is gate 63 and
+`gpu.size=` is absent, and puts the pointer on a device cursor plane
+(`gpu.cursor=hw`); `make test-gpu-edid` is gate 62, `make test-gpu-cursor` is gate 63 and
 `make test-gpu-cursor-shape` is gate 64, which reads the sprite's pixels over
 VNC after the first cut of the cursor commands turned out to be mislaid on the
-wire.
+wire. The default since `v0.47.1` is `gpu.cursor=sw`, the guest's own sprite
+painted into the scanout, which gate 65 (`make test-gpu-cursor-sw`) proves is
+real scanout content.
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -1620,8 +1622,9 @@ picks the mode in the order `gpu.size=`, the EDID preferred timing, the host
 display info and the built-in 1024x768/800x600/640x480 list, printing
 `CRUGOS: gpu edid WxH (vendor ..., product ..., N mode(s))` and
 `CRUGOS: gpu mode WxH (<source>)`;
-- the pointer moves to the device's hardware cursor plane: queue 1 carries its
-own 64x64 resource 2, and `UPDATE_CURSOR`/`MOVE_CURSOR` are 56-byte commands
+- `gpu.cursor=hw` moves the pointer to the device's hardware cursor plane:
+queue 1 carries its own 64x64 resource 2, and `UPDATE_CURSOR`/`MOVE_CURSOR`
+are 56-byte commands
 whose `virtio_gpu_cursor_pos` comes first (`scanout_id` at 24, x at 28, y at
 32, padding at 36, then the resource id at 40 and hotspot 0,0); each travels
 as one non-write descriptor plus a single 16-bit notify and the driver only
@@ -1644,7 +1647,8 @@ come from the decoded EDID (`--expect-edid`, `--expect-gpu-edid=yes`);
 - `make test-gpu-cursor` is gate 63 and keeps the serial show and move
 counters as a cheap smoke test, because a screendump of `gpu0` never contains
 the cursor plane (`--expect-cursor`, `--expect-gpu-cursor=yes`); on its own
-that proved nothing while the wire layout was wrong;
+that proved nothing while the wire layout was wrong; it now appends
+`gpu.cursor=hw` because the sprite is the default;
 - `make test-gpu-cursor-shape` is gate 64: it boots `make run` under
 `QEMU_DISPLAY=vnc=...` so `scripts/run-gpu-cursor-shape.py` can speak RFB 3.8,
 request `VNC_ALPHA_CURSOR` updates and require a 64x64 rect with at least 100
@@ -1653,14 +1657,31 @@ opaque pixels carrying both the white border (`0xFFFFFF`) and the amber body
 `--expect-gpu-cursor=yes` and the disk check; no rect means a cursor-shape
 timeout, so a dropped `UPDATE_CURSOR` fails the gate, and the same probe on
 the demo command line returned the shape, which is the proof that the `make
-demo` pointer is back;
+demo` pointer is back; it also appends `gpu.cursor=hw`;
+- the `make demo` pointer then turned out to be hidden by the surface, not the
+plane: QEMU's GTK UI (`gd_update_cursor`) clears the window cursor whenever the
+pointer is grabbed or absolute and expects the guest to paint it, while a GTK
+window never composites the virtio-gpu cursor plane, and `fb_cursor_composite`
+had returned early as soon as `fb_set_cursor_ops()` installed a cursor op set;
+the new token `gpu.cursor=sw|hw` defaults to `sw`, which composites the guest's
+own 12x19 sprite (`0xFFD040` body, `0xFFFFFF` border) into the framebuffer, and
+`hw` restores the plane, with `gpu_cursor_mode_parse()` in
+`kernel/gpu/gpu_util.c` recognising exactly `sw` and `hw` and any other value
+printing `CRUGOS: gpu cursor mode ignored (use gpu.cursor=sw|hw)`;
+- `make test-gpu-cursor-sw` is gate 65 and the pixel proof for that default:
+`scripts/run-gpu.py --expect-sprite` waits for `CRUGOS: gpu cursor software
+sprite (gpu.cursor=sw)`, fails if the hardware ready line appears, reads the
+last pointer position from the serial log and counts the amber body pixels
+inside the 12x19 sprite box, requiring at least 40 (measured: `gpu: sprite at
+(640, 400) carries 71 body px`), because a guest counter cannot see a surface
+problem;
 - `tests/host/test_gpu.c` gained a synthetic 128-byte EDID (vendor `RHT`,
 product `0x1234`, 1024x768@60 and 800x600@60) plus rejection cases for a bad
 checksum, a bad header, 127-byte input, no detailed timing and null pointers,
-a four-timing cap and the unknown-vendor path, so `make test-host` reports
-8521 checks; `make size` reports a 352440 B (344 KiB) kernel file and a
-1002570 B (979 KiB) load image (`.text` 251430 B, `.rodata` 38336 B, `.data`
-100 B, `.bss` 712704 B), and all 64 gates pass;
+a four-timing cap, the unknown-vendor path and `test_gpu_cursor_mode` (7
+checks), so `make test-host` reports 8528 checks; `make size` reports a 352528 B
+(344 KiB) kernel file and a 1002890 B (979 KiB) load image (`.text` 251622 B,
+`.rodata` 38464 B, `.data` 100 B, `.bss` 712704 B), and all 65 gates pass;
 - 3D is still deferred: this host has no `/dev/dri` render node, so QEMU
 refuses virgl (`The display backend does not have OpenGL support enabled`,
 `egl: no drm render node available`) and blob resources stay off; the 3D half
@@ -1677,9 +1698,9 @@ automated testing.
 Verified in this tree:
 
 ```
-CrugOS 0.47.0 (phase 8b) -- Amiga-inspired microkernel bring-up
+CrugOS 0.47.1 (phase 8b) -- Amiga-inspired microkernel bring-up
 CRUGOS: hello
-CRUGOS: version 0.47.0
+CRUGOS: version 0.47.1
 pmm    : 118520 pages (462 MiB), free 118519, bitmap 131072 B
 CRUGOS: pmm ready
 cpu    : AuthenticAMD family 15 model 107 stepping 1 nx=yes apic=yes avx2=yes required=yes
@@ -1881,7 +1902,10 @@ starts with `CRUGOS: virtio-gpu ready (1024x768, 768 backing page(s), resource
 flush(es))`. With the device present OVMF places the xHCI BAR above 4 GiB, so
 the demo's keyboard and mouse only work because of the 64-bit BAR fix: the old
 decode logged `CRUGOS: usb controller absent (reset timeout)` and left both dead.
-Set `DEMO_GPU=0` to drop the device and the `gpu.enable=`/`gpu.size=`
+The pointer is the guest's own sprite because `DEMO_CURSOR=sw` is the default
+(`gpu.cursor=sw`), so it is ordinary scanout content that a GTK window, a VNC
+viewer and a `screendump` all show; `make demo DEMO_CURSOR=hw` hands it back to
+the device cursor plane instead. Set `DEMO_GPU=0` to drop the device and the `gpu.enable=`/`gpu.size=`
 tokens and boot the firmware framebuffer. The default `DEMO_CMDLINE` switches
 every desktop feature on at once --
 `wb.desk=1` for the `System:` object, `wb.dr=1 wb.dsel=1` for its drawer (filled
@@ -1974,6 +1998,7 @@ make test-gpu-usb  # scanout plus a hotplugged USB mouse above 4 GiB
 make test-gpu-edid    # take the scanout mode from the display's EDID
 make test-gpu-cursor  # drive the hardware cursor plane and count its updates
 make test-gpu-cursor-shape  # prove the hardware cursor's pixels over VNC
+make test-gpu-cursor-sw  # prove the guest's software sprite is in the scanout
 make test-hardening  # craft hostile superblock/inode/crypt images and boot them
 make test-heap   # corrupt the kernel heap and prove the integrity checker catches it
 make test-trap   # inject eight crafted faults and check the report, IST and panic
@@ -2044,7 +2069,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `FORK_RUN_TIMEOUT_SEC`, `FORKBIG_RUN_TIMEOUT_SEC`, `APP_RUN_TIMEOUT_SEC`,
 `DEMO_DISPLAY`, `DEMO_HOLD_SEC`, `DEMO_FILL_FILES`,
 `DEMO_TIMEOUT_SEC`, `DEMO_CMDLINE`, `DEMO_MACHINE_EXTRA`, `DEMO_QEMU_EXTRA`,
-`DEMO_GPU`, `DEMO_GPU_SIZE`, `DEMO_GPU_QEMU_EXTRA`,
+`DEMO_CURSOR`, `DEMO_GPU`, `DEMO_GPU_SIZE`, `DEMO_GPU_QEMU_EXTRA`,
 `ISO_IMAGE`, `ISO_STAGE`, `ISO_FAT_IMG`, `ISO_SIZE_MB`, `ISO_VOLID`,
 `ISO_CMDLINE`, `ISO_DATE`, `ISO_RUN_TIMEOUT_SEC`, `EXPECT_ISO`, `ISO_IMG`,
 `USB_IMG`, `USB_STICK`, `USB_DEV`, `USB_CONFIRM`,

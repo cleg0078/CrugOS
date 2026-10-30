@@ -31,6 +31,7 @@ struct gpu_damage {
 void gpu_put32(u8 *buf, u32 off, u32 value);
 void gpu_put64(u8 *buf, u32 off, u64 value);
 u32 gpu_get32(const u8 *buf, u32 off);
+int gpu_cursor_mode_parse(const char *text, u32 len);
 u32 gpu_cmd_init(u8 *buf, u32 cap, u32 type);
 int gpu_resp_class(u32 type);
 const char *gpu_resp_name(u32 type);

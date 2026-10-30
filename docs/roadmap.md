@@ -1,6 +1,6 @@
 # Roadmap
 
-The specification defines 64 phases/gates. Phase 0 established the smallest
+The specification defines 65 phases/gates. Phase 0 established the smallest
 end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
 phase 1 makes the kernel own physical memory, page tables, exceptions and
 timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
@@ -1999,14 +1999,16 @@ reachable until then.
 - Gate 63 `make test-gpu-cursor` uses the default device from
   `GPU_QEMU_EXTRA`, where QEMU manufactures a 1280x800 EDID. A screendump of
   `gpu0` never contains the hardware cursor plane, so `run-gpu.py
-  --expect-cursor` and the serial counters are its evidence and the gate prints
+  --expect-cursor`, the serial counters and the appended `gpu.cursor=hw` are its
+  evidence and the gate prints
   `ok: virtio-gpu scanout 1280x800, hardware cursor (14 transfer(s),
   14 flush(es), exit 33)`. Those counters proved nothing on their own while
   the layout was wrong.
 - Gate 64 `make test-gpu-cursor-shape` is the pixel proof: it boots under
   `QEMU_DISPLAY=vnc=127.0.0.1:<port>` with `GPU_SHAPE_QEMU_EXTRA ?= -vga none
   -device virtio-gpu-pci,id=gpu0`, and `scripts/run-gpu-cursor-shape.py` speaks
-  RFB 3.8, requests `VNC_ALPHA_CURSOR` updates and waits for an alpha-cursor
+  RFB 3.8 with `gpu.cursor=hw` on the command line, requests `VNC_ALPHA_CURSOR`
+  updates and waits for an alpha-cursor
   rect. `check_shape` demands 64x64, at least 100 opaque pixels and both the
   white border (`0xFFFFFF`) and the amber body (`0xFFD040`):
   `gpu: cursor shape 64x64 at 0,0 (120 opaque pixel(s), 2 colour(s))` and
@@ -2022,21 +2024,42 @@ reachable until then.
   `RHT` = id 0x4914, product 0x1234, a 1024x768@60 timing at 6500x10 kHz and an
   800x600@60 timing at 4000) plus bad-checksum, bad-header, 127-byte,
   no-timing, null-pointer, four-timing-cap and unknown-vendor cases: `make
-  test-host` reports 8521 checks and `make size` a 352440 B (344 KiB) file and
-  a 1002570 B (979 KiB) load image (`.text` 251430 B, `.rodata` 38336 B,
+  test-host` reports 8528 checks and `make size` a 352528 B (344 KiB) file and
+  a 1002890 B (979 KiB) load image (`.text` 251622 B, `.rodata` 38464 B,
   `.data` 100 B, `.bss` 712704 B).
 - Limits: 3D still needs virgl, which this host cannot exercise (no `/dev/dri`
   render node, so QEMU prints `The display backend does not have OpenGL
   support enabled`); blob resources need `blob=on` and are unused; one scanout
   and one display, no multi-head (`max_outputs=2` is not gated); `gpu.size=`
-  still wins over the EDID by design; the cursor is one 64x64 sprite whose
-  pixels no screendump can assert, which is why gate 64 reads them from the VNC
-  alpha cursor instead; the software sprite remains the fallback. See
+  still wins over the EDID by design; the pointer defaults to the guest's
+  software sprite (12x19, `0xFFD040` body) because a GTK window does not
+  composite the device cursor plane, while `gpu.cursor=hw` returns to the 64x64
+  plane that only a compositing surface such as a VNC client shows. See
   [gpu.md](gpu.md).
+- Follow-up `v0.47.1` fixes the invisible demo pointer: QEMU's GTK UI
+  (`gd_update_cursor`) hides the window cursor whenever the pointer is grabbed
+  or absolute and expects the guest to paint it, and `fb_cursor_composite()`
+  had stopped painting as soon as a cursor op set was installed. The new token
+  `gpu.cursor=sw|hw` defaults to `sw`, composites the guest's 12x19 sprite into
+  the scanout and prints `CRUGOS: gpu cursor software sprite (gpu.cursor=sw)`;
+  `hw` keeps the 8B plane (`CRUGOS: gpu cursor ready (64x64, resource 2,
+  hardware plane)`), a bad value prints `CRUGOS: gpu cursor mode ignored (use
+  gpu.cursor=sw|hw)` and keeps the sprite, and `gpu_cursor_mode_parse()` in
+  `kernel/gpu/gpu_util.c` is the pure 1/0/-1 decoder. `make demo` passes
+  `gpu.cursor=$(DEMO_CURSOR)` and defaults `DEMO_CURSOR` to `sw`; gates 63 and
+  64 append `gpu.cursor=hw` explicitly.
+- Gate 65 `make test-gpu-cursor-sw` is the pixel proof for the default: it boots
+  with `gpu.cursor=sw`, waits for the sprite marker, fails if the hardware
+  ready line appears, finds the last pointer position in the serial log and
+  counts the `(255, 208, 64)` pixels inside the 12x19 sprite box, needing at
+  least 40 (`gpu: sprite at (640, 400) carries 71 body px`), then prints `ok:
+  virtio-gpu scanout 1280x800, software cursor sprite (15 transfer(s), 15
+  flush(es), exit 33)`. `make test-host` adds `test_gpu_cursor_mode` (7 checks)
+  for 8528.
 - docs: `docs/gpu.md` gains the EDID mode-selection and hardware-cursor
-  sections, the sprite-upload note and the gate 62/63/64 paragraphs, alongside
-  README, boot, build, workbench and versioning.
-- All 64 gates pass at `v0.47.0`.
+  sections, the "Which pointer the guest draws" section, the sprite-upload note
+  and the gate 62/63/64/65 paragraphs, alongside README, boot and build.
+- All 65 gates pass at `v0.47.1`.
 
 ## Bootable media - hybrid UEFI ISO (done, `v0.23.1`)
 

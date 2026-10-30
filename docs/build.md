@@ -54,6 +54,7 @@ make test-gpu-usb  # scanout plus a hotplugged USB mouse above 4 GiB
 make test-gpu-edid  # take the scanout mode from the display's EDID
 make test-gpu-cursor  # drive the hardware cursor plane and count the updates
 make test-gpu-cursor-shape  # prove the cursor sprite's pixels arrive over VNC
+make test-gpu-cursor-sw  # prove the guest's software sprite is in the scanout
 make test-hardening  # boot crafted superblock/inode/crypt images and assert the rejections
 make test-heap   # corrupt the kernel heap and prove the integrity checker catches it
 make test-trap   # inject eight crafted faults and check the report, IST and panic
@@ -90,7 +91,7 @@ make test-crypt-keyboard  # type the passphrase on the PS/2 keyboard and boot
 make test-crypt-keyboard-wrong  # three wrong keyboard passphrases must lock the volume
 make crypt-run   # boot the encrypted disk in a QEMU window for real typing
 make test-compat # boot a REQUIRE_AVX2=0 build on a non-AVX2 CPU model
-make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/USB HID keyboard and mouse descriptors and reports/pointer state/IPv4/TCP/UDP checksums/DHCP parsing/DNS/audio mixer, tone and PCM ring/framebuffer cursor/intuition windows, menus and gadgets, icon dragging, the send-to-front gadget and keyboard icon focus, the drawer viewport, scrollbar and refresh, the drawer body-input handler, the seven hardening validators, the heap integrity checker, the trap report formatter and classification policy, the user-window and uaccess validators, the ELF exec mapper, the per-space page-table tests, the argv predicates, the fork clone cases, the screen model, the commodity registry, the app manifest parser, the capability mask and permission policy, the package container and its Ed25519 signatures, the virtio-gpu command and damage helpers, the EDID parser, 8521 checks
+make test-host   # host tests: string/printf/ELF/bitmap/VM/handles/CRC32C/AES/XTS/Argon2id/BLAKE2b/crypt slots/line editor/input scancodes/USB HID keyboard and mouse descriptors and reports/pointer state/IPv4/TCP/UDP checksums/DHCP parsing/DNS/audio mixer, tone and PCM ring/framebuffer cursor/intuition windows, menus and gadgets, icon dragging, the send-to-front gadget and keyboard icon focus, the drawer viewport, scrollbar and refresh, the drawer body-input handler, the seven hardening validators, the heap integrity checker, the trap report formatter and classification policy, the user-window and uaccess validators, the ELF exec mapper, the per-space page-table tests, the argv predicates, the fork clone cases, the screen model, the commodity registry, the app manifest parser, the capability mask and permission policy, the package container and its Ed25519 signatures, the virtio-gpu command and damage helpers, the EDID parser, 8528 checks
 make user        # build the ring-3 programs and .app payloads the disk image carries
 make packages    # sign the test bundles the installer gates install
 make mkpkg       # build the host package signer (tools/mkpkg.c)
@@ -251,8 +252,9 @@ options` prints the complete resolved set (including paths derived from
 | `DEMO_TIMEOUT_SEC` | `900` | wall-clock budget for the whole `make demo` boot |
 | `DEMO_GPU` | `1` | `1` boots the demo on the virtio-gpu 2D scanout, `0` on the software framebuffer |
 | `DEMO_GPU_SIZE` | `1024x768` | scanout size the demo requests through `gpu.size=` |
+| `DEMO_CURSOR` | `sw` | pointer mode the demo passes as `gpu.cursor=`; `sw` is the guest sprite, `hw` the device cursor plane |
 | `DEMO_GPU_QEMU_EXTRA` | `-vga none -device virtio-gpu-pci,id=gpu0` | QEMU arguments that add the virtio-gpu function and remove the VGA adapter |
-| `DEMO_CMDLINE` | `gpu.enable=1 gpu.size=$(DEMO_GPU_SIZE) wb.enable=1 wb.wait=0 wb.desk=1 wb.dr=1 wb.dsel=1 wb.screens=1 wb.cx=1 wb.shell=1 wb.fill=$(DEMO_FILL_FILES) wb.hold=$(DEMO_HOLD_SEC)` | `CMDLINE_EXTRA` the demo boot passes to the kernel |
+| `DEMO_CMDLINE` | `gpu.enable=1 gpu.size=$(DEMO_GPU_SIZE) gpu.cursor=$(DEMO_CURSOR) wb.enable=1 wb.wait=0 wb.desk=1 wb.dr=1 wb.dsel=1 wb.screens=1 wb.cx=1 wb.shell=1 wb.fill=$(DEMO_FILL_FILES) wb.hold=$(DEMO_HOLD_SEC)` | `CMDLINE_EXTRA` the demo boot passes to the kernel |
 | `DEMO_MACHINE_EXTRA` | `usb=off,i8042=off` | machine properties, so the demo keyboard and mouse are the only ones |
 | `DEMO_QEMU_EXTRA` | `-vga none -device virtio-gpu-pci,id=gpu0 -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-mouse,bus=xhci.0` (the GPU part drops out when `DEMO_GPU=0`) | QEMU arguments that add the GPU and attach an xHCI with a keyboard and a mouse |
 | `ISO_IMAGE` | `build/<arch>/crugos.iso` | hybrid UEFI ISO written by `make iso` |
@@ -384,7 +386,7 @@ OVMF 4M needs a substantial amount of RAM before it will boot from QEMU's
 | 512 | reliable; used by all gates |
 
 This is a firmware limit, not a kernel limit: the kernel load image is about
-978 KiB. The specification's 16 MiB headless target needs a leaner boot path and
+979 KiB. The specification's 16 MiB headless target needs a leaner boot path and
 is tracked in [roadmap.md](roadmap.md).
 
 ## Test disk
@@ -745,8 +747,8 @@ script takes a `screendump` and checks the Exchange body (700,250) against
 `scripts/boot-check.py --expect-cx=yes` (a flag, not an extra positional, so the
 argv layout is unchanged) then requires the ready/action/selftest markers and
 `scripts/check-disk.py` runs a clean `e2fsck`. The tree's `make test-host`
-suite reports 8521 checks, and `make size` reports a 352440 B (344 KiB) file and
-a 1002570 B (979 KiB) load image.
+suite reports 8528 checks, and `make size` reports a 352528 B (344 KiB) file and
+a 1002890 B (979 KiB) load image.
 
 `make test-hardening` is gate 44 and proves the phase H1 hardening pass against
 crafted images. [scripts/run-hardening.py](../scripts/run-hardening.py) copies
@@ -792,8 +794,8 @@ file or a 124 timeout is a hang. The driver prints
 `ok: trap policy reported 8 crafted fault(s) (control boot exit 33)`;
 `run-trap.py` accepts `--keep` to leave those disks in the serial-log
 directory, and `tests/host/test_trap.c` covers the same matrix on the host, so
-`make test-host` reports 8521 checks. `make size` reports a 352440 B (344 KiB)
-file and a 1002570 B (979 KiB) load image.
+`make test-host` reports 8528 checks. `make size` reports a 352528 B (344 KiB)
+file and a 1002890 B (979 KiB) load image.
 
 `make test-fuzz` is gate 47 and proves the phase H4 host mount-path fuzzer.
 Unlike every other gate it never boots QEMU: it deletes
@@ -845,8 +847,8 @@ Every other gate runs with `EXPECT_USER=no`, and `boot-check.py` fails any of
 them that prints `user selftest ok`, so the userspace selftest cannot leak into
 an unrelated boot. `tests/host/test_uaccess.c` and `tests/host/test_exec.c`
 cover the same window, segment and entry validators and the ELF segment policy
-on the host. `make test-host` reports 8521 checks and `make size` a 352440 B
-(344 KiB) file and a 1002570 B (979 KiB) load image. The marker set, the
+on the host. `make test-host` reports 8528 checks and `make size` a 352528 B
+(344 KiB) file and a 1002890 B (979 KiB) load image. The marker set, the
 syscall boundary, the loader pipeline and the limits are documented in
 [userspace.md](userspace.md).
 
@@ -967,8 +969,8 @@ two `user cow fault ... (copy)` lines and one `... (sole owner)` line, then
 `CRUGOS: user selftest ok` line, and it must reach `CRUGOS: phase 8b boot ok`
 and exit 33 while boot-check reports
 `user yes isolated yes ushell yes spawn yes fork yes forkbig yes`. The host
-suite covers the reference table and the clone: `make test-host` reports 8521
-checks and `make size` a 352440 B (344 KiB) file and a 1002570 B (979 KiB) load
+suite covers the reference table and the clone: `make test-host` reports 8528
+checks and `make size` a 352528 B (344 KiB) file and a 1002890 B (979 KiB) load
 image. Every other gate runs with `EXPECT_FORKBIG=no`, and `boot-check.py`
 fails any boot that prints a forkbig marker. The copy-on-write bit, the
 reference table and the fault taxonomy are documented in
@@ -995,8 +997,8 @@ s): `/etc/app.rc` makes the shell print `CRUGOS: sh app count N`,
 kernel ends the level with `CRUGOS: user app ok (exit 9)` because the script
 exits 9. Both legs finish with `scripts/check-disk.py`, and the driver prints
 `ok: app bundles and tool types (exit 33)`. The tree's `make test-host` suite
-reports 8521 checks, and `make size` reports a 352440 B (344 KiB) file and a
-1002570 B (979 KiB) load image (`.text` 251430 B, `.rodata` 38336 B, `.data`
+reports 8528 checks, and `make size` reports a 352528 B (344 KiB) file and a
+1002890 B (979 KiB) load image (`.text` 251622 B, `.rodata` 38464 B, `.data`
 100 B, `.bss` 712704 B).
 
 `make test-pkg` is gate 57 and proves the signed package lifecycle. It rebuilds
@@ -1097,7 +1099,8 @@ flush(es), exit 33)`. Then `boot-check.py --expect-gpu=yes --expect-gpu-edid=yes
 and `check-disk.py` finish the gate.
 
 `make test-gpu-cursor` is gate 63: it uses the default device from
-`GPU_QEMU_EXTRA`, under which QEMU manufactures a 1280x800 EDID. A screendump
+`GPU_QEMU_EXTRA` and appends `gpu.cursor=hw` because the guest sprite is the
+default, under which QEMU manufactures a 1280x800 EDID. A screendump
 of `gpu0` never contains the hardware cursor plane, so the gate cannot check
 pixels; it takes `scripts/run-gpu.py --expect-cursor` plus the serial counters
 `CRUGOS: gpu cursor show`, `CRUGOS: gpu cursor move` and
@@ -1112,8 +1115,8 @@ same `gpu.enable`/`gpu.test` cmdline and rebuilds neither disk image.
 `make test-gpu-cursor-shape` is gate 64 and the pixel proof. It boots
 `make run` under `QEMU_DISPLAY=vnc=127.0.0.1:<port>` with
 `GPU_SHAPE_QEMU_EXTRA ?= -vga none -device virtio-gpu-pci,id=gpu0` and the
-same `wb.enable`/`gpu.enable`/`gpu.test` cmdline (`wb.wait=` comes from
-`GPU_SHAPE_WB_WAIT`), then `scripts/run-gpu-cursor-shape.py` speaks RFB 3.8 to
+same `wb.enable`/`gpu.enable`/`gpu.test`/`gpu.cursor=hw` cmdline (`wb.wait=`
+comes from `GPU_SHAPE_WB_WAIT`), then `scripts/run-gpu-cursor-shape.py` speaks RFB 3.8 to
 QEMU and asks for `VNC_ALPHA_CURSOR` updates until the cursor rect arrives.
 `check_shape` requires 64x64, at least 100 opaque pixels and both the white
 border and the amber body, and the run prints
@@ -1127,8 +1130,25 @@ then `boot-check.py --expect-gpu=yes --expect-gpu-cursor=yes` and
 `check-disk.py`. No rect means a cursor-shape timeout, which is exactly what a
 dropped `UPDATE_CURSOR` produces, and `GPU_SHAPE_BOOT_TIMEOUT_SEC` (180),
 `GPU_SHAPE_TIMEOUT_SEC` (240) and `GPU_SHAPE_RUN_TIMEOUT_SEC` (300) bound the
-boot, the VNC wait and the whole run. See [gpu.md](gpu.md). The suite is now
-64 gates.
+boot, the VNC wait and the whole run. See [gpu.md](gpu.md).
+
+`make test-gpu-cursor-sw` is gate 65, the pixel proof for the default pointer.
+It boots the default `virtio-gpu-pci` device with `wb.enable=1 wb.wait=N
+gpu.enable=1 gpu.test=1 gpu.cursor=sw` and runs `scripts/run-gpu.py
+--expect-sprite`, which waits for `CRUGOS: gpu cursor software sprite
+(gpu.cursor=sw)`, fails if the hardware ready line appears, reads the last
+pointer position from the serial log, and counts the `(255, 208, 64)` body
+pixels inside the 12x19 sprite box, requiring at least 40. It prints
+
+```
+gpu: sprite at (640, 400) carries 71 body px
+ok: virtio-gpu scanout 1280x800, software cursor sprite (15 transfer(s), 15
+flush(es), exit 33)
+```
+
+then `boot-check.py --expect-gpu=yes` and `check-disk.py`. It reuses
+`GPU_WB_WAIT`, `GPU_RUN_TIMEOUT_SEC` and `GPU_QEMU_EXTRA`, and like gates
+60-64 it rebuilds neither disk image. The suite is now 65 gates.
 
 ## Interactive demo
 
@@ -1142,7 +1162,7 @@ resource; `DEMO_GPU=0` removes both the device and the `gpu.enable=`/`gpu.size=`
 tokens (see [gpu.md](gpu.md)). `DEMO_CMDLINE` carries the whole feature set:
 
 ```
-gpu.enable=1 gpu.size=$(DEMO_GPU_SIZE)
+gpu.enable=1 gpu.size=$(DEMO_GPU_SIZE) gpu.cursor=$(DEMO_CURSOR)
 wb.enable=1 wb.wait=0 wb.desk=1 wb.dr=1 wb.dsel=1 wb.screens=1 wb.cx=1
 wb.shell=1 wb.fill=$(DEMO_FILL_FILES) wb.hold=$(DEMO_HOLD_SEC)
 ```
@@ -1153,6 +1173,11 @@ wb.shell=1 wb.fill=$(DEMO_FILL_FILES) wb.hold=$(DEMO_HOLD_SEC)
   `CRUGOS: virtio-gpu ready (1024x768, 768 backing page(s), resource 1, modern
   pci)` and `CRUGOS: gpu scanout ok (1024x768, 1 transfer(s), 1 flush(es))`,
   and every desktop repaint becomes one transfer and one flush.
+- `gpu.cursor=$(DEMO_CURSOR)` picks the pointer: the default `sw` composites
+  the guest's 12x19 sprite into the framebuffer, so the pointer is visible in
+  every window manager and screendump, and prints `CRUGOS: gpu cursor software
+  sprite (gpu.cursor=sw)`; `make demo DEMO_CURSOR=hw` uses the device cursor
+  plane instead (visible over VNC, not in a GTK window).
 - `wb.enable=1` hands the framebuffer to the desktop and opens the Workbench,
   Shell and Exchange windows.
 - `wb.desk=1` draws the `System:` object; `wb.dr=1` and `wb.dsel=1` enable its
