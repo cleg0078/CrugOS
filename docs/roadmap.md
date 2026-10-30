@@ -1,6 +1,6 @@
 # Roadmap
 
-The specification defines 60 phases/gates. Phase 0 established the smallest
+The specification defines 61 phases/gates. Phase 0 established the smallest
 end-to-end path (firmware -> loader -> kernel -> report -> deterministic exit);
 phase 1 makes the kernel own physical memory, page tables, exceptions and
 timers; phase 2 adds the execution model (heap, threads, scheduling, handles,
@@ -1907,6 +1907,18 @@ reachable until then.
   exit 33)`. `boot-check.py` gained the `--expect-gpu=yes` flag and
   `check-disk.py` finishes the gate; the knobs are `GPU_WB_WAIT` (30 s),
   `GPU_RUN_TIMEOUT_SEC` (300 s) and `GPU_QEMU_EXTRA`.
+- Gate 61 `make test-gpu-usb` repeats that scanout with
+  `-device qemu-xhci,id=xhci` from `GPU_USB_QEMU_EXTRA` and
+  `MACHINE_EXTRA='usb=off,i8042=off'`, hot-plugs a `usb-mouse` on
+  `xhci.0` over QMP and requires
+  `CRUGOS: usb controller ready (xhci, 8 port(s))` plus two
+  `CRUGOS: usb mouse move` reports before the same four pixels.
+  It pins the fix for a 64-bit BAR decode bug: `bar_hi = orig_hi & 0xfffff000u`
+  zeroed the `0xc0` high dword OVMF uses at `0xc000004000` when the
+  GPU occupies the low PCI window, so the driver mapped `0x4000`, logged
+  `CRUGOS: usb controller absent (reset timeout)` and left `make demo`'s
+  keyboard and mouse dead; the address now takes the high dword unmasked and
+  the size probe is built from both dwords.
 - Host tests add `tests/host/test_gpu.c` (command encoding, response
   classes, clipping, backing pages, display pick, damage merge): `make
   test-host` reports 8488 checks and `make size` a 347208 B (339 KiB) file
@@ -1919,7 +1931,7 @@ reachable until then.
   screendump is the only automated proof. See [gpu.md](gpu.md).
 - docs: `docs/gpu.md` is new and README, boot, build, workbench and
   versioning follow it.
-- All 60 gates pass at `v0.46.0`.
+- All 61 gates pass at `v0.46.0`.
 
 ## Bootable media - hybrid UEFI ISO (done, `v0.23.1`)
 

@@ -744,7 +744,9 @@ no firmware framebuffer exists and every pixel of the desktop came from the
 device; `scripts/run-gpu.py` takes a QMP `screendump` and asserts the desktop
 background, the amber shell title, the idle Workbench title and its frame
 before the guest exits 33. The Workbench still renders in software -- the
-device only carries the finished pixels. See [gpu.md](gpu.md).
+device only carries the finished pixels. Gate 61 `make test-gpu-usb` repeats
+it with a hotplugged `usb-mouse` on an xHCI controller and proves the
+keyboard and mouse path that the 64-bit BAR fix repaired. See [gpu.md](gpu.md).
 
 ## The event queue
 

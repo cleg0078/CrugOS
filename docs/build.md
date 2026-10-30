@@ -50,6 +50,7 @@ make test-pkg    # install, update and remove a signed package and refuse the du
 make test-caps   # launch the installed bundle and prove its capability wall
 make test-workbench-pkg  # install, remove and reinstall a signed package from the Workbench
 make test-gpu    # boot on a virtio-gpu scanout and verify the GPU-backed desktop
+make test-gpu-usb  # scanout plus a hotplugged USB mouse above 4 GiB
 make test-hardening  # boot crafted superblock/inode/crypt images and assert the rejections
 make test-heap   # corrupt the kernel heap and prove the integrity checker catches it
 make test-trap   # inject eight crafted faults and check the report, IST and panic
@@ -205,6 +206,7 @@ options` prints the complete resolved set (including paths derived from
 | `GPU_WB_WAIT` | `30` | seconds the GPU gate boots with `wb.wait=` so the desktop is ready before the screendump |
 | `GPU_RUN_TIMEOUT_SEC` | `300` | wall-clock budget for `make test-gpu` |
 | `GPU_QEMU_EXTRA` | `-vga none -device virtio-gpu-pci,id=gpu0` | extra QEMU arguments for the GPU gate; the VGA adapter must be absent so the desktop really draws into the virtio-gpu resource |
+| `GPU_USB_QEMU_EXTRA` | `-vga none -device virtio-gpu-pci,id=gpu0 -device qemu-xhci,id=xhci` | extra QEMU arguments for `make test-gpu-usb`, which adds the xHCI controller the 64-bit BAR fix repairs |
 | `HARDEN_TIMEOUT_SEC` | `120` | wall-clock budget in seconds for each crafted image booted by `make test-hardening` |
 | `EXPECT_HEAP` | `no` | `yes` requires the heap stress, guard and check markers written by `make test-heap` |
 | `EXPECT_USER` | `no` | `yes` requires the `user hello` / `user badptr blocked (EFAULT)` / `user fault killed tid` / `user selftest ok` markers written by `make test-user`; any other gate fails if a `user selftest ok` line appears |
@@ -1055,6 +1057,22 @@ budget: on this host, whose vvfat ESP is the slow part, a boot report reads
 `boot   : ... total=426189 us`, so the 250 ms present contract is not
 measured here. The wait is `GPU_WB_WAIT` (30 s) and the budget is
 `GPU_RUN_TIMEOUT_SEC` (300 s).
+
+`make test-gpu-usb` is gate 61: it repeats the same scanout with
+`-device qemu-xhci,id=xhci` from `GPU_USB_QEMU_EXTRA`,
+`MACHINE_EXTRA='usb=off,i8042=off'` and the same
+`wb.enable`/`wb.wait`/`gpu.enable`/`gpu.test` cmdline plus
+`usb.mouse=30 usb.moves=2`. `scripts/run-gpu.py` takes its `--usb` leg,
+which hot-plugs a `usb-mouse` on the `xhci.0` bus over QMP
+(`device_add`, a `qom-list` resolve, then `input-send-event` relative
+moves). The guest must print the controller, mouse-ready and two move lines,
+the driver prints `gpu: usb controller ready, 2 pointer move(s)` and an
+`ok:` summary naming the USB mouse with the same transfer and flush counters,
+then runs the same `boot-check.py --expect-gpu=yes` and `check-disk.py`.
+The gate exists because the xHCI 64-bit BAR decode used to mask the high dword
+and map `0x4000` instead of `0xc000004000` whenever the GPU occupied the
+low PCI window; without a GPU OVMF leaves the BAR unassigned, which is why the
+earlier USB gates passed. See [gpu.md](gpu.md). The suite is now 61 gates.
 
 ## Interactive demo
 

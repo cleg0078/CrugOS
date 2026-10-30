@@ -18,8 +18,9 @@ scanout, and a present path that tells the host what changed.
 The software path is not replaced, it is fronted. With no virtio-gpu device,
 with `gpu.enable=0`, or after any driver failure, the kernel keeps booting on
 the GOP framebuffer exactly as it did in phase 7C. All 59 earlier gates still
-boot that way and are unchanged. `make test-gpu` is the 60th gate and the
-only one that boots a GPU.
+boot that way and are unchanged. `make test-gpu` is gate 60 and
+`make test-gpu-usb` is gate 61; those two are the only gates that boot a
+GPU.
 
 ## Why a GPU path
 
@@ -193,7 +194,7 @@ The self-test line's counters are the ones `make test-gpu` asserts.
 
 ## The gate
 
-`make test-gpu` is gate 60. It is the only gate that boots without any
+`make test-gpu` is gate 60 of 61. It is the only gate that boots without any
 firmware framebuffer: the QEMU command line is
 `-vga none -device virtio-gpu-pci,id=gpu0`, so the GOP has no adapter to bind
 and the virtio-gpu resource is the machine's only display. A screendump of the
@@ -257,6 +258,87 @@ That total is roughly twice a GOP gate's, because the storage phase under this
 host's vvfat ESP dominates it and the GPU leg adds no firmware graphics
 protocol to wait for. The 250 ms boot contract is a separate measurement on the
 GOP path and is not checked here.
+
+### The 64-bit BAR bug
+
+Gate 60 as first written could not see this bug. With no virtio-gpu device
+OVMF leaves the xHCI BAR unassigned and the kernel assigns `0xffb00000` below
+4 GiB. Add `virtio-gpu-pci` and OVMF moves the controller to
+`0xc000004000`, above 4 GiB. The driver decoded the 64-bit BAR like this:
+
+```
+bar_hi = orig_hi & 0xfffff000u;
+```
+
+That mask keeps only the high dword's page frame and zeroes the rest, so for
+`0xc000004000` the address collapses to `0x4000`: the kernel mapped
+physical `0x4000`, the low identity page that still holds the real-mode
+IVT and BDA, instead of the controller. Reads of USBCMD and USBSTS returned
+whatever those bytes happened to be, HCRST never cleared, and the boot printed
+`CRUGOS: usb controller absent (reset timeout)`. The visible symptom was
+`make demo` with the new `DEMO_GPU=1` default: the desktop appeared on
+the virtio-gpu scanout but the keyboard and mouse were dead, because the
+input controller had never been mapped.
+
+The fix uses the high dword unmasked for the address and rebuilds the
+all-ones size probe from both dwords:
+
+```
+mask = (u64)(pci_read32(0x10) & 0xfffffff0u);
+if (is64) mask |= (u64)pci_read32(0x14) << 32;
+else      mask |= 0xffffffff00000000ull;
+size = ~mask + 1;   /* clamped to [4 KiB, 64 KiB] */
+```
+
+### Gate 61: scanout plus a hotplugged mouse
+
+`make test-gpu-usb` repeats the scanout boot with an xHCI controller
+present, which is the configuration the BAR bug hid in. The device flags come
+from `GPU_USB_QEMU_EXTRA`, which defaults to `GPU_QEMU_EXTRA` plus
+`-device qemu-xhci,id=xhci`, and the boot uses
+`MACHINE_EXTRA='usb=off,i8042=off'` so the firmware's own USB stack is off
+and there is no PS/2 controller to fall back on:
+
+```
+-vga none -device virtio-gpu-pci,id=gpu0 -device qemu-xhci,id=xhci
+```
+
+The guest command line is
+`wb.enable=1 wb.wait=30 gpu.enable=1 gpu.test=1 usb.mouse=30 usb.moves=2`:
+the desktop plus the existing input window, which polls for up to 30 seconds
+and wants two pointer moves. `scripts/run-gpu.py` grew a `--usb` leg
+that hot-plugs a `usb-mouse` on the `xhci.0` bus over QMP: it sends
+`device_add`, resolves the new device's QOM path with `qom-list`, then
+moves the pointer with `input-send-event` relative events. The gate
+requires two pointer reports before it accepts the same four pixel samples as
+gate 60, so a controller that mapped but never delivered input fails:
+
+```
+gpu: usb controller ready, 2 pointer move(s)
+gpu: device gpu0 screendump 1280x800
+gpu: desktop background pixel (1200, 700) -> ((16, 32, 48),)
+gpu: shell title bar pixel (600, 306) -> ((255, 176, 0),)
+gpu: workbench title bar pixel (200, 96) -> ((128, 128, 128),)
+gpu: workbench frame pixel (80, 150) -> ((255, 255, 255),)
+ok: virtio-gpu scanout 1280x800 with the USB mouse (2 move(s), 13 transfer(s),
+13 flush(es), exit 33)
+```
+
+The guest side shows the same path over serial:
+
+```
+CRUGOS: usb controller ready (xhci, 8 port(s))
+CRUGOS: usb device 0627:0001 on port 5 (speed 3)
+CRUGOS: usb mouse ready (endpoint 0x81, 4 byte reports)
+CRUGOS: usb mouse move dx=3 dy=0
+CRUGOS: usb mouse move dx=-6 dy=0
+CRUGOS: usb selftest ok (0 key(s), 2 pointer event(s))
+```
+
+`scripts/boot-check.py` needed no change: gate 61 calls it with
+`--expect-gpu=yes` exactly like gate 60, so the flag surface and every
+earlier gate's argument order are unchanged. The descriptor `0627:0001` is
+QEMU's `usb-mouse`, and it arrives on port 5 of the xHCI's eight ports.
 
 ## Failure modes
 

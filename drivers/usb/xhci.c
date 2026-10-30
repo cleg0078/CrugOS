@@ -1398,16 +1398,20 @@ int usb_init(void)
     is64 = ((bar >> 1) & 0x3u) == 0x2u;
     if (is64) {
         orig_hi = pci_bar(bus, dev, fn, 1);
-        bar_hi = orig_hi & 0xfffff000u;
+        /* The high dword of a 64-bit BAR carries address bits only: OVMF
+           places the controller above 4 GiB (0xc000004000 reads back as
+           lo=0x4000 hi=0xc0), so masking 0xfffff000 here would drop the
+           address and map the low identity page instead of the device. */
+        bar_hi = orig_hi;
     }
     pa = ((u64)bar_hi << 32) | (u64)(bar & 0xfffff000u);
 
     pci_write32(bus, dev, fn, 0x10, 0xffffffffu);
     if (is64)
         pci_write32(bus, dev, fn, 0x14, 0xffffffffu);
-    mask = (u64)(pci_read32(bus, dev, fn, 0x10) & 0xfffff000u);
+    mask = (u64)(pci_read32(bus, dev, fn, 0x10) & 0xfffffff0u);
     if (is64)
-        mask |= ((u64)(pci_read32(bus, dev, fn, 0x14) & 0xfffff000u)) << 32;
+        mask |= ((u64)pci_read32(bus, dev, fn, 0x14)) << 32;
     else
         mask |= 0xffffffff00000000ull;
     pci_write32(bus, dev, fn, 0x10, bar);

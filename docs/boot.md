@@ -1058,10 +1058,27 @@ flush counters and prints
 `ok: virtio-gpu scanout 1280x800 (13 transfer(s), 13 flush(es), exit 33)`.
 The run then calls `scripts/boot-check.py --expect-gpu=yes` (a flag, so the
 positional expectations are unchanged) and `scripts/check-disk.py`, and the
-knobs are `GPU_WB_WAIT` (30), `GPU_RUN_TIMEOUT_SEC` (300) and
-`GPU_QEMU_EXTRA`. The GPU gate asserts no boot-time budget: a `make test` boot
-report read `total=426189 us` on this host's vvfat ESP, and the 250 ms
-contract is not measured here. See [gpu.md](gpu.md) and [build.md](build.md).
+knobs are `GPU_WB_WAIT` (30), `GPU_RUN_TIMEOUT_SEC` (300),
+`GPU_QEMU_EXTRA` and, for gate 61, `GPU_USB_QEMU_EXTRA`. The GPU gate asserts
+no boot-time budget: a `make test` boot report read `total=426189 us` on this
+host's vvfat ESP, and the 250 ms contract is not measured here. See
+[gpu.md](gpu.md) and [build.md](build.md).
+
+`make test-gpu-usb` (gate 61) is the same boot plus `-device qemu-xhci,id=xhci`
+from `GPU_USB_QEMU_EXTRA` and `MACHINE_EXTRA='usb=off,i8042=off'`, with
+`usb.mouse=30 usb.moves=2` added to the command line. It exists because with
+the GPU device present OVMF places the xHCI BAR at `0xc000004000`, above
+4 GiB: the old 64-bit BAR decode (`bar_hi = orig_hi & 0xfffff000u`) zeroed
+the high dword, mapped `0x4000` instead of the controller and printed
+`CRUGOS: usb controller absent (reset timeout)` with a dead keyboard and
+mouse. Without a GPU OVMF leaves the BAR unassigned and the kernel's own
+`0xffb00000` assignment is used, which is why every earlier USB gate saw
+the working path. The gate hot-plugs a `usb-mouse` over QMP and requires
+`CRUGOS: usb controller ready (xhci, 8 port(s))`,
+`CRUGOS: usb mouse ready (endpoint 0x81, 4 byte reports)` and two
+`CRUGOS: usb mouse move` lines before the same four pixels, the same
+`--expect-gpu=yes` boot-check and the same disk check as gate 60. See
+[gpu.md](gpu.md).
 
 The `audio` lines appear only on machines with a USB audio function: a default
 `q35` boot prints `CRUGOS: audio device absent`, while `make test-audio` adds

@@ -94,7 +94,8 @@ gained a `pkg` builtin. Phase 8A gives the kernel a display device: a
 virtio-gpu-pci function on the modern virtio-pci transport creates one 2D
 resource with contiguous backing pages, attaches it as the scanout, and
 presents the desktop as damage rectangles, while the firmware framebuffer
-remains the fallback; `make test-gpu` is the 60th gate.
+remains the fallback; `make test-gpu` is gate 60 and `make test-gpu-usb` is
+gate 61, which repeats the scanout with a hotplugged USB mouse above 4 GiB.
 
 ```
 OVMF -> BOOTX64.EFI (CrugOS UEFI loader) -> kernel.elf -> serial + framebuffer
@@ -545,7 +546,8 @@ Phase 6A starts the Workbench: a small software window manager in the kernel.
   `DEMO_GPU_QEMU_EXTRA` adds `-vga none -device virtio-gpu-pci,id=gpu0`, so the
   boot log starts with `CRUGOS: virtio-gpu ready (1024x768, 768 backing
   page(s), resource 1, modern pci)` and `CRUGOS: gpu scanout ok`; `DEMO_GPU=0`
-  drops both and boots the software framebuffer instead. See
+  drops both and boots the software framebuffer instead; with `DEMO_GPU=1` the
+  keyboard and mouse stay alive because of the xHCI 64-bit BAR fix. See
   [build.md](docs/build.md).
 
 Phase 6D makes the windows resizable and gives the keyboard work of its own.
@@ -1572,13 +1574,27 @@ of staying silent;
 virtio-gpu-pci,id=gpu0`), so the resource is the machine's only display, and
 asserts four pixel colours plus amber and frame colour counts from a QMP
 screendump of `gpu0` and the self-test's transfer and flush counters;
+- `make test-gpu-usb` (gate 61) boots the same scanout with
+`-device qemu-xhci,id=xhci`, `MACHINE_EXTRA='usb=off,i8042=off'` and
+`usb.mouse=30 usb.moves=2`, hotplugs a `usb-mouse` on the `xhci.0` bus over
+QMP (`device_add`, a `qom-list` resolve and `input-send-event` relative
+moves) and requires two pointer reports before it accepts the same four pixels;
+- the xHCI 64-bit BAR decode was fixed: `drivers/usb/xhci.c` used to take
+`bar_hi = orig_hi & 0xfffff000u`, which zeroed the `0xc0` high dword that
+QEMU and OVMF program at `0xc000004000` when the GPU occupies the low PCI
+window, so the kernel mapped physical `0x4000` (the real-mode IVT/BDA) and
+logged `CRUGOS: usb controller absent (reset timeout)`; it now uses the high
+dword unmasked for the address and builds the all-ones size probe from both
+dwords, clamped to [4 KiB, 64 KiB]. Without a GPU OVMF leaves the BAR
+unassigned and the kernel assigns `0xffb00000`, which is why no earlier gate
+saw the bug;
 - there is no 3D yet: no virglrenderer, no Vulkan, no command stream and no
 accelerated triangle, which is what a future phase 8B is for;
 - `tests/host/test_gpu.c` covers the pure helpers (command encoding, response
 classes, rectangle clipping, backing-page arithmetic, display pick and damage
 merge), so `make test-host` reports 8488 checks; `make size` reports a 347208 B
 (339 KiB) kernel file and a 994626 B (971 KiB) load image (`.text` 248230 B,
-`.rodata` 37696 B, `.data` 92 B, `.bss` 708608 B), and all 60 gates pass.
+`.rodata` 37696 B, `.data` 92 B, `.bss` 708608 B), and all 61 gates pass.
 
 See [docs/gpu.md](docs/gpu.md) for the transport, the resource, the present
 model and the failure lines.
@@ -1792,7 +1808,10 @@ virtio-gpu-pci,id=gpu0`), which leaves no firmware framebuffer at all, and
 `DEMO_GPU_SIZE=1024x768` becomes `gpu.size=` on the command line, so the log
 starts with `CRUGOS: virtio-gpu ready (1024x768, 768 backing page(s), resource
 1, modern pci)` and `CRUGOS: gpu scanout ok (1024x768, 1 transfer(s), 1
-flush(es))`. Set `DEMO_GPU=0` to drop the device and the `gpu.enable=`/`gpu.size=`
+flush(es))`. With the device present OVMF places the xHCI BAR above 4 GiB, so
+the demo's keyboard and mouse only work because of the 64-bit BAR fix: the old
+decode logged `CRUGOS: usb controller absent (reset timeout)` and left both dead.
+Set `DEMO_GPU=0` to drop the device and the `gpu.enable=`/`gpu.size=`
 tokens and boot the firmware framebuffer. The default `DEMO_CMDLINE` switches
 every desktop feature on at once --
 `wb.desk=1` for the `System:` object, `wb.dr=1 wb.dsel=1` for its drawer (filled
@@ -1881,6 +1900,7 @@ make test-pkg    # install, update and remove a signed package and refuse a dupl
 make test-caps   # launch the installed bundle and prove its capability wall
 make test-workbench-pkg  # install, remove and reinstall a signed package from the Workbench
 make test-gpu    # boot on a virtio-gpu scanout and verify the GPU-backed desktop
+make test-gpu-usb  # scanout plus a hotplugged USB mouse above 4 GiB
 make test-hardening  # craft hostile superblock/inode/crypt images and boot them
 make test-heap   # corrupt the kernel heap and prove the integrity checker catches it
 make test-trap   # inject eight crafted faults and check the report, IST and panic
@@ -1939,7 +1959,7 @@ variables include `MEMORY_MB`, `SMP`, `TIMEOUT_SEC`, `QEMU_CPU`, `QEMU_ACCEL`,
 `WB_SCREEN_ACTS`, `WB_SCREEN_RUN_TIMEOUT_SEC`, `WB_CX_WAIT`, `WB_CX_ACTS`,
 `WB_CX_RUN_TIMEOUT_SEC`, `WB_APP_WAIT`, `WB_APP_ACTS`,
 `WB_APP_RUN_TIMEOUT_SEC`, `WB_PKG_WAIT`, `WB_PKG_RUN_TIMEOUT_SEC`,
-`GPU_WB_WAIT`, `GPU_RUN_TIMEOUT_SEC`, `GPU_QEMU_EXTRA`,
+`GPU_WB_WAIT`, `GPU_RUN_TIMEOUT_SEC`, `GPU_QEMU_EXTRA`, `GPU_USB_QEMU_EXTRA`,
 `MKPKG`, `PKG_DATA_DIR`, `PKG_SEED`, `PKG_BAD_SEED`, `PKG_RUN_TIMEOUT_SEC`,
 `CAPS_RUN_TIMEOUT_SEC`, `HARDEN_TIMEOUT_SEC`,
 `HEAP_STRESS_OPS`, `HEAP_RUN_TIMEOUT_SEC`, `TRAP_TIMEOUT_SEC`, `FUZZ_CASES`,

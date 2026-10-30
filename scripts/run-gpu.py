@@ -9,6 +9,10 @@ every Workbench pixel in the QMP screendump travelled through
 TRANSFER_TO_HOST_2D plus RESOURCE_FLUSH. A screendump of the gpu0 device then
 proves the compositor really ran on the GPU scanout.
 
+With --usb the run also adds a qemu-xhci controller, hotplugs a USB mouse and
+requires pointer motion; that covers the 64-bit BAR decode, because OVMF
+places the controller above 4 GiB whenever the virtio-gpu is present.
+
 usage: run-gpu.py --disk IMG --serial-log LOG --exit-code FILE [options]
 """
 
@@ -27,6 +31,9 @@ SCANOUT = b"CRUGOS: gpu scanout ok"
 DESKTOP = b"CRUGOS: wb desktop ready"
 GPU_OK = b"CRUGOS: gpu selftest ok"
 WB_OK = b"CRUGOS: wb selftest ok"
+USB_CTRL = b"CRUGOS: usb controller ready (xhci"
+USB_MOUSE = b"CRUGOS: usb mouse ready"
+USB_MOVE = b"CRUGOS: usb mouse move"
 
 SCANOUT_RE = re.compile(r"CRUGOS: gpu scanout ok \((\d+)x(\d+), (\d+) transfer\(s\)")
 GPU_OK_RE = re.compile(
@@ -107,6 +114,35 @@ class Qmp:
         except OSError as exc:
             raise RuntimeError("QEMU monitor closed: %s" % exc) from exc
 
+    def device_add(self, driver, ident, bus):
+        # The controller is created with id=xhci, so its bus is xhci.0.
+        self._cmd({"execute": "device_add",
+                   "arguments": {"driver": driver, "id": ident,
+                                 "bus": bus}})
+
+    def resolve_device(self, ident):
+        # A device on a USB bus lands below /machine/periph/xhci.0 rather
+        # than at /machine/peripheral; ask qom where it went.
+        for parent in ("/machine/peripheral", "/machine/periph/xhci.0",
+                       "/machine/periph"):
+            try:
+                reply = self._cmd({"execute": "qom-list",
+                                   "arguments": {"path": parent}})
+            except RuntimeError:
+                continue
+            for child in reply["return"]:
+                if child.get("name") == ident:
+                    return parent.rstrip("/") + "/" + ident
+        return None
+
+    def move(self, axis, value):
+        # i8042=off and usb=off leave the hotplugged mouse as the only
+        # pointer handler, so a broadcast event reaches it.
+        self._cmd({"execute": "input-send-event",
+                   "arguments": {"events": [
+                       {"type": "rel", "data": {"axis": axis,
+                                                "value": value}}]}})
+
     def close(self):
         try:
             self.file.close()
@@ -174,10 +210,16 @@ def main():
     ap.add_argument("--device", default="gpu0")
     ap.add_argument("--qemu-extra",
                     default="-vga none -device virtio-gpu-pci,id=gpu0")
+    ap.add_argument("--usb", action="store_true",
+                    help="also hotplug a USB mouse with a 64-bit BAR")
+    ap.add_argument("--moves", type=int, default=2)
+    ap.add_argument("--hotplug-timeout", type=float, default=30.0)
     args = ap.parse_args()
 
     if args.wb_wait < 1 or args.wb_wait > 120:
         return fail("--wb-wait must be between 1 and 120")
+    if args.moves < 1 or args.moves > 16:
+        return fail("--moves must be between 1 and 16")
 
     serial_log = Path(args.serial_log).resolve()
     serial_log.parent.mkdir(parents=True, exist_ok=True)
@@ -192,11 +234,20 @@ def main():
     tmpdir = Path(tempfile.mkdtemp(prefix=".gpu.",
                                    dir=str(Path(args.disk).resolve().parent)))
     sock_path = str(tmpdir / "qmp.sock")
+    qemu_extra = args.qemu_extra
+    if args.usb and "qemu-xhci" not in qemu_extra:
+        qemu_extra += " -device qemu-xhci,id=xhci"
 
     # gpu.enable=1 forces the driver on; gpu.test=1 makes the selftest report
     # even when it would skip. wb.wait= gives the driver a window to take the
     # screendump while the desktop is complete and the guest is still alive.
     cmdline = "wb.enable=1 wb.wait=%d gpu.enable=1 gpu.test=1" % args.wb_wait
+    if args.usb:
+        # usb.mouse= opens the kernel poll window that catches a hotplug
+        # (usb_selftest loops usb_poll until the device and its reports
+        # arrive), and usb.moves= makes the guest require real motion.
+        cmdline += " usb.mouse=%d usb.moves=%d" % (int(args.hotplug_timeout),
+                                             args.moves)
     cmd = [
         args.make,
         "--no-print-directory",
@@ -209,10 +260,14 @@ def main():
         "SERIAL_LOG=" + str(serial_log),
         "QEMU_EXIT=" + str(exit_code_path),
         "QEMU_EXTRA=-qmp unix:%s,server=on,wait=off %s"
-        % (sock_path, args.qemu_extra),
+        % (sock_path, qemu_extra),
         "CMDLINE_EXTRA=" + cmdline,
         "TIMEOUT_SEC=" + str(int(args.run_timeout)),
     ]
+    if args.usb:
+        # usb=off and i8042=off leave the hotplugged mouse as the only
+        # pointer, exactly like the demo machine.
+        cmd.append("MACHINE_EXTRA=usb=off,i8042=off")
     print("gpu: starting " + " ".join(cmd))
     proc = subprocess.Popen(cmd, cwd=args.repo)
 
@@ -232,6 +287,32 @@ def main():
             return fail("guest never finished the GPU selftest")
 
         qmp = Qmp(sock_path)
+        if args.usb:
+            # With the virtio-gpu present OVMF puts the xHCI 64-bit BAR at
+            # 0xc000004000; a masked high dword used to map the low identity
+            # page, so the controller never reset and no mouse appeared.
+            if not wait_for(serial_log, USB_CTRL, 1, proc, args.boot_timeout):
+                return fail("the xHCI controller never came up")
+            qmp.device_add("usb-mouse", "mouse0", "xhci.0")
+            qmp.resolve_device("mouse0")
+            if not wait_for(serial_log, USB_MOUSE, 1, proc,
+                            args.hotplug_timeout):
+                return fail("the hotplugged USB mouse was never enumerated")
+            moves = 0
+            attempt = 0
+            while moves < args.moves and attempt < 10:
+                if proc.poll() is not None:
+                    break
+                attempt += 1
+                qmp.move("x", 3 * attempt if attempt % 2 else -3 * attempt)
+                want = read_log(serial_log).count(USB_MOVE) + 1
+                if not wait_for(serial_log, USB_MOVE, want, proc, 10.0):
+                    break
+                moves = read_log(serial_log).count(USB_MOVE)
+                time.sleep(0.15)
+            if moves < 1:
+                return fail("the USB mouse never reported pointer motion")
+            print("gpu: usb controller ready, %d pointer move(s)" % moves)
         shot = tmpdir / "gpu.ppm"
         qmp.screendump(shot, args.device)
         width, height, _ = read_ppm(shot)
@@ -298,6 +379,11 @@ def main():
     if transfers < 2 or flushes < 2:
         return fail("the GPU selftest transferred too little: %d/%d"
                     % (transfers, flushes))
+    if args.usb:
+        print("ok: virtio-gpu scanout %dx%d with the USB mouse (%d move(s), "
+              "%d transfer(s), %d flush(es), exit %d)"
+              % (want_w, want_h, moves, transfers, flushes, status))
+        return 0
     print("ok: virtio-gpu scanout %dx%d (%d transfer(s), %d flush(es), exit %d)"
           % (want_w, want_h, transfers, flushes, status))
     return 0
